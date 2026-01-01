@@ -1,0 +1,89 @@
+plugins {
+  id 'java-library'
+  id 'maven-publish'
+}
+
+group = 'me.hanju'
+version = '0.1.0'
+description = 'Enhanced OpenAI-compatible Chat Completion client with streaming and citation support'
+
+java {
+  toolchain { languageVersion = JavaLanguageVersion.of(21) }
+  withSourcesJar()
+  withJavadocJar()
+}
+
+repositories {
+  mavenCentral()
+  maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+  implementation 'com.github.agent-hanju:content-stream-adapter:0.1.4'
+  implementation 'com.github.agent-hanju:fluxhandle:0.2.0'
+
+  compileOnly 'org.springframework:spring-webflux:6.2.6'
+  compileOnly 'com.fasterxml.jackson.core:jackson-databind:2.18.4'
+  compileOnly 'org.slf4j:slf4j-api:2.0.17'
+  compileOnly 'org.projectlombok:lombok:1.18.38'
+  annotationProcessor 'org.projectlombok:lombok:1.18.38'
+
+  testImplementation 'com.github.agent-hanju:content-stream-adapter:0.1.4'
+  testImplementation 'com.github.agent-hanju:fluxhandle:0.2.0'
+  testImplementation 'org.springframework:spring-webflux:6.2.6'
+  testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.4'
+  testImplementation 'org.junit.jupiter:junit-jupiter:5.12.2'
+  testImplementation 'org.assertj:assertj-core:3.27.3'
+  testImplementation 'io.projectreactor.netty:reactor-netty-http:1.2.5'
+  testCompileOnly 'org.projectlombok:lombok:1.18.38'
+  testAnnotationProcessor 'org.projectlombok:lombok:1.18.38'
+  testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.2'
+  testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.17'
+}
+tasks.withType(JavaCompile).configureEach {
+  options.encoding = 'UTF-8'
+}
+
+tasks.withType(Javadoc).configureEach {
+  options.encoding = 'UTF-8'
+  options.addStringOption('Xdoclint:none', '-quiet')
+}
+
+test {
+  useJUnitPlatform()
+  testLogging {
+    events "passed", "skipped", "failed"
+    showStandardStreams = true
+  }
+}
+
+publishing {
+  publications {
+    maven(MavenPublication) {
+      from components.java
+      pom {
+        name = project.name
+        description = project.description
+        url = 'https://github.com/agent-hanju/enhanced-completion-client'
+        licenses {
+          license {
+            name = 'MIT License'
+            url = 'https://opensource.org/licenses/MIT'
+          }
+        }
+        developers {
+          developer {
+            id = 'agent-hanju'
+            name = 'hanju'
+            email = 'agent.hanju@gmail.com'
+          }
+        }
+        scm {
+          connection = 'scm:git:git://github.com/agent-hanju/enhanced-completion-client.git'
+          developerConnection = 'scm:git:ssh://github.com/agent-hanju/enhanced-completion-client.git'
+          url = 'https://github.com/agent-hanju/enhanced-completion-client'
+        }
+      }
+    }
+  }
+}
