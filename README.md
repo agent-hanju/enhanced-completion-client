@@ -20,7 +20,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.agent-hanju:enhanced-completion-client:0.1.0'
+    implementation 'com.github.agent-hanju:enhanced-completion-client:0.1.1'
 }
 ```
 
@@ -37,7 +37,7 @@ dependencies {
 <dependency>
     <groupId>com.github.agent-hanju</groupId>
     <artifactId>enhanced-completion-client</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
 </dependency>
 ```
 
@@ -131,6 +131,36 @@ EnhancedCompletionRequest request = EnhancedCompletionRequest.builder()
     .build();
 ```
 
+### Tool Use
+
+```java
+import me.hanju.enhancedcompletion.payload.message.BaseMessage;
+import me.hanju.enhancedcompletion.payload.message.ToolMessage;
+import me.hanju.enhancedcompletion.payload.message.ResponseMessage;
+
+// 1. Tool 호출을 포함한 응답 수신
+EnhancedCompletionResponse response = client.complete(request);
+ResponseMessage assistantMessage = response.getChoices().get(0).getMessage();
+
+if (assistantMessage.getToolCalls() != null) {
+    List<IMessageable> messages = new ArrayList<>(request.getMessages());
+    messages.add(assistantMessage);
+
+    // 2. 각 Tool 호출에 대한 결과 추가
+    for (ToolCall toolCall : assistantMessage.getToolCalls()) {
+        String result = executeToolCall(toolCall);  // Tool 실행
+        messages.add(ToolMessage.of(toolCall.getId(), result));
+    }
+
+    // 3. Tool 결과와 함께 후속 요청
+    EnhancedCompletionRequest followUp = request.toBuilder()
+        .messages(messages)
+        .build();
+
+    EnhancedCompletionResponse finalResponse = client.complete(followUp);
+}
+```
+
 ## Message Types
 
 ### 기본 제공 메시지 타입
@@ -138,6 +168,7 @@ EnhancedCompletionRequest request = EnhancedCompletionRequest.builder()
 | 타입 | 설명 |
 |------|------|
 | `BaseMessage` | 기본 메시지 (role, content) |
+| `ToolMessage` | Tool 호출 결과 메시지 (tool_call_id 필수, role은 "tool"로 고정) |
 | `AttachedMessage` | 문서 첨부 메시지 (documents 포함) |
 | `ResponseMessage` | LLM 응답 메시지 (reasoning, tool_calls 포함) |
 | `CitedMessage` | 인용 정보가 포함된 응답 메시지 (citations 포함) |

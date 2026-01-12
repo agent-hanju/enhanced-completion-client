@@ -12,6 +12,7 @@ import me.hanju.enhancedcompletion.payload.completion.Message;
 @JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION, defaultImpl = BaseMessage.class)
 @JsonSubTypes({
     @JsonSubTypes.Type(value = BaseMessage.class),
+    @JsonSubTypes.Type(value = ToolMessage.class),
     @JsonSubTypes.Type(value = AttachedMessage.class),
     @JsonSubTypes.Type(value = ResponseMessage.class),
     @JsonSubTypes.Type(value = CitedMessage.class)

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'me.hanju'
-version = '0.1.0'
+version = '0.1.1'
 description = 'Enhanced OpenAI-compatible Chat Completion client with streaming and citation support'
 
 java {
