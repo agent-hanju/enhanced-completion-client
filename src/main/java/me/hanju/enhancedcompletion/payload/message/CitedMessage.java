@@ -23,7 +23,7 @@ import me.hanju.enhancedcompletion.payload.completion.Message;
 @SuperBuilder(toBuilder = true)
 @Getter
 @Setter
-@NoArgsConstructor(access = AccessLevel.PROTECTED)
+@NoArgsConstructor
 @AllArgsConstructor(access = AccessLevel.PROTECTED)
 @EqualsAndHashCode(callSuper = true)
 @ToString(callSuper = true)

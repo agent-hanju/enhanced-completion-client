@@ -16,23 +16,28 @@ import lombok.Setter;
 import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 import me.hanju.enhancedcompletion.payload.message.ResponseMessage;
+import me.hanju.streambind.annotation.StreamOverwrite;
 
 /**
  * OpenAI Chat Completion API 응답 기본 객체.
  *
  * @param <T> 응답 메시지 타입
  */
-@SuperBuilder
+@SuperBuilder(toBuilder = true)
 @Getter
 @Setter
-@NoArgsConstructor(access = AccessLevel.PROTECTED)
+@NoArgsConstructor
 @AllArgsConstructor(access = AccessLevel.PROTECTED)
 @JsonIgnoreProperties(ignoreUnknown = true)
 public abstract class BaseCompletionResponse<T extends ResponseMessage> {
 
+  @StreamOverwrite
   private String id;
+  @StreamOverwrite
   private String object;
+  @StreamOverwrite
   private Long created;
+  @StreamOverwrite
   private String model;
   private List<Choice<T>> choices;
   private Usage usage;
@@ -45,7 +50,7 @@ public abstract class BaseCompletionResponse<T extends ResponseMessage> {
   @Builder
   @Getter
   @Setter
-  @NoArgsConstructor(access = AccessLevel.PACKAGE)
+  @NoArgsConstructor
   @AllArgsConstructor(access = AccessLevel.PRIVATE)
   @EqualsAndHashCode
   @ToString
@@ -55,6 +60,7 @@ public abstract class BaseCompletionResponse<T extends ResponseMessage> {
     private T message;
     private T delta;
 
+    @StreamOverwrite
     @JsonProperty("finish_reason")
     @JsonAlias({ "finish_reason", "finishReason" })
     private String finishReason;
@@ -66,7 +72,7 @@ public abstract class BaseCompletionResponse<T extends ResponseMessage> {
   @Builder
   @Getter
   @Setter
-  @NoArgsConstructor(access = AccessLevel.PACKAGE)
+  @NoArgsConstructor
   @AllArgsConstructor(access = AccessLevel.PRIVATE)
   @EqualsAndHashCode
   @ToString

@@ -18,6 +18,7 @@ import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 import me.hanju.enhancedcompletion.payload.completion.Message;
 import me.hanju.enhancedcompletion.payload.completion.ToolCall;
+import me.hanju.streambind.annotation.StreamOverwrite;
 
 /**
  * LLM 응답 메시지.
@@ -37,6 +38,7 @@ import me.hanju.enhancedcompletion.payload.completion.ToolCall;
 })
 public class ResponseMessage implements IMessageable {
 
+  @StreamOverwrite
   private String role;
   private String content;
 

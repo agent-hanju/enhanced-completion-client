@@ -11,6 +11,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.experimental.SuperBuilder;
+import me.hanju.enhancedcompletion.spi.augment.Augmenter;
 import me.hanju.enhancedcompletion.payload.message.IMessageable;
 
 /**
@@ -22,6 +23,13 @@ import me.hanju.enhancedcompletion.payload.message.IMessageable;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class EnhancedCompletionRequest extends BaseCompletionRequest<IMessageable> {
+
+  /**
+   * RAG Augmenter (선택적).
+   * null이면 RAG 없이 일반 Completion 수행.
+   */
+  @JsonIgnore
+  private Augmenter augmenter;
 
   @JsonIgnore
   public ChatCompletionRequest toChatCompletionRequest() {

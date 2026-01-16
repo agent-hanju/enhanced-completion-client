@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'me.hanju'
-version = '0.1.1'
+version = '0.2.0'
 description = 'Enhanced OpenAI-compatible Chat Completion client with streaming and citation support'
 
 java {
@@ -20,7 +20,8 @@ repositories {
 
 dependencies {
   implementation 'com.github.agent-hanju:content-stream-adapter:0.1.4'
-  implementation 'com.github.agent-hanju:fluxhandle:0.2.0'
+  implementation 'com.github.agent-hanju:fluxhandle:0.4.1'
+  implementation 'com.github.agent-hanju:streambind:0.0.1-SNAPSHOT'
 
   compileOnly 'org.springframework:spring-webflux:6.2.6'
   compileOnly 'com.fasterxml.jackson.core:jackson-databind:2.18.4'
@@ -29,12 +30,14 @@ dependencies {
   annotationProcessor 'org.projectlombok:lombok:1.18.38'
 
   testImplementation 'com.github.agent-hanju:content-stream-adapter:0.1.4'
-  testImplementation 'com.github.agent-hanju:fluxhandle:0.2.0'
+  testImplementation 'com.github.agent-hanju:fluxhandle:0.4.1'
+  testImplementation 'com.github.agent-hanju:streambind:0.0.1-SNAPSHOT'
   testImplementation 'org.springframework:spring-webflux:6.2.6'
   testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.4'
   testImplementation 'org.junit.jupiter:junit-jupiter:5.12.2'
   testImplementation 'org.assertj:assertj-core:3.27.3'
   testImplementation 'io.projectreactor.netty:reactor-netty-http:1.2.5'
+  testImplementation 'org.springframework:spring-context:6.2.6'
   testCompileOnly 'org.projectlombok:lombok:1.18.38'
   testAnnotationProcessor 'org.projectlombok:lombok:1.18.38'
   testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.2'
