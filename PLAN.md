@@ -649,7 +649,57 @@ pytest + pytest-asyncio(auto) + pytest-cov. HTTP 목킹은 `respx`를 쓴다. ht
 
 # 4. 착수 순서
 
-## 0단계 — 실제 응답 원문 확보 (선행)
+## 0단계 — 실제 응답 원문 확보 (완료)
+
+로컬 `vllm-qwen3-8b` 컨테이너(`vllm/vllm-openai:v0.28.0-cu129`, `127.0.0.1:8000`)를 대상으로
+확인했다. 사내 LUXIA 서버(`172.16.100.200:14100`)는 이 시점에 닿지 않았고, `luxia-serving`의
+설정은 120B에 GPU 2장을 요구해 이 장비에서는 띄울 수 없다.
+
+| 항목 | 확인 결과 |
+|---|---|
+| 추론 필드 이름 | **`reasoning`**. `reasoning_content`가 아니다 |
+| 종료 표지 | `data: [DONE]` 있음 |
+| 이름 붙은 이벤트 | 없음. `data:`만 쓴다 |
+| `data:` 공백 | 항상 `data: ` (공백 있음) |
+| 선언 밖 필드 | `prompt_token_ids`, `prompt_text`, `token_ids`, `system_fingerprint`가 섞여 온다 |
+| tool call | `index`로 조각이 오고 `id`·`name`은 첫 조각에만 온다 |
+| `usage` | 기본으로 오지 않는다. `stream_options`로 요청해야 한다 |
+
+`common-hitl-chat`의 API 명세가 "reasoning parser가 분리한 최신 vLLM의 `reasoning`만
+reasoning event로 취급하며 `reasoning_content`와 inline `<think>` fallback은 지원하지 않는다"고
+적어둔 것과 일치한다. 어댑터는 둘 다 보지만 실제로 오는 것은 앞쪽이다.
+
+선언 밖 필드가 섞여 오는 것이 설계 판단을 뒷받침한다. 허브 모델이 `extra="allow"`이고 어댑터가
+아는 필드만 읽으므로 무해하게 흘러간다. 엄격한 모델을 썼다면 첫 프레임에서 터졌을 자리다.
+
+**thinking 모델은 예산을 추론이 먼저 쓴다.** `max_tokens`를 작게 주면 `content`가 비고
+`stop_reason`이 `length`가 된다. 짧은 답을 받으려면 vLLM 전용 확장
+`chat_template_kwargs={"enable_thinking": false}`가 필요하다. 같은 필드를 OpenAI에 보내면 요청이
+통째로 400으로 거절되므로, 벤더가 둘 이상이 되면 `LlmDialect`에 해당하는 판단을 어댑터가
+가져야 한다.
+
+**인용 태그 문법은 모델이 정하지 않는다.** 프롬프트에 어떤 태그를 쓰라고 지시하지 않으면 모델이
+입력 문서의 태그를 그대로 흉내낸다. 실측에서 `대한민국의 수도는 <document id="d1">서울</document>
+이다.`가 나왔다. 즉 이 문법은 우리가 고르는 것이고, 어휘가 프롬프트 지시와 파서 스키마를 함께
+들어야 한다. `Vocabulary`가 두 방향을 한 객체에 묶는 이유가 하나 더 늘었다.
+
+### 재현
+
+```bash
+curl -sN -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"안녕"}],
+       "stream":true,"max_tokens":8}' \
+  http://127.0.0.1:8000/v1/chat/completions
+```
+
+라이브 시험은 환경변수로만 돈다. 주소와 모델명을 코드에 넣지 않는다.
+
+```bash
+ECC_LIVE_BASE_URL=http://127.0.0.1:8000 ECC_LIVE_MODEL=qwen3-8b \
+  uv run pytest -m live -s
+```
+
+## 0단계 원본 절차 (참고)
 
 ```bash
 curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
@@ -693,13 +743,15 @@ curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
 | 패키지 이름 | 배포 `enhanced-completion-client`, 모듈 `enhanced_completion` |
 | 동기 API | 낸다. `SyncBridge`로 같은 모양 |
 | 사내 agent SSE | agent-studio 1.4.1 프론트 번들에서 확정. 2.2절 |
+| vLLM 응답 형태 | 로컬 qwen3-8b로 실측 확정. 4절 0단계 |
+| 추론 필드 이름 | `reasoning` |
 
 ## 남은 것
 
 | 항목 | 필요한 결정 | 막는 단계 |
 |---|---|---|
-| vLLM chat completions 실제 응답 | 0단계 덤프. reasoning 필드 이름과 인용 태그 문법 확인 | 1단계, 5단계 |
-| 인용 태그 문법 | 중첩(`<cite><id>`) 대 속성(`<cite id=>`) | 5단계 |
+| 인용 태그 문법 | 모델이 정하지 않으므로 우리가 고른다. 속성형(`<cite id=>`) 권장. 어휘가 프롬프트 지시도 함께 들어야 한다 | 5단계 |
+| 사내 LUXIA 실제 응답 | `172.16.100.200:14100`이 닿을 때 라이브 시험 재실행. qwen3-8b와 다른 점이 있는지 | 없음. 지금 구조로 대응 가능 |
 | agent SSE 페이로드 상세 | 이벤트 이름은 확정. 각 이벤트의 본문 필드 구성은 API 이미지(903 MB) 또는 실제 호출로 확인 | agent 어댑터 |
 | `sources` 이벤트 | cite 어휘와 같은 자리로 모을지, 별도 블록으로 둘지 | agent 어댑터 |
 | 챗 서버 Turn 스트림 소비 | 소비하면 재연결·스냅샷 폴백이 새 요구로 들어온다 | 범위 밖 항목 |
