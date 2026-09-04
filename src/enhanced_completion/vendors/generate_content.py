@@ -22,8 +22,10 @@ from typing import Any
 from ..blocks import (
     CitationBlock,
     ContentBlock,
+    ServerToolBlock,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
     VendorBlock,
 )
@@ -32,6 +34,7 @@ from ..hub import HubRequest, HubResponse, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
+from .parts import as_gemini_part
 
 __all__ = ["GenerateContentAdapter", "generate_content"]
 
@@ -42,16 +45,24 @@ _TEXT = "text"
 _FUNCTION_CALL = "functionCall"
 _FUNCTION_RESPONSE = "functionResponse"
 
+# 서버가 실행한 코드. 클라이언트가 결과를 되보내지 않는다.
+_SERVER_TOOL_FIELDS = ("executableCode", "codeExecutionResult")
+
 # 허브에 대응물이 없어 원본을 보존하는 Part 필드.
-_VENDOR_FIELDS = (
-    "inlineData",
-    "fileData",
-    "executableCode",
-    "codeExecutionResult",
-    "videoMetadata",
-)
+_VENDOR_FIELDS = ("inlineData", "fileData", "videoMetadata")
 
 _STOP_REASONS = {"STOP": "stop", "MAX_TOKENS": "length"}
+
+
+def _parse_args(raw: str) -> dict[str, Any]:
+    """도구 인수를 객체로. 이 API는 문자열이 아니라 객체를 요구한다."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class _ToHub:
@@ -142,7 +153,8 @@ class _ToHub:
         for key in ("groundingMetadata", "urlContextMetadata"):
             value = candidate.get(key)
             if isinstance(value, dict):
-                out.append(VendorBlock(type=key, raw=value, source=SOURCE))
+                # 서버가 검색을 돌린 결과다. 다른 벤더의 서버 도구와 같은 자리다.
+                out.append(ServerToolBlock(name=key, raw=value, source=SOURCE))
         ratings = candidate.get("safetyRatings")
         if isinstance(ratings, list) and ratings:
             out.append(VendorBlock(type="safetyRatings", raw={"ratings": ratings}, source=SOURCE))
@@ -170,6 +182,18 @@ class _ToHub:
             # 도구 결과는 요청 쪽 어휘다. 응답에서 오면 원본을 보존한다.
             return VendorBlock(type="function_response", raw=response, source=SOURCE)
 
+        for field in _SERVER_TOOL_FIELDS:
+            value = part.get(field)
+            if isinstance(value, dict):
+                return ServerToolBlock(
+                    name=field,
+                    input_json=json.dumps(value, ensure_ascii=False)
+                    if field == "executableCode"
+                    else "",
+                    output=str(value.get("output", "")) if field == "codeExecutionResult" else "",
+                    raw=value,
+                    source=SOURCE,
+                )
         for field in _VENDOR_FIELDS:
             value = part.get(field)
             if isinstance(value, dict):
@@ -242,15 +266,48 @@ class GenerateContentAdapter:
         system: list[str] = []
         contents: list[dict[str, Any]] = []
         for message in request.messages:
-            text = lowerer.lower_text(message.content)
+            # ``parts``는 리스트다. 텍스트 하나로 누르면 inlineData와 fileData를 실을 수 없다.
+            parts: list[dict[str, Any]] = []
+            plain: list[ContentBlock] = []
+            for block in message.content:
+                if isinstance(block, ToolResultBlock):
+                    # 도구 결과는 별개 Part다. 이름을 잃지 않으려면 호출 식별자를 쓴다.
+                    parts.append(
+                        {
+                            "functionResponse": {
+                                "name": block.tool_use_id,
+                                "response": {"result": block.content},
+                            }
+                        }
+                    )
+                    continue
+                if isinstance(block, ToolUseBlock):
+                    parts.append(
+                        {
+                            "functionCall": {
+                                "name": block.name,
+                                "args": _parse_args(block.input_json),
+                            }
+                        }
+                    )
+                    continue
+                part = as_gemini_part(block)
+                if part is not None:
+                    parts.append(part)
+                else:
+                    plain.append(block)
+
+            text = lowerer.lower_text(plain)
             if message.role == "system":
                 if text:
                     system.append(text)
                 continue
-            if not text:
+            if text:
+                parts.append({"text": text})
+            if not parts:
                 continue
             role = "model" if message.role == "assistant" else message.role
-            contents.append({"role": role, "parts": [{"text": text}]})
+            contents.append({"role": role, "parts": parts})
 
         params = dict(request.params)
         body: dict[str, Any] = {"contents": contents}

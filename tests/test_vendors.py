@@ -45,6 +45,31 @@ def sse(*frames: tuple[str | None, object]) -> bytes:
     return out.encode()
 
 
+def text_of(turn: object) -> str:
+    """wire 메시지에서 텍스트만 뽑는다.
+
+    벤더마다 content가 문자열이거나 part 리스트다. Responses는 ``input_text``, Gemini는
+    ``text`` 키를 쓴다. 시험이 그 차이에 얽매이지 않게 한 곳에서 흡수한다.
+    """
+    if isinstance(turn, str):
+        return turn
+    if not isinstance(turn, dict):
+        return ""
+    content = turn.get("content", turn.get("parts"))
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(p.get("text", "")) for p in content if isinstance(p, dict) and "text" in p
+        )
+    return ""
+
+
+def all_text(body: dict[str, object], key: str) -> str:
+    turns = body.get(key)
+    return " ".join(text_of(t) for t in turns) if isinstance(turns, list) else ""
+
+
 def make(adapter: object, **kwargs: object) -> Bridge:
     return Bridge(
         vendor=adapter,  # type: ignore[arg-type]
@@ -536,10 +561,17 @@ class TestResponses:
         respx.post(RESP_URL).mock(return_value=httpx.Response(200, content=payload))
         assert (await make(responses).complete(["x"])).text == "본문"
 
-    def test_body_uses_input_and_instructions(self) -> None:
+    def test_body_uses_input_items_with_content_parts(self) -> None:
+        """``input``은 ``Item`` 리스트이고 ``Item`` 안에 ``ContentPart`` 리스트가 있다."""
         body = make(responses).build_request([HubMessage.system("규칙"), "질문"])
         assert body["instructions"] == "규칙"
-        assert body["input"] == [{"role": "user", "content": "질문"}]
+        assert body["input"] == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "질문"}],
+            }
+        ]
         assert "messages" not in body
 
     def test_tools_are_flat_function_entries(self) -> None:
@@ -903,7 +935,7 @@ class TestHubConvergence:
         history = ["질문", HubMessage.of_response(answer)]
 
         assert make(messages).build_request(history)["messages"][1]["content"] == "답변"
-        assert make(responses).build_request(history)["input"][1]["content"] == "답변"
+        assert text_of(make(responses).build_request(history)["input"][1]) == "답변"
         gemini_body = make(GEMINI).build_request(history)
         assert gemini_body["contents"][1] == {"role": "model", "parts": [{"text": "답변"}]}
 
@@ -916,7 +948,7 @@ class TestHubConvergence:
         )
         for adapter, key in ((messages, "messages"), (responses, "input")):
             body = make(adapter).build_request([message])
-            assert body[key][0]["content"] == "답"
+            assert text_of(body[key][0]) == "답"
 
 
 class TestNativeCitations:
@@ -1152,9 +1184,7 @@ class TestDenseLowering:
     def test_responses_lowers_document_into_the_text_channel(self) -> None:
         """이 벤더에는 네이티브 문서 채널이 없다. 본문 태그로 내려간다."""
         body = self._bridge(responses).build_request(dense_history())
-        turns = body["input"]
-        assert isinstance(turns, list)
-        rendered = " ".join(str(t.get("content", "")) for t in turns)
+        rendered = all_text(body, "input")
         assert '<document id="d1">' in rendered
         assert f'<cite id="d1">{CITED}</cite>' in rendered
         assert "표를 조회해야 한다" not in rendered
@@ -1164,8 +1194,9 @@ class TestDenseLowering:
         contents = body["contents"]
         assert isinstance(contents, list)
         assert "model" in [c["role"] for c in contents]
-        rendered = " ".join(c["parts"][0]["text"] for c in contents)
+        rendered = all_text(body, "contents")
         assert f'<cite id="d1">{CITED}</cite>' in rendered
+        # 문서는 평문이라 본문 태그로 내려간다. base64나 URI면 inlineData/fileData로 간다.
         assert '<document id="d1">' in rendered
 
     def test_citation_indices_survive_the_round_trip(self) -> None:
@@ -1194,11 +1225,31 @@ class TestDenseLowering:
         assert merged.text[cites[0].start_index : cites[0].end_index] == CITED
 
     def test_tool_results_land_in_each_vendor_shape(self) -> None:
-        """도구 결과가 실리는 자리가 벤더마다 다르다."""
+        """도구 결과가 실리는 자리가 벤더마다 다르다.
+
+        Anthropic은 ``tool_result`` 블록, Responses는 ``function_call_output`` Item,
+        Gemini는 ``functionResponse`` Part다.
+        """
         anthropic = self._bridge(messages).build_request(dense_history())
-        rendered = " ".join(str(t.get("content", "")) for t in anthropic["messages"])
-        assert "1000만" in rendered
+        turns = anthropic["messages"]
+        assert isinstance(turns, list)
+        results = [
+            p
+            for t in turns
+            if isinstance(t.get("content"), list)
+            for p in t["content"]
+            if p.get("type") == "tool_result"
+        ]
+        assert [r["tool_use_id"] for r in results] == ["c1"]
+
+        responses_body = self._bridge(responses).build_request(dense_history())
+        items = responses_body["input"]
+        assert isinstance(items, list)
+        outputs = [i for i in items if i.get("type") == "function_call_output"]
+        assert [(o["call_id"], o["output"]) for o in outputs] == [("c1", "1000만")]
 
         gemini = self._bridge(generate_content.for_model("m")).build_request(dense_history())
-        joined = " ".join(c["parts"][0]["text"] for c in gemini["contents"])
-        assert "1000만" in joined
+        contents = gemini["contents"]
+        assert isinstance(contents, list)
+        responses_parts = [p for c in contents for p in c["parts"] if "functionResponse" in p]
+        assert responses_parts[0]["functionResponse"]["name"] == "c1"

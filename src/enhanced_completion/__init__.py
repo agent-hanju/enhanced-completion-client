@@ -22,6 +22,7 @@ from .blocks import (
     ContentBlock,
     DocumentBlock,
     ImageBlock,
+    ServerToolBlock,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
@@ -50,6 +51,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "AsyncStream",
+    "AudioBlock",
     "Block",
     "Bridge",
     "CitationBlock",
@@ -67,6 +69,7 @@ __all__ = [
     "Lowerer",
     "MappingError",
     "ParseEvent",
+    "ServerToolBlock",
     "SseFrame",
     "SseParser",
     "TagParser",

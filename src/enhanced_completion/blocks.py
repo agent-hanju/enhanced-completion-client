@@ -18,11 +18,13 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 __all__ = [
+    "AudioBlock",
     "Block",
     "CitationBlock",
     "ContentBlock",
     "DocumentBlock",
     "ImageBlock",
+    "ServerToolBlock",
     "TextBlock",
     "ThinkingBlock",
     "ToolResultBlock",
@@ -97,21 +99,57 @@ class ToolUseBlock(ContentBlock):
 
 
 class ToolResultBlock(ContentBlock):
-    """도구 실행 결과."""
+    """도구 실행 결과. 요청 방향 블록이다.
+
+    ``blocks``가 있는 이유는 Anthropic ``ToolResultBlock.content``가 ``List<ContentBlock>``
+    이기 때문이다. 이미지를 돌려주는 도구가 그 경로를 쓴다. 문자열 하나로는 표현할 수 없다.
+
+    ``content``는 평문 결과를 담는 짧은 길이고 ``blocks``와 함께 쓸 수 있다. 벤더가 블록
+    리스트를 받지 않으면 어댑터가 ``content``만 싣는다.
+    """
 
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str = Field(default="", json_schema_extra=_overwrite())
     content: str = ""
+    blocks: list[Any] = Field(default_factory=list)
     is_error: bool | None = Field(default=None, json_schema_extra=_overwrite())
 
 
 class ImageBlock(ContentBlock):
-    """이미지. ``data``는 base64이고 ``url``과 배타적으로 쓴다."""
+    """이미지. 출처가 셋이고 벤더마다 받는 모양이 다르다.
+
+    - ``data`` + ``media_type``: base64. Anthropic ``source.base64``,
+      Gemini ``inlineData``, Chat Completions는 data URL로 감싼다
+    - ``url``: Anthropic ``source.url``, Chat Completions ``image_url.url``,
+      Responses ``input_image.image_url``
+    - ``file_id``: 이미 올려둔 파일. Anthropic ``source.file``,
+      Chat Completions ``image_url`` 대신 ``file``
+    """
 
     type: Literal["image"] = "image"
     media_type: str | None = Field(default=None, json_schema_extra=_overwrite())
     data: str | None = Field(default=None, json_schema_extra=_overwrite())
     url: str | None = Field(default=None, json_schema_extra=_overwrite())
+    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    detail: str | None = Field(default=None, json_schema_extra=_overwrite())
+    """Chat Completions ``image_url.detail``. ``auto``/``low``/``high``."""
+
+
+class AudioBlock(ContentBlock):
+    """음성 입력. 요청 방향 블록이다.
+
+    Chat Completions ``input_audio{data, format}``와 Responses ``input_audio``가 같은 모양을
+    쓴다. Gemini는 ``inlineData``에 오디오 MIME을 실어 같은 일을 한다.
+
+    ``format``이 ``media_type``과 따로 있는 이유는 두 API가 ``wav``/``mp3`` 같은 짧은 이름을
+    요구하고 Gemini는 ``audio/wav`` 형태의 MIME을 요구하기 때문이다.
+    """
+
+    type: Literal["audio"] = "audio"
+    data: str | None = Field(default=None, json_schema_extra=_overwrite())
+    format: str | None = Field(default=None, json_schema_extra=_overwrite())
+    media_type: str | None = Field(default=None, json_schema_extra=_overwrite())
+    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
 
 
 class CitationBlock(ContentBlock):
@@ -146,31 +184,84 @@ class CitationBlock(ContentBlock):
 
 
 class DocumentBlock(ContentBlock):
-    """요청에 첨부하는 근거 문서.
+    """요청에 첨부하는 근거 문서 또는 파일.
 
-    벤더마다 실리는 자리가 다르다. Anthropic Messages는 ``document`` content block으로 받고
-    ``citations``를 켤 수 있다. 나머지 벤더는 그 채널이 없으므로 어휘가 본문 text에 태그로
-    내린다. 어느 쪽이든 이 블록 하나로 표현한다.
+    출처를 세 가지로 표현한다. 벤더가 지원하는 모양이 다르기 때문이다.
+
+    - ``text``: 평문. Anthropic ``source.type=text``, 나머지는 본문 태그
+    - ``data`` + ``media_type``: base64. Anthropic ``base64``, Gemini ``inlineData``,
+      Responses ``file_data``
+    - ``uri`` 또는 ``file_id``: 이미 올려둔 파일. Gemini ``fileData.fileUri``,
+      Responses ``file_id``, Anthropic ``source.type=file``
+
+    네이티브 문서 채널은 세 벤더에만 있다. OpenAI Chat Completions의 요청 content part는
+    ``text``와 ``image_url`` 둘뿐이므로 거기서는 본문 텍스트로 내리는 것이 유일한 통로다.
     """
 
     type: Literal["document"] = "document"
     id: str = Field(default="", json_schema_extra=_overwrite())
     title: str | None = Field(default=None, json_schema_extra=_overwrite())
     text: str = ""
+    data: str | None = Field(default=None, json_schema_extra=_overwrite())
+    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
+    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
     media_type: str = Field(default="text/plain", json_schema_extra=_overwrite())
     citations_enabled: bool = Field(default=True, json_schema_extra=_overwrite())
+
+    @property
+    def is_inline_text(self) -> bool:
+        """평문 본문만 있는지. 참이면 본문 태그로 내려도 무손실이다."""
+        return not self.data and not self.uri and not self.file_id
 
     def to_prompt(self) -> str:
         """네이티브 문서 채널이 없는 벤더에서 본문에 실을 형태.
 
-        Java ``IDocument.toSerializedPrompt()``와 같은 모양을 유지한다.
+        Java ``IDocument.toSerializedPrompt()``와 같은 모양이다. 평문이 아닌 문서는 여기로
+        내릴 수 없으므로 ``media_type``과 참조만 남긴다.
         """
         parts = [f'<document id="{self.id}">']
         if self.title:
             parts.append(f"<title>{self.title}</title>")
-        parts.append(f"<content>{self.text}</content>")
+        if self.is_inline_text:
+            parts.append(f"<content>{self.text}</content>")
+        else:
+            reference = self.uri or self.file_id or ""
+            parts.append(f'<content media-type="{self.media_type}">{reference}</content>')
         parts.append("</document>")
         return "\n".join(parts)
+
+
+class ServerToolBlock(ContentBlock):
+    """벤더 서버가 실행한 도구의 호출과 결과.
+
+    ``tool_use``/``tool_result``와 별개 개념이 아니다. Anthropic이 그 결론을 타입 계층으로
+    적어두었다. ``ServerToolUseBlock extends ToolUseBlock``이고
+    ``McpToolResultBlock extends ToolResultBlock``이다. 다른 것은 실행 주체뿐이다.
+
+    그래서 클라이언트가 응답을 되보낼 필요가 없다. ``tool_use``를 받으면 실행하고
+    ``tool_result``를 돌려줘야 대화가 이어지지만, 이 블록은 이미 끝난 일의 보고다. 같은 자리에
+    넣으면 소비 앱이 응답을 기다리다 멈춘다.
+
+    다섯 벤더가 모두 이 개념을 갖는다.
+
+    - Anthropic: ``server_tool_use``, ``web_search_tool_result``, ``web_fetch_tool_result``,
+      ``mcp_tool_use``, ``mcp_tool_result``, ``bash_code_execution_tool_result``,
+      ``text_editor_code_execution_tool_result``
+    - Responses: ``web_search_call``, ``code_interpreter_call``, ``image_generation_call``,
+      ``mcp_call``, ``mcp_list_tools``, ``mcp_approval_request``
+    - Gemini: ``executableCode``, ``codeExecutionResult``, ``groundingMetadata``
+    - agent-studio: ``bash``, ``edit``, ``read``, ``write``, ``web_search``, ``skill_run`` 등
+    - chat completions: 없음
+    """
+
+    type: Literal["server_tool"] = "server_tool"
+    id: str = Field(default="", json_schema_extra=_overwrite())
+    name: str = Field(default="", json_schema_extra=_overwrite())
+    status: str | None = Field(default=None, json_schema_extra=_overwrite())
+    input_json: str = ""
+    output: str = ""
+    is_error: bool | None = Field(default=None, json_schema_extra=_overwrite())
+    raw: Mapping[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
 
 
 class VendorBlock(ContentBlock):
@@ -248,7 +339,9 @@ for _cls in (
     ToolUseBlock,
     ToolResultBlock,
     ImageBlock,
+    AudioBlock,
     CitationBlock,
     DocumentBlock,
+    ServerToolBlock,
 ):
     register_block(_cls)

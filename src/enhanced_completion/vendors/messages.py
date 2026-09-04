@@ -20,8 +20,10 @@ from ..blocks import (
     ContentBlock,
     DocumentBlock,
     ImageBlock,
+    ServerToolBlock,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
     VendorBlock,
 )
@@ -30,10 +32,23 @@ from ..hub import HubRequest, HubResponse, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
+from .parts import as_anthropic_part
 
 __all__ = ["MessagesAdapter", "messages"]
 
 SOURCE = "messages"
+
+# 서버가 실행하는 도구. tool_use와 달리 클라이언트가 결과를 되보내지 않는다.
+_SERVER_TOOL_USE = frozenset({"server_tool_use", "mcp_tool_use"})
+_SERVER_TOOL_RESULT = frozenset(
+    {
+        "web_search_tool_result",
+        "web_fetch_tool_result",
+        "mcp_tool_result",
+        "bash_code_execution_tool_result",
+        "text_editor_code_execution_tool_result",
+    }
+)
 TERMINAL_EVENTS = frozenset({"message_stop"})
 IGNORED_EVENTS = frozenset({"ping"})
 
@@ -113,13 +128,31 @@ class _ToHub:
             return VendorBlock(
                 type=kind, raw={k: v for k, v in block.items() if k != "type"}, **common
             )
-        if kind in ("tool_use", "server_tool_use", "mcp_tool_use"):
+        if kind == "tool_use":
             fields = {}
             if block.get("id"):
                 fields["id"] = block["id"]
             if block.get("name"):
                 fields["name"] = block["name"]
             return ToolUseBlock(**common, **fields)
+        if kind in _SERVER_TOOL_USE:
+            # 서버가 실행하는 호출이다. 클라이언트가 결과를 되보낼 필요가 없다.
+            fields = {"name": block.get("name") or kind}
+            if block.get("id"):
+                fields["id"] = block["id"]
+            if block.get("server_name"):
+                fields["raw"] = {"server_name": block["server_name"]}
+            return ServerToolBlock(**common, **fields)
+        if kind in _SERVER_TOOL_RESULT:
+            return ServerToolBlock(
+                name=kind,
+                id=block.get("tool_use_id") or "",
+                output=json.dumps(block.get("content"), ensure_ascii=False)
+                if block.get("content") is not None
+                else "",
+                raw={k: v for k, v in block.items() if k != "type"},
+                **common,
+            )
         # 허브에 대응물이 없는 블록은 원본을 보존한다. 같은 벤더로 되돌릴 때 무손실이다.
         raw = {k: v for k, v in block.items() if k != "type"}
         return VendorBlock(type=kind or "unknown", raw=raw, **common)
@@ -235,23 +268,21 @@ class MessagesAdapter:
         system: list[str] = []
         turns: list[dict[str, Any]] = []
         for message in request.messages:
-            documents = [b for b in message.content if isinstance(b, DocumentBlock)]
-            rest = [b for b in message.content if not isinstance(b, DocumentBlock)]
+            native, rest = self._split_native(message.content)
             text = lowerer.lower_text(rest)
             if message.role == "system":
                 if text:
                     system.append(text)
                 continue
-            blocks = self._document_blocks(documents)
-            if not blocks and not text:
+            if not native and not text:
                 continue
-            if not blocks:
+            if not native:
                 turns.append({"role": message.role, "content": text})
                 continue
-            # 문서가 본문보다 앞에 와야 모델이 근거를 먼저 읽는다.
+            # 네이티브 블록이 본문보다 앞에 와야 모델이 근거를 먼저 읽는다.
             if text:
-                blocks.append({"type": "text", "text": text})
-            turns.append({"role": message.role, "content": blocks})
+                native.append({"type": "text", "text": text})
+            turns.append({"role": message.role, "content": native})
 
         params = dict(request.params)
         body: dict[str, Any] = {
@@ -272,6 +303,47 @@ class MessagesAdapter:
                 body[key] = value
         return body
 
+    def _split_native(
+        self, blocks: list[ContentBlock]
+    ) -> tuple[list[dict[str, Any]], list[ContentBlock]]:
+        """네이티브 part로 내릴 블록과 본문 text로 접을 블록을 나눈다.
+
+        문서와 이미지는 이 API에 전용 content block이 있으므로 본문 텍스트로 밀어넣지 않는다.
+        도구 결과도 ``tool_result`` 블록이 있어 별도 메시지가 아니라 같은 turn에 들어간다.
+        """
+        documents = [b for b in blocks if isinstance(b, DocumentBlock)]
+        native: list[dict[str, Any]] = self._document_blocks(documents)
+        for block in blocks:
+            if isinstance(block, DocumentBlock):
+                continue
+            part = as_anthropic_part(block)
+            if part is not None:
+                native.append(part)
+            elif isinstance(block, ToolResultBlock):
+                native.append(self._tool_result_part(block))
+        rest = [
+            b
+            for b in blocks
+            if not isinstance(b, DocumentBlock | ImageBlock | ToolResultBlock)
+        ]
+        return native, rest
+
+    @staticmethod
+    def _tool_result_part(block: ToolResultBlock) -> dict[str, Any]:
+        """``tool_result``의 ``content``는 블록 리스트다.
+
+        이미지를 돌려주는 도구가 그 경로를 쓴다. 평문만 있으면 문자열로 싣는다.
+        """
+        part: dict[str, Any] = {"type": "tool_result", "tool_use_id": block.tool_use_id}
+        nested = [as_anthropic_part(b) for b in block.blocks]
+        inner = [p for p in nested if p is not None]
+        if block.content:
+            inner.insert(0, {"type": "text", "text": block.content})
+        part["content"] = inner if inner else ""
+        if block.is_error:
+            part["is_error"] = True
+        return part
+
     @staticmethod
     def _document_blocks(documents: list[DocumentBlock]) -> list[dict[str, Any]]:
         """문서를 네이티브 ``document`` content block으로.
@@ -290,19 +362,11 @@ class MessagesAdapter:
         enabled = any(d.citations_enabled for d in documents)
         blocks: list[dict[str, Any]] = []
         for document in documents:
-            block: dict[str, Any] = {
-                "type": "document",
-                "source": {
-                    "type": "text",
-                    "media_type": document.media_type,
-                    "data": document.text,
-                },
-                "citations": {"enabled": enabled},
-            }
-            title = document.title or document.id
-            if title:
-                block["title"] = title
-            blocks.append(block)
+            part = as_anthropic_part(document)
+            if part is None:
+                continue
+            part["citations"] = {"enabled": enabled}
+            blocks.append(part)
         return blocks
 
     def request_headers(self) -> dict[str, str]:

@@ -18,6 +18,7 @@ from ..hub import HubMessage, HubRequest, HubResponse, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
+from .parts import as_chat_completions_part
 
 __all__ = ["ChatCompletionsAdapter", "chat_completions"]
 
@@ -173,7 +174,6 @@ class ChatCompletionsAdapter:
         for message in messages:
             tool_results = [b for b in message.content if isinstance(b, ToolResultBlock)]
             tool_calls = [b for b in message.content if isinstance(b, ToolUseBlock)]
-            rest = [b for b in message.content if not isinstance(b, ToolResultBlock | ToolUseBlock)]
 
             # tool 결과가 먼저 나가야 직전 assistant 턴의 tool_calls와 짝이 맞는다.
             for block in tool_results:
@@ -185,11 +185,31 @@ class ChatCompletionsAdapter:
                     }
                 )
 
+            # 멀티모달 part. streambind-base의 RequestContentPart는 text와 image_url 둘만
+            # permit하지만 실제 API는 input_audio와 file도 받는다.
+            parts: list[dict[str, Any]] = []
+            rest: list[ContentBlock] = []
+            for item in message.content:
+                if isinstance(item, ToolResultBlock | ToolUseBlock):
+                    continue
+                part = as_chat_completions_part(item)
+                if part is not None:
+                    parts.append(part)
+                else:
+                    rest.append(item)
+
             text = lowerer.lower_text(rest)
-            if not text and not tool_calls:
+            if not text and not tool_calls and not parts:
                 continue
 
-            wire: dict[str, Any] = {"role": message.role, "content": text}
+            content: str | list[dict[str, Any]] = text
+            if parts:
+                # part 리스트를 쓰면 본문도 part가 되어야 한다. 문자열과 섞을 수 없다.
+                if text:
+                    parts.append({"type": "text", "text": text})
+                content = parts
+
+            wire: dict[str, Any] = {"role": message.role, "content": content}
             if tool_calls:
                 wire["tool_calls"] = [
                     {

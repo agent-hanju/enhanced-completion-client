@@ -20,8 +20,10 @@ from typing import Any
 from ..blocks import (
     CitationBlock,
     ContentBlock,
+    ServerToolBlock,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
     VendorBlock,
 )
@@ -30,6 +32,7 @@ from ..hub import HubRequest, HubResponse, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
+from .parts import as_responses_part
 
 __all__ = ["ResponsesAdapter", "responses"]
 
@@ -95,9 +98,11 @@ class _ToHub:
             return []
 
         # 도구 진행 보고. 계열이 늘어도 규칙으로 걸린다.
-        if "_call" in name:
+        if "_call" in name or ".mcp_" in name:
+            stage = name.rsplit(".", 1)[-1]
+            family = name.removeprefix("response.").rsplit(".", 1)[0]
             return self._one(
-                VendorBlock(type=f"responses_{name.rsplit('.', 1)[-1]}", raw=dict(event))
+                ServerToolBlock(name=family, status=stage, raw=dict(event))
             )
         return []
 
@@ -163,10 +168,15 @@ class _ToHub:
             # 본문과 추론은 델타로 따라온다. 여기서 자리만 잡으면 중복이 된다.
             return []
         if isinstance(kind, str) and kind:
+            # 서버가 실행하는 도구다. web_search_call, code_interpreter_call,
+            # image_generation_call, mcp_list_tools, mcp_approval_request가 여기로 온다.
             raw = {k: v for k, v in item.items() if k != "type"}
-            return [
-                HubResponse(content=[VendorBlock(type=kind, raw=raw, index=index, source=SOURCE)])
-            ]
+            fields = {"name": kind, "index": index, "source": SOURCE}
+            if item.get("id"):
+                fields["id"] = item["id"]
+            if isinstance(item.get("status"), str):
+                fields["status"] = item["status"]
+            return [HubResponse(content=[ServerToolBlock(raw=raw, **fields)])]
         return []
 
     def _response_meta(self, event: dict[str, Any]) -> list[HubResponse]:
@@ -221,17 +231,56 @@ class ResponsesAdapter:
         """허브 요청을 Responses body로.
 
         이 API는 ``messages``가 아니라 ``input``을 받고 ``system``을 ``instructions``로 받는다.
+
+        **``input``은 ``Item`` 리스트이고 ``Item`` 안에 다시 ``ContentPart`` 리스트가 있다.**
+        두 층이다. 문자열 하나로 누르면 이미지, 음성, 파일 part를 실을 수 없다.
+
+        도구 결과와 MCP 승인은 content part가 아니라 **별개 Item**이다.
+        ``function_call_output``과 ``mcp_approval_response``가 그것이고, 클라이언트가 되보내는
+        입력 항목이다.
         """
         instructions: list[str] = []
         turns: list[dict[str, Any]] = []
         for message in request.messages:
-            text = lowerer.lower_text(message.content)
+            # 도구 결과는 별개 Item이므로 먼저 빼낸다.
+            for block in message.content:
+                if isinstance(block, ToolResultBlock):
+                    turns.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": block.tool_use_id,
+                            "output": block.content,
+                        }
+                    )
+                elif isinstance(block, ServerToolBlock) and block.name == "mcp_approval_response":
+                    turns.append(
+                        {
+                            "type": "mcp_approval_response",
+                            "approval_request_id": block.id,
+                            "approve": block.status == "approved",
+                        }
+                    )
+
+            parts: list[dict[str, Any]] = []
+            plain: list[ContentBlock] = []
+            for block in message.content:
+                if isinstance(block, ToolResultBlock | ServerToolBlock):
+                    continue
+                part = as_responses_part(block)
+                if part is not None:
+                    parts.append(part)
+                else:
+                    plain.append(block)
+
+            text = lowerer.lower_text(plain)
             if message.role == "system":
                 if text:
                     instructions.append(text)
                 continue
             if text:
-                turns.append({"role": message.role, "content": text})
+                parts.append({"type": "input_text", "text": text})
+            if parts:
+                turns.append({"type": "message", "role": message.role, "content": parts})
 
         params = dict(request.params)
         body: dict[str, Any] = {

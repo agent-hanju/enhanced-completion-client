@@ -32,6 +32,7 @@ from typing import Any, Literal
 
 from ..blocks import (
     ContentBlock,
+    ServerToolBlock,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
@@ -230,11 +231,12 @@ class _ToHub:
             blocks.append(self._tool_result(payload))
 
         elif name in TOOL_ACTIVITY_EVENTS or name in PROGRESS_EVENTS:
+            # 서버가 실행한 도구의 사후 보고다. 다른 벤더의 서버 도구와 같은 자리다.
             blocks.append(
-                AgentActivityBlock(
-                    kind=name,
-                    detail=extract_text(event.payload) if event.payload else event.raw,
-                    data=payload or None,
+                ServerToolBlock(
+                    name=name,
+                    output=extract_text(event.payload) if event.payload else event.raw,
+                    raw=payload,
                     source=SOURCE,
                 )
             )
