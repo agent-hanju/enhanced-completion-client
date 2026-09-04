@@ -55,7 +55,20 @@ class _CiteMapper:
         blocks: list[ContentBlock] = []
         for block in delta.content:
             if isinstance(block, TextBlock):
-                blocks.extend(self._lift(block.text, block.index))
+                # item.done이 본문을 반복하지 않고 원본 metadata만 갱신하는 API가 있다.
+                # 그 델타를 파서에 넣으면 빈 문자열로 사라져 같은 벤더 왕복 정보가 유실된다.
+                if block.native or block.signature:
+                    metadata: dict[str, Any] = {
+                        "index": block.index,
+                        "source": block.source,
+                    }
+                    if block.native:
+                        metadata["native"] = block.native
+                    if block.signature:
+                        metadata["signature"] = block.signature
+                    blocks.append(TextBlock(**metadata))
+                if "text" in block.model_fields_set:
+                    blocks.extend(self._lift(block.text, block.index, block.source))
             else:
                 blocks.append(block)
         return [delta.model_copy(update={"content": blocks})]
@@ -77,13 +90,23 @@ class _CiteMapper:
 
     # ---- 내부 ----
 
-    def _lift(self, text: str, index: int | None) -> list[ContentBlock]:
+    def _lift(
+        self,
+        text: str,
+        index: int | None,
+        source: str | None,
+    ) -> list[ContentBlock]:
         blocks: list[ContentBlock] = []
         for event in self._parser.feed(text):
-            blocks.extend(self._apply(event, index))
+            blocks.extend(self._apply(event, index, source))
         return blocks
 
-    def _apply(self, event: ParseEvent, index: int | None) -> list[ContentBlock]:
+    def _apply(
+        self,
+        event: ParseEvent,
+        index: int | None,
+        source: str | None = None,
+    ) -> list[ContentBlock]:
         """이벤트 하나를 블록으로 옮긴다.
 
         ``match``의 패턴 위치에 상수 이름을 쓰지 않는다. 거기서 ``CITE_PATH``는 값 비교가
@@ -94,7 +117,7 @@ class _CiteMapper:
             self._cursor += len(event.content)
             if self._open_id is not None:
                 self._open_text.append(event.content)
-            return [TextBlock(text=event.content, index=index)]
+            return [TextBlock(text=event.content, index=index, source=source)]
 
         if isinstance(event, Enter) and event.path == CITE_PATH:
             if self._open_id is not None:

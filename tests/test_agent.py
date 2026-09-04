@@ -15,6 +15,7 @@ import respx
 from enhanced_completion import (
     Bridge,
     HubMessage,
+    ServerToolBlock,
     SseFrame,
     TextBlock,
     ThinkingBlock,
@@ -23,7 +24,6 @@ from enhanced_completion import (
     VendorBlock,
 )
 from enhanced_completion.vendors import (
-    AgentActivityBlock,
     AgentErrorBlock,
     AgentSourcesBlock,
     code_agent,
@@ -220,7 +220,7 @@ class TestStreaming:
         assert (res.tool_use_id, res.content) == ("t1", "결과")
 
     @respx.mock
-    async def test_code_agent_tool_events_become_activity(self) -> None:
+    async def test_code_agent_tool_events_become_server_tool_blocks(self) -> None:
         """``bash``는 실행 요청이 아니라 사후 보고다. ``tool_use``로 올리면 소비 앱이 응답을
         기다리다 멈춘다."""
         payload = frames(
@@ -232,21 +232,21 @@ class TestStreaming:
         adapter = code_agent.for_agent("c1")
         respx.post(f"{BASE}{adapter.path}").mock(return_value=httpx.Response(200, content=payload))
         result = await bridge(adapter).complete(["배포해"])
-        activity = [b for b in result.content if isinstance(b, AgentActivityBlock)]
-        assert [b.kind for b in activity] == ["bash", "edit", "skill_run"]
-        assert [b.detail for b in activity] == ["ls -la", "app.py", "deploy"]
+        server = [b for b in result.content if isinstance(b, ServerToolBlock)]
+        assert [b.name for b in server] == ["bash", "edit", "skill_run"]
+        assert [b.output for b in server] == ["ls -la", "app.py", "deploy"]
         assert result.text == "완료"
         assert not [b for b in result.content if isinstance(b, ToolUseBlock)]
 
     @respx.mock
-    async def test_progress_events_become_activity(self) -> None:
+    async def test_progress_events_become_server_tool_blocks(self) -> None:
         payload = frames(
             event("activity", {"content": "검색 중"}),
             event("activity_done", {"content": "검색 완료"}),
         )
         respx.post(URL).mock(return_value=httpx.Response(200, content=payload))
         result = await bridge().complete(["x"])
-        assert [b.kind for b in result.content if isinstance(b, AgentActivityBlock)] == [
+        assert [b.name for b in result.content if isinstance(b, ServerToolBlock)] == [
             "activity",
             "activity_done",
         ]

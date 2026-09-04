@@ -46,7 +46,6 @@ from ..transport.sse import SseFrame
 from .base import Lowerer
 
 __all__ = [
-    "AgentActivityBlock",
     "AgentAdapter",
     "AgentErrorBlock",
     "AgentEvent",
@@ -103,20 +102,6 @@ ERROR_EVENTS = frozenset({"error", "failed"})
 TERMINAL_EVENTS = frozenset({"done"})
 
 
-class AgentActivityBlock(ContentBlock):
-    """진행 보고. 사용자에게 보이는 본문이 아니다.
-
-    code agent의 도구 이벤트도 여기로 온다. 허브의 ``tool_use``로 올리지 않는 이유는
-    의미가 다르기 때문이다. ``tool_use``는 "이걸 실행해서 결과를 돌려달라"이고, 이것은
-    "내가 이걸 했다"는 사후 보고다.
-    """
-
-    type: Literal["agent_activity"] = "agent_activity"
-    kind: str = ""
-    detail: str = ""
-    data: dict[str, Any] | None = None
-
-
 class AgentSourcesBlock(ContentBlock):
     """agent가 붙인 근거 목록.
 
@@ -139,7 +124,7 @@ class AgentErrorBlock(ContentBlock):
     detail: str = ""
 
 
-for _cls in (AgentActivityBlock, AgentSourcesBlock, AgentErrorBlock):
+for _cls in (AgentSourcesBlock, AgentErrorBlock):
     register_block(_cls)
 
 

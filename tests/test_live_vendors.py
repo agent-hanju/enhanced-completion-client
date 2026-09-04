@@ -27,6 +27,7 @@ from enhanced_completion import (
     DocumentBlock,
     HubMessage,
     HubResponse,
+    ServerToolBlock,
     TextBlock,
     ToolDefinition,
     ToolUseBlock,
@@ -222,6 +223,31 @@ class TestAnthropicMessages:
         for cite in cites:
             assert result.text[cite.start_index : cite.end_index] == cite.text
 
+    @skip_anthropic
+    @pytest.mark.slow
+    async def test_server_tool_blocks(self) -> None:
+        assert ANTHROPIC is not None
+        base, model, key = ANTHROPIC
+        web = ToolDefinition.native(
+            "messages",
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 1},
+        )
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            bridge = Bridge(
+                vendor=messages,
+                base_url=base,
+                model=model,
+                http_client=client,
+                headers={"x-api-key": key},
+            )
+            result = await bridge.complete(
+                ["웹 검색으로 현재 Anthropic 공식 홈페이지 제목을 확인하고 제목만 답해."],
+                tools=[web],
+                max_tokens=192,
+            )
+        print(f"\n[server/messages] blocks={[block.type for block in result.content]}")
+        assert any(isinstance(block, ServerToolBlock) for block in result.content)
+
 
 class TestOpenAiResponses:
     @skip_responses
@@ -266,6 +292,30 @@ class TestOpenAiResponses:
         assert calls, "도구 호출이 없다"
         assert json.loads(calls[0].input_json)
 
+    @skip_responses
+    @pytest.mark.slow
+    async def test_server_tool_blocks(self) -> None:
+        assert RESPONSES is not None
+        base, model, key = RESPONSES
+        web = ToolDefinition.native(
+            "responses", {"type": "web_search_preview", "search_context_size": "low"}
+        )
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            bridge = Bridge(
+                vendor=responses,
+                base_url=base,
+                model=model,
+                api_key=key,
+                http_client=client,
+            )
+            result = await bridge.complete(
+                ["웹 검색으로 현재 OpenAI 공식 홈페이지 제목을 확인하고 제목만 답해."],
+                tools=[web],
+                max_output_tokens=192,
+            )
+        print(f"\n[server/responses] blocks={[block.type for block in result.content]}")
+        assert any(isinstance(block, ServerToolBlock) for block in result.content)
+
 
 class TestGemini:
     @skip_gemini
@@ -298,6 +348,27 @@ class TestGemini:
         print(f"\n[gemini] calls={[(c.name, c.input_json) for c in calls]}")
         assert calls, "도구 호출이 없다"
         assert json.loads(calls[0].input_json)
+
+    @skip_gemini
+    @pytest.mark.slow
+    async def test_server_tool_blocks(self) -> None:
+        assert GEMINI is not None
+        base, model, key = GEMINI
+        web = ToolDefinition.native("generate_content", {"googleSearch": {}})
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            bridge = Bridge(
+                vendor=generate_content.for_model(model, api_key=key),
+                base_url=base,
+                model=model,
+                http_client=client,
+            )
+            result = await bridge.complete(
+                ["웹 검색으로 현재 Google AI 공식 홈페이지 제목을 확인하고 제목만 답해."],
+                tools=[web],
+                max_tokens=192,
+            )
+        print(f"\n[server/gemini] blocks={[block.type for block in result.content]}")
+        assert any(isinstance(block, ServerToolBlock) for block in result.content)
 
 
 class TestCrossVendor:

@@ -21,7 +21,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..blocks import AudioBlock, ContentBlock, DocumentBlock, ImageBlock
+from ..blocks import (
+    AudioBlock,
+    ContentBlock,
+    DocumentBlock,
+    ImageBlock,
+    ServerToolBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    VendorBlock,
+)
 
 __all__ = [
     "as_anthropic_part",
@@ -41,18 +51,58 @@ def data_url(media_type: str | None, data: str) -> str:
     return f"data:{media_type or 'application/octet-stream'};base64,{data}"
 
 
+def _native(block: ContentBlock, source: str) -> dict[str, Any]:
+    if block.source != source:
+        return {}
+    return dict(block.native)
+
+
+def _raw(block: ServerToolBlock | VendorBlock, source: str) -> dict[str, Any] | None:
+    if block.source != source or not block.raw:
+        return None
+    return dict(block.raw)
+
+
 def as_anthropic_part(block: ContentBlock) -> dict[str, Any] | None:
     """Anthropic ``ContentBlock``. 요청과 응답이 같은 유니온을 쓴다."""
+    if isinstance(block, TextBlock) and block.source == "messages" and block.native:
+        part = _native(block, "messages")
+        part.update({"type": "text", "text": block.text})
+        return part
+    if isinstance(block, ThinkingBlock):
+        if block.source != "messages" or not block.signature:
+            return None
+        part = _native(block, "messages")
+        part.update({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+        return part
+    if isinstance(block, ToolUseBlock):
+        part = _native(block, "messages")
+        part.update(
+            {
+                "type": "tool_use",
+                "id": block.id,
+                "name": block.name,
+                "input": block.input if block.input is not None else {},
+            }
+        )
+        return part
+    if isinstance(block, ServerToolBlock | VendorBlock):
+        return _raw(block, "messages")
     if isinstance(block, ImageBlock):
         source = _anthropic_source(block.media_type, block.data, block.url, block.file_id)
-        return {"type": "image", "source": source} if source else None
+        if source is None:
+            return None
+        part = _native(block, "messages")
+        part.update({"type": "image", "source": source})
+        return part
     if isinstance(block, DocumentBlock):
         source = _anthropic_source(
             block.media_type, block.data, block.uri, block.file_id, text=block.text
         )
         if source is None:
             return None
-        part: dict[str, Any] = {"type": "document", "source": source}
+        part = _native(block, "messages")
+        part.update({"type": "document", "source": source})
         title = block.title or block.id
         if title:
             part["title"] = title
@@ -152,36 +202,81 @@ def as_responses_part(block: ContentBlock) -> dict[str, Any] | None:
 
 def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
     """Gemini ``Part``. 판별자가 없어 채워진 필드가 종류를 말한다."""
+    if (
+        isinstance(block, TextBlock)
+        and block.source == "generate_content"
+        and (block.signature or block.native)
+    ):
+        part = _native(block, "generate_content")
+        part["text"] = block.text
+        if block.signature:
+            part["thoughtSignature"] = block.signature
+        return part
+    if isinstance(block, ThinkingBlock):
+        if block.source != "generate_content":
+            return None
+        part = _native(block, "generate_content")
+        part.update({"text": block.thinking, "thought": True})
+        if block.signature:
+            part["thoughtSignature"] = block.signature
+        return part
+    if isinstance(block, ToolUseBlock):
+        call: dict[str, Any] = {"name": block.name, "args": block.input or {}}
+        if block.id:
+            call["id"] = block.id
+        part = _native(block, "generate_content")
+        part["functionCall"] = call
+        if block.source == "generate_content" and block.signature:
+            part["thoughtSignature"] = block.signature
+        return part
+    if isinstance(block, ServerToolBlock):
+        if block.source != "generate_content":
+            return None
+        return dict(block.native or block.raw) or None
+    if isinstance(block, VendorBlock):
+        return _raw(block, "generate_content")
     if isinstance(block, ImageBlock):
+        part = _native(block, "generate_content")
         if block.data:
-            return {
-                "inlineData": {
-                    "mimeType": block.media_type or "image/png",
-                    "data": block.data,
-                }
+            part["inlineData"] = {
+                "mimeType": block.media_type or "image/png",
+                "data": block.data,
             }
+            return part
         if block.url:
-            return {"fileData": {"mimeType": block.media_type or "image/png", "fileUri": block.url}}
+            part["fileData"] = {
+                "mimeType": block.media_type or "image/png",
+                "fileUri": block.url,
+            }
+            return part
         return None
     if isinstance(block, AudioBlock):
         if block.data:
             mime = block.media_type or (f"audio/{block.format}" if block.format else "audio/wav")
-            return {"inlineData": {"mimeType": mime, "data": block.data}}
+            part = _native(block, "generate_content")
+            part["inlineData"] = {"mimeType": mime, "data": block.data}
+            return part
+        if block.uri:
+            part = _native(block, "generate_content")
+            part["fileData"] = {
+                "mimeType": block.media_type or "audio/mpeg",
+                "fileUri": block.uri,
+            }
+            return part
         return None
     if isinstance(block, DocumentBlock):
+        part = _native(block, "generate_content")
         if block.data:
-            return {
-                "inlineData": {
-                    "mimeType": block.media_type or "application/pdf",
-                    "data": block.data,
-                }
+            part["inlineData"] = {
+                "mimeType": block.media_type or "application/pdf",
+                "data": block.data,
             }
+            return part
         if block.uri:
-            return {
-                "fileData": {
-                    "mimeType": block.media_type or "application/pdf",
-                    "fileUri": block.uri,
-                }
+            part["fileData"] = {
+                "mimeType": block.media_type or "application/pdf",
+                "fileUri": block.uri,
             }
+            return part
         return None
     return None

@@ -17,8 +17,8 @@ from enhanced_completion import (
 )
 
 
-class CitationBlock(ContentBlock):
-    type: Literal["citation"] = "citation"
+class CustomCitationBlock(ContentBlock):
+    type: Literal["custom_citation"] = "custom_citation"
     id: str = ""
     text: str = ""
 
@@ -41,12 +41,12 @@ class TestBuiltins:
 
 class TestRuntimeRegistration:
     def test_registered_block_resolves(self) -> None:
-        register_block(CitationBlock)
+        register_block(CustomCitationBlock)
         response = HubResponse.model_validate(
-            {"content": [{"type": "citation", "id": "doc1", "text": "서울"}]}
+            {"content": [{"type": "custom_citation", "id": "doc1", "text": "서울"}]}
         )
         block = response.content[0]
-        assert isinstance(block, CitationBlock)
+        assert isinstance(block, CustomCitationBlock)
         assert block.id == "doc1"
 
     def test_block_without_type_default_is_rejected(self) -> None:
@@ -86,10 +86,21 @@ class TestPreservation:
         dumped = response.content[0].model_dump()
         assert dumped["cache_control"] == {"type": "ephemeral"}
 
-    def test_source_is_excluded_from_dump(self) -> None:
-        block = ThinkingBlock(thinking="why", source="chat_completions")
-        assert "source" not in block.model_dump()
-        assert block.source == "chat_completions"
+    def test_source_survives_dump_and_reload(self) -> None:
+        block = ThinkingBlock(
+            thinking="why",
+            signature="signed",
+            source="chat_completions",
+            native={"type": "reasoning"},
+        )
+        response = HubResponse(content=[block])
+        restored = HubResponse.model_validate(response.model_dump())
+        restored_block = restored.content[0]
+        assert isinstance(restored_block, ThinkingBlock)
+        assert restored_block.thinking == "why"
+        assert restored_block.signature == "signed"
+        assert restored_block.source == "chat_completions"
+        assert restored_block.native == {"type": "reasoning"}
 
     def test_block_instance_passes_through_unchanged(self) -> None:
         block = TextBlock(text="kept", index=3)

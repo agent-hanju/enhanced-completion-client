@@ -87,13 +87,30 @@ class HubMessage(BaseModel):
 
 
 class ToolDefinition(BaseModel):
-    """모델에 노출할 도구. JSON Schema는 검증하지 않고 그대로 전달한다."""
+    """모델에 노출할 도구.
+
+    공통 함수 도구는 ``name``/``description``/``input_schema``로 표현한다. 서버 내장 도구처럼
+    벤더 간 공통 구조가 없는 정의는 :meth:`native`로 원본 wire 객체를 등록한다.
+    """
 
     model_config = ConfigDict(extra="allow")
 
     name: str
     description: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    vendor: str | None = None
+    wire: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def native(cls, vendor: str, wire: dict[str, Any]) -> ToolDefinition:
+        """특정 벤더에서만 유효한 내장 도구 정의를 만든다."""
+        name = wire.get("name") or wire.get("type") or next(iter(wire), "native")
+        return cls(name=str(name), vendor=vendor, wire=dict(wire))
+
+    def native_for(self, vendor: str) -> dict[str, Any] | None:
+        if self.vendor == vendor and self.wire:
+            return dict(self.wire)
+        return None
 
 
 class HubRequest(BaseModel):

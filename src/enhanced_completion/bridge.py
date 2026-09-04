@@ -289,7 +289,11 @@ class _BridgeBase:
             headers.update(vendor_headers())
         headers.update(self._headers)
         if self._api_key:
-            headers.setdefault("Authorization", f"Bearer {self._api_key}")
+            api_key_header = getattr(self._vendor, "api_key_header", "Authorization")
+            if str(api_key_header).lower() == "authorization":
+                headers.setdefault("Authorization", f"Bearer {self._api_key}")
+            else:
+                headers.setdefault(str(api_key_header), self._api_key)
         return headers
 
 

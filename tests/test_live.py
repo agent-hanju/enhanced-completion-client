@@ -137,7 +137,7 @@ class TestLiveStreaming:
         thinking = [b for b in result.content if isinstance(b, ThinkingBlock)]
         assert thinking, "추론 블록이 없다. 필드 이름이 바뀌었는지 확인하라"
         assert thinking[0].thinking.strip()
-        assert result.stop_reason == "length"
+        assert result.stop_reason == "max_tokens"
         print(f"\n[live] stop_reason={result.stop_reason}")
         print(f"[live] thinking={thinking[0].thinking[:160]!r}")
         print(f"[live] text={result.text!r}")
@@ -162,7 +162,7 @@ class TestLiveStreaming:
             deltas = [d async for d in stream]
             result = stream.result
 
-        assert result.stop_reason == "stop", "예산이 부족하면 length가 된다. 늘려라"
+        assert result.stop_reason == "end_turn", "예산이 부족하면 max_tokens가 된다. 늘려라"
 
         # 최종 블록은 추론 하나와 본문 하나다.
         assert [b.type for b in result.content] == ["thinking", "text"]

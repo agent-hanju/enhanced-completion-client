@@ -12,10 +12,11 @@ Pydantic의 판별 유니온은 두 방식 모두 정의 시점에 닫힌다. �
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SerializeAsAny, model_validator
 
 __all__ = [
     "AudioBlock",
@@ -59,11 +60,17 @@ class ContentBlock(BaseModel):
     index: int | None = Field(default=None, json_schema_extra=_overwrite())
     """스트리밍 중 같은 블록의 조각을 짝지을 키."""
 
-    source: str | None = Field(default=None, exclude=True, json_schema_extra=_overwrite())
+    source: str | None = Field(default=None, json_schema_extra=_overwrite())
     """이 블록을 만들어낸 벤더 이름.
 
     추론 블록처럼 발급 벤더로만 되돌릴 수 있는 블록을 다른 벤더로 내릴 때 떨어뜨리는 판단에
-    쓴다. ``exclude=True``이므로 ``model_dump()``에는 실리지 않는다.
+    쓴다. 응답을 JSON/DB에 저장한 뒤에도 같은 벤더 재생이 가능해야 하므로 직렬화에 포함한다.
+    """
+
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+    """발급 벤더의 원본 블록·Part·Item에서 공통 필드 밖의 정보를 보존한다.
+
+    같은 벤더로 되돌릴 때만 사용한다. 다른 벤더 어댑터는 이 값을 해석하지 않는다.
     """
 
 
@@ -72,6 +79,7 @@ class TextBlock(ContentBlock):
 
     type: Literal["text"] = "text"
     text: str = ""
+    signature: str | None = Field(default=None, json_schema_extra=_overwrite())
 
 
 class ThinkingBlock(ContentBlock):
@@ -84,6 +92,7 @@ class ThinkingBlock(ContentBlock):
     type: Literal["thinking"] = "thinking"
     thinking: str = ""
     signature: str | None = Field(default=None, json_schema_extra=_overwrite())
+    encrypted_content: str | None = Field(default=None, json_schema_extra=_overwrite())
 
 
 class ToolUseBlock(ContentBlock):
@@ -95,7 +104,22 @@ class ToolUseBlock(ContentBlock):
     type: Literal["tool_use"] = "tool_use"
     id: str = Field(default="", json_schema_extra=_overwrite())
     name: str = Field(default="", json_schema_extra=_overwrite())
+    kind: str = Field(default="function", json_schema_extra=_overwrite())
     input_json: str = ""
+    input: Any | None = Field(default=None, json_schema_extra=_overwrite())
+    signature: str | None = Field(default=None, json_schema_extra=_overwrite())
+
+    @model_validator(mode="after")
+    def parse_complete_input(self) -> ToolUseBlock:
+        """완성된 JSON 인수는 원문과 파싱 결과를 함께 제공한다."""
+        if self.input is not None or not self.input_json:
+            return self
+        try:
+            parsed = json.loads(self.input_json)
+        except json.JSONDecodeError:
+            return self
+        self.input = parsed
+        return self
 
 
 class ToolResultBlock(ContentBlock):
@@ -110,7 +134,10 @@ class ToolResultBlock(ContentBlock):
 
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str = Field(default="", json_schema_extra=_overwrite())
+    name: str | None = Field(default=None, json_schema_extra=_overwrite())
+    kind: str = Field(default="function", json_schema_extra=_overwrite())
     content: str = ""
+    structured_content: Any | None = Field(default=None, json_schema_extra=_overwrite())
     blocks: list[Any] = Field(default_factory=list)
     is_error: bool | None = Field(default=None, json_schema_extra=_overwrite())
 
@@ -146,10 +173,13 @@ class AudioBlock(ContentBlock):
     """
 
     type: Literal["audio"] = "audio"
-    data: str | None = Field(default=None, json_schema_extra=_overwrite())
+    data: str | None = None
+    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
     format: str | None = Field(default=None, json_schema_extra=_overwrite())
     media_type: str | None = Field(default=None, json_schema_extra=_overwrite())
     file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    transcript: str | None = None
+    expires_at: int | None = Field(default=None, json_schema_extra=_overwrite())
 
 
 class CitationBlock(ContentBlock):
@@ -194,8 +224,8 @@ class DocumentBlock(ContentBlock):
     - ``uri`` 또는 ``file_id``: 이미 올려둔 파일. Gemini ``fileData.fileUri``,
       Responses ``file_id``, Anthropic ``source.type=file``
 
-    네이티브 문서 채널은 세 벤더에만 있다. OpenAI Chat Completions의 요청 content part는
-    ``text``와 ``image_url`` 둘뿐이므로 거기서는 본문 텍스트로 내리는 것이 유일한 통로다.
+    네이티브 문서 채널은 네 주요 API에 있다. 최신 Chat Completions도 ``file`` part를 받는다.
+    다만 평문 문서 source를 직접 받지 않는 대상에서는 본문 태그로 내린다.
     """
 
     type: Literal["document"] = "document"
@@ -238,17 +268,17 @@ class ServerToolBlock(ContentBlock):
     적어두었다. ``ServerToolUseBlock extends ToolUseBlock``이고
     ``McpToolResultBlock extends ToolResultBlock``이다. 다른 것은 실행 주체뿐이다.
 
-    그래서 클라이언트가 응답을 되보낼 필요가 없다. ``tool_use``를 받으면 실행하고
-    ``tool_result``를 돌려줘야 대화가 이어지지만, 이 블록은 이미 끝난 일의 보고다. 같은 자리에
-    넣으면 소비 앱이 응답을 기다리다 멈춘다.
+    일반적으로 클라이언트가 결과를 되보낼 필요가 없다. 클라이언트 실행이나 승인이 필요한
+    호출은 ``ToolUseBlock``으로 분류하고 이 블록과 구분한다.
 
-    다섯 벤더가 모두 이 개념을 갖는다.
+    Responses, Anthropic, Gemini와 agent SSE가 이 개념을 갖는다.
 
     - Anthropic: ``server_tool_use``, ``web_search_tool_result``, ``web_fetch_tool_result``,
       ``mcp_tool_use``, ``mcp_tool_result``, ``bash_code_execution_tool_result``,
       ``text_editor_code_execution_tool_result``
     - Responses: ``web_search_call``, ``code_interpreter_call``, ``image_generation_call``,
-      ``mcp_call``, ``mcp_list_tools``, ``mcp_approval_request``
+      ``mcp_call``, ``mcp_list_tools``. ``mcp_approval_request``는 클라이언트 응답이 필요하므로
+      ``ToolUseBlock``이다
     - Gemini: ``executableCode``, ``codeExecutionResult``, ``groundingMetadata``
     - agent-studio: ``bash``, ``edit``, ``read``, ``write``, ``web_search``, ``skill_run`` 등
     - chat completions: 없음
@@ -329,7 +359,7 @@ def resolve_block(value: Any) -> Any:
     return cls.model_validate(value)
 
 
-Block = Annotated[ContentBlock, BeforeValidator(resolve_block)]
+Block = Annotated[SerializeAsAny[ContentBlock], BeforeValidator(resolve_block)]
 """허브 모델에서 content block 필드에 쓰는 타입."""
 
 

@@ -18,6 +18,7 @@ import json
 from typing import Any
 
 from ..blocks import (
+    AudioBlock,
     CitationBlock,
     ContentBlock,
     ServerToolBlock,
@@ -28,10 +29,11 @@ from ..blocks import (
     VendorBlock,
 )
 from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, Usage
+from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
+from .normalize import REFUSAL_PREFIX, stop_reason_from_responses
 from .parts import as_responses_part
 
 __all__ = ["ResponsesAdapter", "responses"]
@@ -42,7 +44,39 @@ TERMINAL_EVENTS = frozenset(
 )
 
 # 한 item 안의 여러 content part를 구분하려면 두 축이 필요하다.
-_CONTENT_STRIDE = 1000
+_CONTENT_STRIDE = 1 << 32
+_REASONING_TEXT_OFFSET = 1 << 31
+
+_CLIENT_TOOL_ITEMS = frozenset(
+    {
+        "function_call",
+        "custom_tool_call",
+        "computer_call",
+        "local_shell_call",
+        "shell_call",
+        "apply_patch_call",
+    }
+)
+_SERVER_TOOL_ITEMS = frozenset(
+    {
+        "web_search_call",
+        "file_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "mcp_call",
+        "mcp_list_tools",
+    }
+)
+_TOOL_RESULT_ITEMS = frozenset(
+    {
+        "function_call_output",
+        "custom_tool_call_output",
+        "computer_call_output",
+        "local_shell_call_output",
+        "shell_call_output",
+        "apply_patch_call_output",
+    }
+)
 
 
 def _slot(event: dict[str, Any]) -> int:
@@ -56,6 +90,17 @@ def _slot(event: dict[str, Any]) -> int:
 class _ToHub:
     """Responses 이벤트를 허브 델타로 바꾼다."""
 
+    def __init__(self) -> None:
+        self._refusal_started = False
+        self._text_streamed: set[int] = set()
+        self._refusal_streamed: set[int] = set()
+        self._reasoning_streamed: set[int] = set()
+        self._reasoning_item_slots: dict[int, int] = {}
+        self._arguments_streamed: set[int] = set()
+        self._audio_streamed: set[int] = set()
+        self._audio_transcript_streamed: set[int] = set()
+        self._done_items: set[int] = set()
+
     def map(self, event: dict[str, Any]) -> list[HubResponse]:
         name = event.get("type")
         if not isinstance(name, str):
@@ -63,21 +108,61 @@ class _ToHub:
 
         # 본문
         if name == "response.output_text.delta":
-            return self._one(TextBlock(text=event.get("delta") or "", index=_slot(event)))
+            index = _slot(event)
+            self._text_streamed.add(index)
+            return self._one(TextBlock(text=event.get("delta") or "", index=index))
         if name == "response.refusal.delta":
-            # 거부도 사용자에게 보여야 하는 본문이다.
-            return self._one(TextBlock(text=event.get("delta") or "", index=_slot(event)))
+            index = _slot(event)
+            self._refusal_streamed.add(index)
+            prefix = "" if self._refusal_started else REFUSAL_PREFIX
+            self._refusal_started = True
+            return self._one(TextBlock(text=prefix + (event.get("delta") or ""), index=index))
 
         # 추론 요약. 원문 추론은 암호화되어 오므로 요약만 텍스트로 쓸 수 있다.
         if name == "response.reasoning_summary_text.delta":
-            return self._one(ThinkingBlock(thinking=event.get("delta") or "", index=_slot(event)))
+            index = _slot(event)
+            self._reasoning_streamed.add(index)
+            self._reasoning_item_slots[index] = index
+            return self._one(ThinkingBlock(thinking=event.get("delta") or "", index=index))
+        if name == "response.reasoning_text.delta":
+            item_index = _slot(event)
+            index = item_index + _REASONING_TEXT_OFFSET
+            self._reasoning_streamed.add(index)
+            self._reasoning_item_slots.setdefault(item_index, index)
+            return self._one(ThinkingBlock(thinking=event.get("delta") or "", index=index))
+
+        if name == "response.audio.delta":
+            index = _slot(event)
+            self._audio_streamed.add(index)
+            return self._one(AudioBlock(data=event.get("delta") or "", index=index))
+        if name == "response.audio_transcript.delta":
+            index = _slot(event)
+            self._audio_transcript_streamed.add(index)
+            return self._one(AudioBlock(transcript=event.get("delta") or "", index=index))
 
         # 도구 인수
         if name in (
             "response.function_call_arguments.delta",
-            "response.mcp_call_arguments.delta",
+            "response.custom_tool_call_input.delta",
         ):
-            return self._one(ToolUseBlock(input_json=event.get("delta") or "", index=_slot(event)))
+            index = _slot(event)
+            self._arguments_streamed.add(index)
+            kind = "custom" if ".custom_tool_" in name else "function"
+            return self._one(
+                ToolUseBlock(
+                    input_json=event.get("delta") or "",
+                    index=index,
+                    kind=kind,
+                )
+            )
+        if name == "response.mcp_call_arguments.delta":
+            return self._one(
+                ServerToolBlock(
+                    name="mcp_call",
+                    input_json=event.get("delta") or "",
+                    index=_slot(event),
+                )
+            )
 
         # 인용. 이 벤더는 annotation이라 부른다.
         if name == "response.output_text.annotation.added":
@@ -86,6 +171,8 @@ class _ToHub:
         # item 등장. 도구 호출의 식별자와 이름이 여기 실린다.
         if name == "response.output_item.added":
             return self._item_added(event)
+        if name == "response.output_item.done":
+            return self._item_done(event)
 
         # 수명주기
         if name in ("response.created", "response.in_progress", "response.queued"):
@@ -93,7 +180,7 @@ class _ToHub:
         if name in TERMINAL_EVENTS:
             return self._terminal(name, event)
 
-        # 완료 통보는 델타의 중복이라 흘려보낸다.
+        # content/argument 완료 통보는 델타의 중복이다. item.done만 원본 갱신에 쓴다.
         if name.endswith(".done") or name.endswith(".added"):
             return []
 
@@ -102,7 +189,12 @@ class _ToHub:
             stage = name.rsplit(".", 1)[-1]
             family = name.removeprefix("response.").rsplit(".", 1)[0]
             return self._one(
-                ServerToolBlock(name=family, status=stage, raw=dict(event))
+                ServerToolBlock(
+                    name=family,
+                    status=stage,
+                    index=_slot(event),
+                    raw=dict(event),
+                )
             )
         return []
 
@@ -133,7 +225,11 @@ class _ToHub:
             # 인용이 아니라 산출물 경로다. 원본을 보존한다.
             return self._one(VendorBlock(type="responses_file_path", raw=dict(annotation)))
 
-        fields: dict[str, Any] = {"source": SOURCE, "source_kind": kind or "annotation"}
+        fields: dict[str, Any] = {
+            "source": SOURCE,
+            "source_kind": kind or "annotation",
+            "native": dict(annotation),
+        }
         identifier = annotation.get("url") or annotation.get("file_id")
         if isinstance(identifier, str) and identifier:
             fields["id"] = identifier
@@ -151,33 +247,180 @@ class _ToHub:
 
     def _item_added(self, event: dict[str, Any]) -> list[HubResponse]:
         item = event.get("item") or {}
+        return self._item(item, event, final=False)
+
+    def _item_done(self, event: dict[str, Any]) -> list[HubResponse]:
+        item = event.get("item") or {}
+        output_index = event.get("output_index")
+        if isinstance(output_index, int):
+            self._done_items.add(output_index)
+        return self._item(item, event, final=True)
+
+    def _item(
+        self,
+        item: dict[str, Any],
+        event: dict[str, Any],
+        *,
+        final: bool,
+    ) -> list[HubResponse]:
         kind = item.get("type")
         index = _slot(event)
-        if kind in ("function_call", "mcp_call"):
-            fields: dict[str, Any] = {"index": index, "source": SOURCE}
+        if kind in _CLIENT_TOOL_ITEMS:
+            fields: dict[str, Any] = {
+                "index": index,
+                "source": SOURCE,
+                "kind": "custom" if kind == "custom_tool_call" else str(kind).removesuffix("_call"),
+                "native": dict(item),
+            }
             call_id = item.get("call_id") or item.get("id")
             if call_id:
                 fields["id"] = call_id
             if item.get("name"):
                 fields["name"] = item["name"]
-            arguments = item.get("arguments")
-            if isinstance(arguments, str) and arguments:
-                fields["input_json"] = arguments
+            raw_input = item.get("arguments")
+            if raw_input is None:
+                raw_input = item.get("input")
+            if raw_input is None:
+                raw_input = item.get("action")
+            if index not in self._arguments_streamed and raw_input not in (None, "", {}):
+                fields["input_json"] = (
+                    raw_input
+                    if isinstance(raw_input, str)
+                    else json.dumps(raw_input, ensure_ascii=False)
+                )
+                self._arguments_streamed.add(index)
             return [HubResponse(content=[ToolUseBlock(**fields)])]
-        if kind in ("message", "reasoning"):
-            # 본문과 추론은 델타로 따라온다. 여기서 자리만 잡으면 중복이 된다.
-            return []
+        if kind == "mcp_approval_request":
+            return self._one(
+                ToolUseBlock(
+                    id=str(item.get("id") or ""),
+                    name=str(item.get("name") or "mcp_approval"),
+                    kind="mcp_approval",
+                    input=item,
+                    index=index,
+                    native=dict(item),
+                )
+            )
+        if kind in _TOOL_RESULT_ITEMS:
+            raw_output = item.get("output")
+            content = raw_output if isinstance(raw_output, str) else ""
+            structured = None if isinstance(raw_output, str) else raw_output
+            result_kind = str(kind).removesuffix("_call_output")
+            if result_kind == "custom_tool":
+                result_kind = "custom"
+            return self._one(
+                ToolResultBlock(
+                    tool_use_id=str(item.get("call_id") or item.get("id") or ""),
+                    kind=result_kind,
+                    content=content,
+                    structured_content=structured,
+                    native=dict(item),
+                    index=index,
+                )
+            )
+        if kind == "message":
+            return self._message_item(item, event, final=final)
+        if kind == "reasoning":
+            return self._reasoning_item(item, index)
+        if kind in _SERVER_TOOL_ITEMS:
+            raw = dict(item)
+            return self._one(
+                ServerToolBlock(
+                    name=str(kind),
+                    id=str(item.get("id") or item.get("call_id") or ""),
+                    status=item.get("status") if isinstance(item.get("status"), str) else None,
+                    input_json=(item.get("arguments") or "")
+                    if isinstance(item.get("arguments"), str)
+                    else "",
+                    output=str(item.get("output") or item.get("result") or ""),
+                    index=index,
+                    native=raw,
+                    raw=raw,
+                )
+            )
         if isinstance(kind, str) and kind:
-            # 서버가 실행하는 도구다. web_search_call, code_interpreter_call,
-            # image_generation_call, mcp_list_tools, mcp_approval_request가 여기로 온다.
-            raw = {k: v for k, v in item.items() if k != "type"}
-            fields = {"name": kind, "index": index, "source": SOURCE}
-            if item.get("id"):
-                fields["id"] = item["id"]
-            if isinstance(item.get("status"), str):
-                fields["status"] = item["status"]
-            return [HubResponse(content=[ServerToolBlock(raw=raw, **fields)])]
+            return self._one(VendorBlock(type=f"responses_{kind}", raw=dict(item), index=index))
         return []
+
+    def _message_item(
+        self,
+        item: dict[str, Any],
+        event: dict[str, Any],
+        *,
+        final: bool,
+    ) -> list[HubResponse]:
+        blocks: list[ContentBlock] = []
+        item_meta = {key: value for key, value in item.items() if key != "content"}
+        output_index = event.get("output_index")
+        for content_index, part in enumerate(item.get("content") or []):
+            if not isinstance(part, dict):
+                continue
+            part_event = dict(event)
+            part_event["content_index"] = content_index
+            index = _slot(part_event)
+            native = {"item": item_meta, "part": dict(part)}
+            kind = part.get("type")
+            if kind == "output_text":
+                fields: dict[str, Any] = {"index": index, "native": native}
+                if index not in self._text_streamed and isinstance(part.get("text"), str):
+                    fields["text"] = part["text"]
+                    self._text_streamed.add(index)
+                blocks.append(TextBlock(source=SOURCE, **fields))
+            elif kind == "refusal":
+                fields = {"index": index, "native": native}
+                if index not in self._refusal_streamed and isinstance(part.get("refusal"), str):
+                    prefix = "" if self._refusal_started else REFUSAL_PREFIX
+                    self._refusal_started = True
+                    fields["text"] = prefix + part["refusal"]
+                    self._refusal_streamed.add(index)
+                blocks.append(TextBlock(source=SOURCE, **fields))
+            elif kind in ("output_audio", "audio"):
+                fields = {"index": index, "native": native}
+                if index not in self._audio_streamed and isinstance(part.get("data"), str):
+                    fields["data"] = part["data"]
+                    self._audio_streamed.add(index)
+                transcript = part.get("transcript")
+                if index not in self._audio_transcript_streamed and isinstance(transcript, str):
+                    fields["transcript"] = transcript
+                    self._audio_transcript_streamed.add(index)
+                blocks.append(AudioBlock(source=SOURCE, **fields))
+            else:
+                blocks.append(
+                    VendorBlock(
+                        type=f"responses_{kind or 'content'}",
+                        raw=dict(part),
+                        native=native,
+                        source=SOURCE,
+                        index=index,
+                    )
+                )
+        if not blocks and final and isinstance(output_index, int):
+            blocks.append(
+                VendorBlock(
+                    type="responses_message",
+                    raw=dict(item),
+                    source=SOURCE,
+                    index=output_index * _CONTENT_STRIDE,
+                )
+            )
+        return [HubResponse(content=blocks)] if blocks else []
+
+    def _reasoning_item(self, item: dict[str, Any], index: int) -> list[HubResponse]:
+        summaries = item.get("summary") or []
+        summary = "\n".join(
+            str(entry.get("text"))
+            for entry in summaries
+            if isinstance(entry, dict) and isinstance(entry.get("text"), str)
+        )
+        target_index = self._reasoning_item_slots.get(index, index)
+        fields: dict[str, Any] = {"index": target_index, "native": dict(item)}
+        if target_index not in self._reasoning_streamed and summary:
+            fields["thinking"] = summary
+            self._reasoning_streamed.add(target_index)
+        encrypted = item.get("encrypted_content")
+        if isinstance(encrypted, str) and encrypted:
+            fields["encrypted_content"] = encrypted
+        return self._one(ThinkingBlock(**fields))
 
     def _response_meta(self, event: dict[str, Any]) -> list[HubResponse]:
         response = event.get("response") or {}
@@ -195,19 +438,63 @@ class _ToHub:
             raise MappingError(f"responses stream reported an error: {detail}")
 
         response = event.get("response") or {}
+        out: list[HubResponse] = []
+        for output_index, item in enumerate(response.get("output") or []):
+            if output_index in self._done_items or not isinstance(item, dict):
+                continue
+            out.extend(self._item_done({"output_index": output_index, "item": item}))
+        for citation in response.get("citations") or []:
+            if isinstance(citation, str):
+                out.append(
+                    HubResponse(
+                        content=[
+                            CitationBlock(
+                                id=citation,
+                                source_kind="response_citation",
+                                source=SOURCE,
+                                native={"citation": citation},
+                            )
+                        ]
+                    )
+                )
+            elif isinstance(citation, dict):
+                identifier = citation.get("url") or citation.get("id") or ""
+                out.append(
+                    HubResponse(
+                        content=[
+                            CitationBlock(
+                                id=str(identifier),
+                                document_title=citation.get("title"),
+                                source_kind=str(citation.get("type") or "response_citation"),
+                                source=SOURCE,
+                                native=dict(citation),
+                            )
+                        ]
+                    )
+                )
         fields: dict[str, Any] = {}
         status = response.get("status")
         if name == "response.failed":
             fields["stop_reason"] = "error"
         elif name == "response.incomplete":
             reason = (response.get("incomplete_details") or {}).get("reason")
-            fields["stop_reason"] = reason if isinstance(reason, str) else "incomplete"
+            fields["stop_reason"] = (
+                "max_tokens"
+                if reason == "max_output_tokens"
+                else reason
+                if isinstance(reason, str)
+                else "max_tokens"
+            )
         elif isinstance(status, str):
-            fields["stop_reason"] = "stop" if status == "completed" else status
+            fields["stop_reason"] = stop_reason_from_responses(status)
         usage = self._usage(response.get("usage"))
         if usage is not None:
             fields["usage"] = usage
-        return [HubResponse(**fields)] if fields else []
+        if response.get("server_side_tool_usage") is not None:
+            fields["server_side_tool_usage"] = response["server_side_tool_usage"]
+        if fields:
+            out.append(HubResponse(**fields))
+        return out
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
@@ -242,45 +529,12 @@ class ResponsesAdapter:
         instructions: list[str] = []
         turns: list[dict[str, Any]] = []
         for message in request.messages:
-            # 도구 결과는 별개 Item이므로 먼저 빼낸다.
-            for block in message.content:
-                if isinstance(block, ToolResultBlock):
-                    turns.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": block.tool_use_id,
-                            "output": block.content,
-                        }
-                    )
-                elif isinstance(block, ServerToolBlock) and block.name == "mcp_approval_response":
-                    turns.append(
-                        {
-                            "type": "mcp_approval_response",
-                            "approval_request_id": block.id,
-                            "approve": block.status == "approved",
-                        }
-                    )
-
-            parts: list[dict[str, Any]] = []
-            plain: list[ContentBlock] = []
-            for block in message.content:
-                if isinstance(block, ToolResultBlock | ServerToolBlock):
-                    continue
-                part = as_responses_part(block)
-                if part is not None:
-                    parts.append(part)
-                else:
-                    plain.append(block)
-
-            text = lowerer.lower_text(plain)
             if message.role == "system":
+                text = lowerer.lower_text(message.content)
                 if text:
                     instructions.append(text)
                 continue
-            if text:
-                parts.append({"type": "input_text", "text": text})
-            if parts:
-                turns.append({"type": "message", "role": message.role, "content": parts})
+            turns.extend(self._items(message.role, message.content, lowerer))
 
         params = dict(request.params)
         body: dict[str, Any] = {
@@ -291,19 +545,219 @@ class ResponsesAdapter:
         if instructions:
             body["instructions"] = "\n\n".join(instructions)
         if request.tools:
-            body["tools"] = [
-                {
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.input_schema,
-                }
-                for t in request.tools
-            ]
+            body["tools"] = [self._tool_definition(tool) for tool in request.tools]
         for key, value in params.items():
             if key not in ("model", "input", "stream", "tools", "instructions"):
                 body[key] = value
         return body
+
+    def _items(
+        self,
+        role: str,
+        blocks: list[ContentBlock],
+        lowerer: Lowerer,
+    ) -> list[dict[str, Any]]:
+        """한 허브 메시지를 Responses Item 0..N개로 펼친다.
+
+        도구 호출과 결과, reasoning은 message의 content part가 아니다. 응답의 ``output``을
+        수동 이력으로 되보낼 때도 Item 계층을 유지해야 한다.
+        """
+        items: list[dict[str, Any]] = []
+        pending: list[ContentBlock] = []
+
+        def flush() -> None:
+            nonlocal pending
+            if not pending:
+                return
+            item = self._message_item(role, pending, lowerer)
+            pending = []
+            if item is not None:
+                items.append(item)
+
+        for block in blocks:
+            item: dict[str, Any] | None = None
+            if isinstance(block, ToolResultBlock):
+                item = self._tool_result_item(block, lowerer)
+            elif isinstance(block, ToolUseBlock):
+                item = self._tool_use_item(block)
+            elif isinstance(block, ThinkingBlock) and block.source == SOURCE:
+                item = self._reasoning_input(block)
+            elif isinstance(block, ServerToolBlock) and block.source == SOURCE:
+                item = dict(block.raw or block.native)
+            elif isinstance(block, VendorBlock) and block.source == SOURCE:
+                item = dict(block.raw)
+
+            if item is None:
+                pending.append(block)
+                continue
+            flush()
+            items.append(item)
+        flush()
+        return items
+
+    @staticmethod
+    def _message_item(
+        role: str,
+        blocks: list[ContentBlock],
+        lowerer: Lowerer,
+    ) -> dict[str, Any] | None:
+        parts: list[dict[str, Any]] = []
+        plain: list[ContentBlock] = []
+        item_meta: dict[str, Any] = {}
+        annotations = [
+            dict(block.native)
+            for block in blocks
+            if isinstance(block, CitationBlock) and block.source == SOURCE and block.native
+        ]
+
+        def flush_plain() -> None:
+            text = lowerer.lower_text(plain)
+            plain.clear()
+            if text:
+                kind = "output_text" if role == "assistant" else "input_text"
+                parts.append({"type": kind, "text": text})
+
+        for block in blocks:
+            if isinstance(block, CitationBlock) and block.source == SOURCE and block.native:
+                continue
+            if isinstance(block, TextBlock) and block.source == SOURCE and block.native:
+                native = block.native
+                native_item = native.get("item")
+                native_part = native.get("part")
+                if isinstance(native_part, dict):
+                    flush_plain()
+                    part = dict(native_part)
+                    if part.get("type") == "output_text":
+                        part["text"] = block.text
+                        if annotations and not part.get("annotations"):
+                            part["annotations"] = annotations
+                    parts.append(part)
+                    if isinstance(native_item, dict) and not item_meta:
+                        item_meta = dict(native_item)
+                    continue
+            if isinstance(block, AudioBlock) and block.source == SOURCE and block.native:
+                native = block.native
+                native_item = native.get("item")
+                native_part = native.get("part")
+                if isinstance(native_part, dict):
+                    flush_plain()
+                    part = dict(native_part)
+                    if block.data is not None:
+                        part["data"] = block.data
+                    if block.transcript is not None:
+                        part["transcript"] = block.transcript
+                    parts.append(part)
+                    if isinstance(native_item, dict) and not item_meta:
+                        item_meta = dict(native_item)
+                    continue
+            rendered = as_responses_part(block)
+            if rendered is None:
+                plain.append(block)
+                continue
+            flush_plain()
+            parts.append(rendered)
+        flush_plain()
+
+        if not parts:
+            return None
+        item = item_meta
+        item.update({"type": "message", "role": role, "content": parts})
+        return item
+
+    @staticmethod
+    def _tool_use_item(block: ToolUseBlock) -> dict[str, Any]:
+        if block.source == SOURCE and block.native:
+            item = dict(block.native)
+            if block.kind == "mcp_approval":
+                return item
+        else:
+            kind = block.kind or "function"
+            wire_type = {
+                "function": "function_call",
+                "custom": "custom_tool_call",
+            }.get(kind, f"{kind}_call")
+            item = {"type": wire_type}
+        if block.kind in ("function", "custom"):
+            item["call_id"] = block.id
+            if block.name:
+                item["name"] = block.name
+        elif block.id and block.source != SOURCE:
+            item["id"] = block.id
+        if block.kind == "custom":
+            item["input"] = block.input_json
+        elif block.kind == "function":
+            item["arguments"] = block.input_json or "{}"
+        elif block.input is not None:
+            item["action"] = block.input
+        return item
+
+    @staticmethod
+    def _tool_result_item(block: ToolResultBlock, lowerer: Lowerer) -> dict[str, Any]:
+        if block.source == SOURCE and block.native:
+            return dict(block.native)
+        if block.kind == "mcp_approval":
+            item: dict[str, Any] = {
+                "type": "mcp_approval_response",
+                "approval_request_id": block.tool_use_id,
+                "approve": not bool(block.is_error),
+            }
+            if block.content:
+                item["reason"] = block.content
+            return item
+
+        output: Any
+        rendered_parts: list[dict[str, Any]] = []
+        if block.content:
+            rendered_parts.append({"type": "input_text", "text": block.content})
+        for nested in block.blocks:
+            if isinstance(nested, TextBlock):
+                rendered_parts.append({"type": "input_text", "text": nested.text})
+                continue
+            if isinstance(nested, ContentBlock):
+                part = as_responses_part(nested)
+                if part is not None:
+                    rendered_parts.append(part)
+        if rendered_parts and (block.blocks or len(rendered_parts) > 1):
+            output = rendered_parts
+        elif block.structured_content is not None:
+            output = json.dumps(block.structured_content, ensure_ascii=False)
+        elif rendered_parts:
+            output = rendered_parts[0]["text"]
+        else:
+            output = lowerer.lower_text(block.blocks)
+
+        kind = block.kind or "function"
+        wire_type = {
+            "function": "function_call_output",
+            "custom": "custom_tool_call_output",
+        }.get(kind, f"{kind}_call_output")
+        return {"type": wire_type, "call_id": block.tool_use_id, "output": output}
+
+    @staticmethod
+    def _reasoning_input(block: ThinkingBlock) -> dict[str, Any] | None:
+        if block.native:
+            item = dict(block.native)
+            if block.encrypted_content:
+                item["encrypted_content"] = block.encrypted_content
+            return item
+        if block.encrypted_content:
+            return {
+                "type": "reasoning",
+                "encrypted_content": block.encrypted_content,
+                "summary": [],
+            }
+        return None
+
+    def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any]:
+        native = tool.native_for(self.name)
+        if native is not None:
+            return native
+        return {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input_schema,
+        }
 
     def is_terminal(self, frame: SseFrame) -> bool:
         name = frame.event.strip()

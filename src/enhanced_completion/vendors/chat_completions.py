@@ -12,12 +12,23 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..blocks import ContentBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock
+from ..blocks import (
+    AudioBlock,
+    CitationBlock,
+    ContentBlock,
+    ServerToolBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    VendorBlock,
+)
 from ..errors import MappingError
-from ..hub import HubMessage, HubRequest, HubResponse, Usage
+from ..hub import HubMessage, HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
+from .normalize import REFUSAL_PREFIX, stop_reason_from_chat
 from .parts import as_chat_completions_part
 
 __all__ = ["ChatCompletionsAdapter", "chat_completions"]
@@ -38,10 +49,13 @@ class _ToHub:
     # 본문과 추론은 choice 하나에 각각 하나씩이다. 도구 인덱스와 겹치지 않게 떨어뜨린다.
     TEXT_INDEX = 0
     THINKING_INDEX = -1
+    REFUSAL_INDEX = -2
+    AUDIO_INDEX = -3
     TOOL_INDEX_BASE = 1
 
     def __init__(self, source: str) -> None:
         self._source = source
+        self._refusal_started = False
 
     def map(self, chunk: dict[str, Any]) -> list[HubResponse]:
         choices = chunk.get("choices") or []
@@ -60,6 +74,37 @@ class _ToHub:
         if isinstance(content, str) and content:
             blocks.append(TextBlock(text=content, index=self.TEXT_INDEX, source=self._source))
 
+        # 거부도 사용자가 봐야 하는 본문이다. 다만 답변과 구분되게 표시를 붙인다.
+        refusal = delta.get("refusal")
+        if isinstance(refusal, str) and refusal:
+            prefix = "" if self._refusal_started else REFUSAL_PREFIX
+            self._refusal_started = True
+            blocks.append(
+                TextBlock(
+                    text=prefix + refusal,
+                    index=self.REFUSAL_INDEX,
+                    source=self._source,
+                )
+            )
+
+        audio = delta.get("audio")
+        if isinstance(audio, dict):
+            blocks.append(
+                AudioBlock(
+                    index=self.AUDIO_INDEX,
+                    source=self._source,
+                    native=dict(audio),
+                    file_id=audio.get("id"),
+                    data=audio.get("data"),
+                    transcript=audio.get("transcript"),
+                    expires_at=audio.get("expires_at"),
+                )
+            )
+
+        for annotation in delta.get("annotations") or []:
+            if isinstance(annotation, dict):
+                blocks.append(self._citation(annotation))
+
         for call in delta.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
@@ -73,7 +118,7 @@ class _ToHub:
             model=chunk.get("model"),
             role=delta.get("role"),
             content=blocks,
-            stop_reason=finish if isinstance(finish, str) else None,
+            stop_reason=stop_reason_from_chat(finish if isinstance(finish, str) else None),
             usage=usage,
         )
         return [response]
@@ -88,12 +133,16 @@ class _ToHub:
         "이 델타에 실린 값"으로 보고 앞서 받은 ``id``와 ``name``을 지운다. 델타 스트림에서
         ``id``와 ``name``은 첫 조각에만 오고 이후에는 ``arguments``만 온다.
         """
-        fn = call.get("function") or {}
+        kind = call.get("type")
+        fn = call.get("function") or call.get("custom") or {}
         raw_index = call.get("index")
         fields: dict[str, Any] = {
             "index": self.TOOL_INDEX_BASE + (raw_index if isinstance(raw_index, int) else 0),
             "source": self._source,
+            "native": dict(call),
         }
+        if isinstance(kind, str) and kind:
+            fields["kind"] = kind
         if call.get("id"):
             fields["id"] = call["id"]
         if fn.get("name"):
@@ -102,6 +151,26 @@ class _ToHub:
         if isinstance(arguments, str) and arguments:
             fields["input_json"] = arguments
         return ToolUseBlock(**fields)
+
+    def _citation(self, annotation: dict[str, Any]) -> CitationBlock:
+        detail = annotation.get("url_citation")
+        if not isinstance(detail, dict):
+            detail = annotation
+        fields: dict[str, Any] = {
+            "source": self._source,
+            "source_kind": str(annotation.get("type") or "annotation"),
+            "native": dict(annotation),
+        }
+        url = detail.get("url")
+        title = detail.get("title")
+        if isinstance(url, str):
+            fields["id"] = url
+        if isinstance(title, str):
+            fields["document_title"] = title
+        for key in ("start_index", "end_index"):
+            if isinstance(detail.get(key), int):
+                fields[key] = detail[key]
+        return CitationBlock(**fields)
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
@@ -116,8 +185,16 @@ class _ToHub:
 class ChatCompletionsAdapter:
     """``POST {base_url}/v1/chat/completions``."""
 
-    name = "chat_completions"
     path = "/v1/chat/completions"
+
+    def __init__(
+        self,
+        *,
+        name: str = "chat_completions",
+        reasoning_input_field: str | None = None,
+    ) -> None:
+        self.name = name
+        self.reasoning_input_field = reasoning_input_field
 
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -126,17 +203,7 @@ class ChatCompletionsAdapter:
             "stream": True,
         }
         if request.tools:
-            body["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.input_schema,
-                    },
-                }
-                for t in request.tools
-            ]
+            body["tools"] = [self._tool_definition(t) for t in request.tools]
         for key, value in request.params.items():
             if key in _RESERVED:
                 continue
@@ -172,55 +239,129 @@ class ChatCompletionsAdapter:
         """
         out: list[dict[str, Any]] = []
         for message in messages:
-            tool_results = [b for b in message.content if isinstance(b, ToolResultBlock)]
-            tool_calls = [b for b in message.content if isinstance(b, ToolUseBlock)]
-
-            # tool 결과가 먼저 나가야 직전 assistant 턴의 tool_calls와 짝이 맞는다.
-            for block in tool_results:
+            pending: list[ContentBlock] = []
+            for block in message.content:
+                if not isinstance(block, ToolResultBlock):
+                    pending.append(block)
+                    continue
+                wire = self._message(message.role, pending, lowerer)
+                if wire is not None:
+                    out.append(wire)
+                pending = []
                 out.append(
                     {
                         "role": "tool",
                         "tool_call_id": block.tool_use_id,
-                        "content": block.content,
+                        "content": self._tool_result_text(block, lowerer),
                     }
                 )
-
-            # 멀티모달 part. streambind-base의 RequestContentPart는 text와 image_url 둘만
-            # permit하지만 실제 API는 input_audio와 file도 받는다.
-            parts: list[dict[str, Any]] = []
-            rest: list[ContentBlock] = []
-            for item in message.content:
-                if isinstance(item, ToolResultBlock | ToolUseBlock):
-                    continue
-                part = as_chat_completions_part(item)
-                if part is not None:
-                    parts.append(part)
-                else:
-                    rest.append(item)
-
-            text = lowerer.lower_text(rest)
-            if not text and not tool_calls and not parts:
-                continue
-
-            content: str | list[dict[str, Any]] = text
-            if parts:
-                # part 리스트를 쓰면 본문도 part가 되어야 한다. 문자열과 섞을 수 없다.
-                if text:
-                    parts.append({"type": "text", "text": text})
-                content = parts
-
-            wire: dict[str, Any] = {"role": message.role, "content": content}
-            if tool_calls:
-                wire["tool_calls"] = [
-                    {
-                        "id": b.id,
-                        "type": "function",
-                        "function": {"name": b.name, "arguments": b.input_json or "{}"},
-                    }
-                    for b in tool_calls
-                ]
-            out.append(wire)
+            wire = self._message(message.role, pending, lowerer)
+            if wire is not None:
+                out.append(wire)
         return out
+
+    def _message(
+        self, role: str, blocks: list[ContentBlock], lowerer: Lowerer
+    ) -> dict[str, Any] | None:
+        tool_calls = [b for b in blocks if isinstance(b, ToolUseBlock)]
+        reasoning = [
+            b.thinking
+            for b in blocks
+            if isinstance(b, ThinkingBlock) and b.source == self.name and self.reasoning_input_field
+        ]
+        audio_refs = [
+            block.file_id
+            for block in blocks
+            if isinstance(block, AudioBlock) and block.source == self.name and block.file_id
+        ]
+
+        parts: list[dict[str, Any]] = []
+        plain: list[ContentBlock] = []
+
+        def flush_plain() -> None:
+            text = lowerer.lower_text(plain)
+            plain.clear()
+            if text:
+                parts.append({"type": "text", "text": text})
+
+        for block in blocks:
+            if isinstance(block, ToolUseBlock):
+                continue
+            if isinstance(block, ThinkingBlock):
+                if block.source == self.name and self.reasoning_input_field:
+                    continue
+                plain.append(block)
+                continue
+            if isinstance(block, AudioBlock) and role == "assistant":
+                # Chat의 이전 assistant audio는 입력 Part가 아니라 audio ID 참조다.
+                continue
+            if (
+                isinstance(block, ServerToolBlock | VendorBlock)
+                and block.source == self.name
+                and block.raw
+            ):
+                flush_plain()
+                parts.append(dict(block.raw))
+                continue
+            part = as_chat_completions_part(block)
+            if part is None:
+                plain.append(block)
+                continue
+            flush_plain()
+            parts.append(part)
+        flush_plain()
+
+        if not parts and not tool_calls and not reasoning and not audio_refs:
+            return None
+        wire: dict[str, Any] = {"role": role}
+        if parts:
+            if len(parts) == 1 and parts[0].get("type") == "text":
+                wire["content"] = parts[0]["text"]
+            else:
+                wire["content"] = parts
+        elif tool_calls or audio_refs:
+            wire["content"] = None
+        if tool_calls:
+            wire["tool_calls"] = [self._tool_call(block) for block in tool_calls]
+        if reasoning and self.reasoning_input_field:
+            wire[self.reasoning_input_field] = "".join(reasoning)
+        if audio_refs:
+            wire["audio"] = {"id": audio_refs[-1]}
+        return wire
+
+    def _tool_call(self, block: ToolUseBlock) -> dict[str, Any]:
+        if block.source == self.name and block.native:
+            call = dict(block.native)
+        else:
+            call = {"id": block.id, "type": block.kind}
+        if block.kind == "custom":
+            call["custom"] = {"name": block.name, "input": block.input_json}
+        else:
+            call["type"] = "function"
+            call["function"] = {"name": block.name, "arguments": block.input_json or "{}"}
+        return call
+
+    @staticmethod
+    def _tool_result_text(block: ToolResultBlock, lowerer: Lowerer) -> str:
+        nested = lowerer.lower_text(block.blocks)
+        if block.content and nested:
+            return f"{block.content}\n{nested}"
+        if block.structured_content is not None:
+            return json.dumps(block.structured_content, ensure_ascii=False)
+        return block.content or nested
+
+    def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any]:
+        native = tool.native_for(self.name)
+        if native is not None:
+            return native
+        return {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            },
+        }
 
 
 chat_completions = ChatCompletionsAdapter()

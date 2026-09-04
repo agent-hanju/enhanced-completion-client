@@ -24,12 +24,12 @@ from enhanced_completion import (
     HubMessage,
     HubResponse,
     MappingError,
+    ServerToolBlock,
     StreamMerger,
     TextBlock,
     ThinkingBlock,
     ToolDefinition,
     ToolUseBlock,
-    VendorBlock,
 )
 from enhanced_completion.vendors import generate_content, messages, responses
 
@@ -261,23 +261,28 @@ class TestMessages:
         assert result.text == "답"
 
     @respx.mock
-    async def test_unknown_block_type_is_preserved(self) -> None:
+    async def test_server_tool_result_becomes_a_server_tool_block(self) -> None:
         payload = sse(
             (
                 "content_block_start",
                 {
                     "type": "content_block_start",
                     "index": 0,
-                    "content_block": {"type": "web_search_tool_result", "content": [{"url": "u"}]},
+                    "content_block": {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srv1",
+                        "content": [{"url": "u"}],
+                    },
                 },
             ),
             ("message_stop", {"type": "message_stop"}),
         )
         respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=payload))
         block = (await make(messages).complete(["x"])).content[0]
-        assert isinstance(block, VendorBlock)
-        assert block.type == "web_search_tool_result"
-        assert block.raw == {"content": [{"url": "u"}]}
+        assert isinstance(block, ServerToolBlock)
+        assert block.name == "web_search_tool_result"
+        assert block.id == "srv1"
+        assert json.loads(block.output) == [{"url": "u"}]
 
     @respx.mock
     async def test_ping_is_ignored(self) -> None:
@@ -377,7 +382,7 @@ class TestResponses:
         result = await make(responses).complete(["x"])
         assert result.text == "안녕하세요"
         assert result.id == "r1"
-        assert result.stop_reason == "stop"
+        assert result.stop_reason == "end_turn"
         assert result.usage is not None
         assert (result.usage.input_tokens, result.usage.output_tokens) == (3, 4)
 
@@ -487,7 +492,7 @@ class TestResponses:
             (None, {"type": "response.completed", "response": {"status": "completed"}}),
         )
         respx.post(RESP_URL).mock(return_value=httpx.Response(200, content=payload))
-        assert (await make(responses).complete(["x"])).text == "거부합니다"
+        assert (await make(responses).complete(["x"])).text == "[Refused] 거부합니다"
 
     @respx.mock
     async def test_unknown_tool_family_is_matched_by_rule(self) -> None:
@@ -498,8 +503,9 @@ class TestResponses:
         )
         respx.post(RESP_URL).mock(return_value=httpx.Response(200, content=payload))
         block = (await make(responses).complete(["x"])).content[0]
-        assert isinstance(block, VendorBlock)
-        assert block.type == "responses_in_progress"
+        assert isinstance(block, ServerToolBlock)
+        assert block.name == "brand_new_call"
+        assert block.status == "in_progress"
 
     @respx.mock
     async def test_incomplete_reports_its_reason(self) -> None:
@@ -526,7 +532,7 @@ class TestResponses:
         )
         respx.post(RESP_URL).mock(return_value=httpx.Response(200, content=payload))
         result = await make(responses).complete(["x"])
-        assert result.stop_reason == "max_output_tokens"
+        assert result.stop_reason == "max_tokens"
         assert result.text == "잘림"
 
     @respx.mock
@@ -628,7 +634,7 @@ class TestGenerateContent:
         assert result.text == "안녕하세요"
         assert result.id == "g1"
         assert result.role == "assistant"
-        assert result.stop_reason == "stop"
+        assert result.stop_reason == "end_turn"
         assert result.usage is not None
         assert (result.usage.input_tokens, result.usage.output_tokens) == (5, 2)
 
@@ -715,7 +721,7 @@ class TestGenerateContent:
         assert [b.name for b in calls] == ["a", "b"]
 
     @respx.mock
-    async def test_vendor_only_parts_are_preserved(self) -> None:
+    async def test_executable_code_becomes_a_server_tool_block(self) -> None:
         payload = sse(
             (
                 None,
@@ -734,12 +740,12 @@ class TestGenerateContent:
         )
         respx.post(GEMINI_URL).mock(return_value=httpx.Response(200, content=payload))
         block = (await make(GEMINI).complete(["x"])).content[0]
-        assert isinstance(block, VendorBlock)
-        assert block.type == "executableCode"
+        assert isinstance(block, ServerToolBlock)
+        assert block.name == "executableCode"
         assert block.raw == {"language": "PYTHON", "code": "print(1)"}
 
     @respx.mock
-    async def test_max_tokens_finish_reason_maps_to_length(self) -> None:
+    async def test_max_tokens_finish_reason_normalizes(self) -> None:
         payload = sse(
             (
                 None,
@@ -751,7 +757,7 @@ class TestGenerateContent:
             ),
         )
         respx.post(GEMINI_URL).mock(return_value=httpx.Response(200, content=payload))
-        assert (await make(GEMINI).complete(["x"])).stop_reason == "length"
+        assert (await make(GEMINI).complete(["x"])).stop_reason == "max_tokens"
 
     @respx.mock
     async def test_api_key_header_is_sent(self) -> None:
@@ -1252,4 +1258,6 @@ class TestDenseLowering:
         contents = gemini["contents"]
         assert isinstance(contents, list)
         responses_parts = [p for c in contents for p in c["parts"] if "functionResponse" in p]
-        assert responses_parts[0]["functionResponse"]["name"] == "c1"
+        function_response = responses_parts[0]["functionResponse"]
+        assert function_response["name"] == "lookup"
+        assert function_response["id"] == "c1"

@@ -13,7 +13,6 @@
 """
 
 from .agent import (
-    AgentActivityBlock,
     AgentAdapter,
     AgentErrorBlock,
     AgentEvent,
@@ -28,7 +27,6 @@ from .messages import MessagesAdapter, messages
 from .responses import ResponsesAdapter, responses
 
 __all__ = [
-    "AgentActivityBlock",
     "AgentAdapter",
     "AgentErrorBlock",
     "AgentEvent",

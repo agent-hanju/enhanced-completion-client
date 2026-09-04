@@ -1,446 +1,205 @@
-# Enhanced Completion Client
+# enhanced-completion-client
 
-OpenAI-compatible Chat Completion API 클라이언트로, 스트리밍 응답과 인용(Citation) 태그 파싱을 지원합니다.
+여러 LLM API의 요청·SSE 응답을 하나의 Python 모델로 연결하는 라이브러리다. 서버가 아니라
+소비 애플리케이션 안에서 `Bridge` 또는 `SyncBridge` 인스턴스를 만들어 사용한다.
 
-## Features
+| 어댑터 | API |
+|---|---|
+| `chat_completions` | OpenAI 호환 Chat Completions, vLLM, DeepSeek 계열 |
+| `responses` | OpenAI Responses |
+| `messages` | Anthropic Messages |
+| `generate_content` | Gemini `streamGenerateContent` |
+| `single_agent`, `code_agent` | 사내 agent-studio SSE |
 
-- **OpenAI-compatible API**: `/v1/chat/completions` 엔드포인트 호환
-- **Streaming Support**: SSE 기반 실시간 스트리밍 응답 처리
-- **Citation Parsing**: `<cite>` / `<rag>` 태그 자동 파싱 및 Citation 추출
-- **Document Attachment**: 문서 첨부 메시지 지원
-- **Reactive Streams**: Spring WebFlux 기반 비동기 처리
+모든 응답은 `HubResponse`로 수렴하고 `HubMessage.of_response(response)`로 다음 요청 이력이 된다.
+텍스트, 멀티모달 입력, 클라이언트 도구 호출·결과는 대상 벤더의 네이티브 wire 형태로 변환한다.
+추론 서명과 서버 도구처럼 벤더에 종속된 항목은 원본 `native`/`raw`를 보존해 같은 벤더로만
+재전송한다.
 
-## Installation
+Augment/RAG 실행 기능은 포함하지 않는다. 문서와 인용은 입력·응답 블록으로만 다룬다.
 
-### Gradle (JitPack)
+## 설치
 
-```groovy
-repositories {
-    maven { url 'https://jitpack.io' }
-}
+Python 3.12 이상과 `uv`를 사용한다.
 
-dependencies {
-    implementation 'com.github.agent-hanju:enhanced-completion-client:0.2.0'
-}
+```bash
+uv add enhanced-completion-client
 ```
 
-### Maven (JitPack)
+개발 환경은 다음과 같이 준비한다.
 
-```xml
-<repositories>
-    <repository>
-        <id>jitpack.io</id>
-        <url>https://jitpack.io</url>
-    </repository>
-</repositories>
-
-<dependency>
-    <groupId>com.github.agent-hanju</groupId>
-    <artifactId>enhanced-completion-client</artifactId>
-    <version>0.2.0</version>
-</dependency>
+```bash
+uv sync --all-groups
+uv run pytest
 ```
 
-## Usage
+## 비동기 API
 
-### Basic Streaming
+```python
+from enhanced_completion import Bridge, HubMessage
+from enhanced_completion.vendors import responses
 
-```java
-import me.hanju.enhancedcompletion.EnhancedCompletionClient;
-import me.hanju.enhancedcompletion.EnhancedCompletionProperties;
-import me.hanju.enhancedcompletion.payload.completion.EnhancedCompletionRequest;
-import me.hanju.enhancedcompletion.payload.completion.EnhancedCompletionResponse;
-import me.hanju.enhancedcompletion.payload.completion.Message;
-import me.hanju.fluxhandle.FluxListener;
+async with Bridge(
+    vendor=responses,
+    base_url="https://api.openai.com",
+    model="gpt-5-mini",
+    api_key="...",
+) as bridge:
+    stream = bridge.stream(["서울을 한 단어로 설명해줘"])
+    async for delta in stream:
+        print(delta.text, end="")
 
-// 클라이언트 생성
-EnhancedCompletionProperties properties = new EnhancedCompletionProperties(
-    "https://api.openai.com",
-    "your-api-key"
-);
-EnhancedCompletionClient client = new EnhancedCompletionClient(
-    WebClient.builder(),
-    new ObjectMapper(),
-    properties
-);
-
-// 요청 생성
-EnhancedCompletionRequest request = EnhancedCompletionRequest.builder()
-    .model("gpt-4")
-    .messages(List.of(
-        Message.builder().role("user").content("Hello!").build()
-    ))
-    .build();
-
-// 스트리밍 요청
-client.stream(request, new FluxListener<>() {
-    @Override
-    public void onNext(EnhancedCompletionResponse response) {
-        // 토큰 단위로 delta 수신
-        CitedMessage delta = response.getChoices().get(0).getDelta();
-        if (delta.getContent() != null) {
-            System.out.print(delta.getContent());
-        }
-        if (delta.getCitations() != null) {
-            // Citation 정보 처리
-            delta.getCitations().forEach(cite ->
-                System.out.println("Citation: " + cite.getId())
-            );
-        }
-    }
-
-    @Override
-    public void onComplete() {
-        System.out.println("\nDone!");
-    }
-
-    @Override
-    public void onError(Throwable e) {
-        e.printStackTrace();
-    }
-});
+    result = stream.result
+    history = [
+        "서울을 한 단어로 설명해줘",
+        HubMessage.of_response(result),
+        "영어로 바꿔줘",
+    ]
+    follow_up = await bridge.complete(history)
 ```
 
-### Non-Streaming Request
+`complete()`는 내부적으로 스트림을 끝까지 소비해 병합된 `HubResponse`만 반환한다.
+`build_request()`는 네트워크 요청 없이 실제 wire body를 확인할 때 사용한다.
 
-```java
-EnhancedCompletionResponse response = client.complete(request);
-CitedMessage message = response.getChoices().get(0).getMessage();
+## 동기 API
 
-System.out.println("Content: " + message.getContent());
-System.out.println("Citations: " + message.getCitations());
+```python
+from enhanced_completion import SyncBridge
+from enhanced_completion.vendors import chat_completions
+
+with SyncBridge(
+    vendor=chat_completions,
+    base_url="http://127.0.0.1:8000",
+    model="qwen3-8b",
+) as bridge:
+    result = bridge.complete(
+        ["대한민국의 수도는?"],
+        max_tokens=32,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    print(result.text)
 ```
 
-### Document Attachment
+재시도와 SSE 재연결 정책은 내장하지 않는다. 필요하면 호출자가 주입하는 `httpx.Client` 또는
+`httpx.AsyncClient`에 연결·프록시·TLS 정책을 설정한다.
 
-```java
-import me.hanju.enhancedcompletion.payload.message.AttachedMessage;
-import me.hanju.enhancedcompletion.payload.document.SimpleDocument;
+## 도구 호출과 결과
 
-AttachedMessage userMessage = AttachedMessage.builder()
-    .role("user")
-    .content("이 문서들을 참고해서 답변해주세요.")
-    .documents(List.of(
-        SimpleDocument.builder()
-            .id("doc1")
-            .title("문서 제목")
-            .content("문서 내용...")
-            .build()
-    ))
-    .build();
+허브에서는 `ToolUseBlock`과 `ToolResultBlock` 한 쌍을 사용한다.
 
-EnhancedCompletionRequest request = EnhancedCompletionRequest.builder()
-    .model("gpt-4")
-    .messages(List.of(userMessage))
-    .build();
+```python
+from enhanced_completion import HubMessage, ToolResultBlock
+
+first = await bridge.complete(messages, tools=tools)
+assistant = HubMessage.of_response(first)
+
+results = [
+    ToolResultBlock(
+        tool_use_id=call.id,
+        name=call.name,
+        content=run_tool(call.name, call.input),
+    )
+    for call in first.content
+    if call.type == "tool_use"
+]
+
+second = await bridge.complete(
+    [*messages, assistant, HubMessage(role="user", content=results)],
+    tools=tools,
+)
 ```
 
-### Tool Use
+동일한 허브 블록은 대상에 따라 다음처럼 내려간다.
 
-```java
-import me.hanju.enhancedcompletion.payload.message.BaseMessage;
-import me.hanju.enhancedcompletion.payload.message.ToolMessage;
-import me.hanju.enhancedcompletion.payload.message.ResponseMessage;
+| API | 호출 | 결과 |
+|---|---|---|
+| Chat Completions | assistant `tool_calls[]` | 별도 `role: tool` 메시지 |
+| Anthropic | assistant `tool_use` | user `tool_result` 블록 |
+| Responses | `function_call` Item | `function_call_output` Item |
+| Gemini | model `functionCall` Part | user `functionResponse` Part |
 
-// 1. Tool 호출을 포함한 응답 수신
-EnhancedCompletionResponse response = client.complete(request);
-ResponseMessage assistantMessage = response.getChoices().get(0).getMessage();
+Gemini의 `functionResponse.name`은 앞선 호출 ID로 함수명을 찾아 채운다. ID가 지원되는 API에서는
+ID도 함께 보존한다. Anthropic과 Responses는 도구 결과 안의 이미지·파일 같은 중첩 블록도
+지원되는 네이티브 content part로 변환한다.
 
-if (assistantMessage.getToolCalls() != null) {
-    List<IMessageable> messages = new ArrayList<>(request.getMessages());
-    messages.add(assistantMessage);
+## 멀티모달 입력
 
-    // 2. 각 Tool 호출에 대한 결과 추가
-    for (ToolCall toolCall : assistantMessage.getToolCalls()) {
-        String result = executeToolCall(toolCall);  // Tool 실행
-        messages.add(ToolMessage.of(toolCall.getId(), result));
-    }
+```python
+from enhanced_completion import AudioBlock, DocumentBlock, HubMessage, ImageBlock, TextBlock
 
-    // 3. Tool 결과와 함께 후속 요청
-    EnhancedCompletionRequest followUp = request.toBuilder()
-        .messages(messages)
-        .build();
+message = HubMessage(
+    role="user",
+    content=[
+        ImageBlock(url="https://example.com/chart.png", detail="low"),
+        AudioBlock(data=audio_base64, format="wav"),
+        DocumentBlock(
+            id="report",
+            title="보고서",
+            data=pdf_base64,
+            media_type="application/pdf",
+        ),
+        TextBlock(text="핵심만 설명해줘"),
+    ],
+)
 
-    EnhancedCompletionResponse finalResponse = client.complete(followUp);
-}
+wire = bridge.build_request([message])
 ```
 
-## Message Types
+대상 API가 네이티브 입력 타입을 제공하면 이미지·음성·파일 Part로 보낸다. 지원하지 않는
+조합은 임의의 잘못된 Part를 만들지 않는다. 평문 `DocumentBlock`은 네이티브 문서 채널이 없는
+대상에서 XML-like 문서 텍스트로 내릴 수 있다.
 
-### 기본 제공 메시지 타입
+## 인용과 사용자 정의 content type
 
-| 타입              | 설명                                                            |
-| ----------------- | --------------------------------------------------------------- |
-| `BaseMessage`     | 기본 메시지 (role, content)                                     |
-| `ToolMessage`     | Tool 호출 결과 메시지 (tool_call_id 필수, role은 "tool"로 고정) |
-| `AttachedMessage` | 문서 첨부 메시지 (documents 포함)                               |
-| `ResponseMessage` | LLM 응답 메시지 (reasoning, tool_calls 포함)                    |
-| `CitedMessage`    | 인용 정보가 포함된 응답 메시지 (citations 포함)                 |
+`CiteVocabulary`는 스트림에 걸쳐 잘린 `<cite id="...">...</cite>`를 파싱하고, 구조화된
+`CitationBlock`을 다음 요청의 텍스트로 되돌린다.
 
-### Custom Message 타입 정의
+```python
+from enhanced_completion import Bridge, CiteVocabulary
 
-`IMessageable` 인터페이스를 구현하여 커스텀 메시지 타입을 정의할 수 있습니다.
+cite = CiteVocabulary()
+bridge = Bridge(
+    vendor=chat_completions,
+    base_url="http://127.0.0.1:8000",
+    model="qwen3-8b",
+    vocabularies=[cite],
+)
 
-```java
-import me.hanju.enhancedcompletion.payload.message.IMessageable;
-import me.hanju.enhancedcompletion.payload.completion.Message;
-
-public class MyCustomMessage implements IMessageable {
-    private String role;
-    private String content;
-    private String customField;  // 커스텀 필드
-
-    @Override
-    public String getRole() {
-        return role;
-    }
-
-    @Override
-    public String getContent() {
-        return content;
-    }
-
-    @Override
-    public Message toMessage() {
-        // LLM API로 전송될 형식으로 변환
-        return Message.builder()
-            .role(role)
-            .content(content + "\n[Custom: " + customField + "]")
-            .build();
-    }
-}
+prompt = cite.prompt_hint() + "\n\n문서와 질문..."
+result = await bridge.complete([prompt])
 ```
 
-### ObjectMapper에 커스텀 타입 등록
+새 content type은 `ContentBlock`을 상속하고 `Vocabulary.lower()`와 필요 시
+`Vocabulary.lift_mapper()`를 구현한다. `Bridge`에 Vocabulary를 등록하면 블록 타입도 런타임
+레지스트리에 등록된다. 등록되지 않은 벤더 타입은 `VendorBlock`으로 떨어져 원본을 보존한다.
 
-Jackson ObjectMapper에 커스텀 타입을 등록하면 JSON 역직렬화 시 자동으로 인식됩니다.
+## 벤더별 특수 규약
 
-```java
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.jsontype.NamedType;
+- Anthropic은 `anthropic-version`을 자동으로 보낸다. Citations는 GA라 beta 헤더가 필요 없다.
+  MCP connector처럼 beta가 필요한 기능은
+  `MessagesAdapter(betas=["mcp-client-2025-11-20"])`로 명시한다.
+- Responses의 reasoning은 표시 가능한 summary와 불투명한 `encrypted_content`를 구분한다.
+  같은 API로 이력을 되보낼 때 reasoning Item을 원형대로 재전송한다.
+- Gemini의 `thoughtSignature`는 `functionCall`뿐 아니라 일반 Part에도 붙을 수 있다. 반환된 Part와
+  서명을 같은 Gemini 요청에서 그대로 재생한다.
+- DeepSeek의 thinking/tool loop가 필요하면
+  `ChatCompletionsAdapter(name="deepseek", reasoning_input_field="reasoning_content")`를 사용한다.
 
-ObjectMapper mapper = new ObjectMapper();
-mapper.registerSubtypes(new NamedType(MyCustomMessage.class, "my-custom-type"));
+정확한 보존 범위와 레거시 규칙의 수정점은 [현재 API 감사](docs/Current-API-Audit.md), 전체 타입
+목록은 [블록 인벤토리](docs/Block-Inventory.md), Java 기준선은
+[변환 규칙](docs/Conversion-Rules.md)에 기록되어 있다.
 
-// 클라이언트 생성 시 등록된 ObjectMapper 사용
-EnhancedCompletionProperties properties = new EnhancedCompletionProperties(
-    "https://api.openai.com",
-    "your-api-key"
-);
-EnhancedCompletionClient client = new EnhancedCompletionClient(
-    WebClient.builder(),
-    mapper,
-    properties
-);
+## 검증
+
+```bash
+uv run ruff check src tests
+uv run mypy src
+uv run pytest
+uv build
 ```
 
-### 커스텀 메시지 사용
+라이브 테스트는 `.env.example`을 `.env`로 복사해 값을 넣은 뒤 명시적으로 실행한다.
 
-```java
-MyCustomMessage customMessage = new MyCustomMessage();
-customMessage.setRole("user");
-customMessage.setContent("질문입니다.");
-customMessage.setCustomField("추가 정보");
-
-EnhancedCompletionRequest request = EnhancedCompletionRequest.builder()
-    .model("gpt-4")
-    .messages(List.of(customMessage))
-    .build();
+```bash
+uv run pytest -m "live and not slow" -s
 ```
-
-## Augmenter (RAG)
-
-RAG(Retrieval-Augmented Generation) 기능을 위한 Augmenter 인터페이스를 제공합니다.
-
-### 기본 제공 Augmenter
-
-| 타입                    | 설명                                      |
-| ----------------------- | ----------------------------------------- |
-| `MockAugmenter`         | 테스트/개발용, 미리 정의된 문서 반환      |
-| `KeywordMatchAugmenter` | 키워드 기반 간단한 검색, 외부 의존성 없음 |
-| `VectorDBAugmenter`     | 벡터 DB 연동용 추상 클래스                |
-| `CompositeAugmenter`    | 여러 Augmenter 병렬 실행 후 결과 병합     |
-
-### Augmenter 사용
-
-```java
-import me.hanju.enhancedcompletion.augmenter.MockAugmenter;
-import me.hanju.enhancedcompletion.spi.augment.AugmentRequest;
-import me.hanju.enhancedcompletion.spi.augment.AugmentResult;
-
-// Augmenter 생성
-MockAugmenter augmenter = MockAugmenter.builder()
-    .name("my-augmenter")
-    .documents(List.of(
-        SimpleDocument.builder()
-            .id("doc1")
-            .title("문서 제목")
-            .content("문서 내용")
-            .build()
-    ))
-    .build();
-
-// 검색 요청
-AugmentRequest request = new AugmentRequest(conversationHistory, "검색 쿼리");
-
-// 결과 수신 (Reactive)
-augmenter.augment(request)
-    .flatMapIterable(AugmentResult::getDocuments)
-    .subscribe(doc -> System.out.println("Found: " + doc.getTitle()));
-```
-
-### KeywordMatchAugmenter 사용
-
-```java
-import me.hanju.enhancedcompletion.augmenter.KeywordMatchAugmenter;
-
-KeywordMatchAugmenter augmenter = new KeywordMatchAugmenter("keyword-aug", 5);
-
-// 문서 인덱싱 (수동 키워드)
-augmenter.indexDocument(doc1, List.of("java", "spring", "programming"));
-
-// 또는 자동 키워드 추출 (제목에서)
-augmenter.indexDocument(doc2);
-
-// 검색
-AugmentRequest request = new AugmentRequest(List.of(), "java programming guide");
-List<IDocument> results = augmenter.augment(request)
-    .flatMapIterable(AugmentResult::getDocuments)
-    .collectList()
-    .block();
-```
-
-### CompositeAugmenter로 여러 소스 병합
-
-```java
-import me.hanju.enhancedcompletion.augmenter.CompositeAugmenter;
-
-CompositeAugmenter composite = CompositeAugmenter.builder()
-    .name("multi-source")
-    .addAugmenter(keywordAugmenter)
-    .addAugmenter(vectorAugmenter)
-    .maxTotalDocuments(10)  // 전체 최대 문서 수
-    .build();
-
-// 모든 Augmenter를 병렬 실행하고 결과 병합 (ID 기반 중복 제거)
-augmenter.augment(request).subscribe(...);
-```
-
-### 커스텀 Augmenter 구현
-
-`Augmenter` 인터페이스를 구현하여 커스텀 검색 로직을 정의할 수 있습니다.
-
-```java
-import me.hanju.enhancedcompletion.spi.augment.Augmenter;
-import me.hanju.enhancedcompletion.spi.augment.AugmentRequest;
-import me.hanju.enhancedcompletion.spi.augment.AugmentResult;
-
-public class MyCustomAugmenter implements Augmenter {
-
-    @Override
-    public String getName() {
-        return "my-custom-augmenter";
-    }
-
-    @Override
-    public Flux<AugmentResult> augment(AugmentRequest request) {
-        // 검색 로직 구현
-        List<IDocument> docs = searchDocuments(request.query());
-
-        if (docs.isEmpty()) {
-            return Flux.empty();
-        }
-
-        // 단일 결과 반환
-        return Flux.just(() -> docs);
-
-        // 또는 스트리밍 (문서를 개별적으로 emit)
-        // return Flux.fromIterable(docs)
-        //     .map(doc -> (AugmentResult) () -> List.of(doc));
-    }
-}
-```
-
-### VectorDBAugmenter 확장
-
-벡터 DB 연동을 위해 `VectorDBAugmenter`를 확장합니다.
-
-```java
-import me.hanju.enhancedcompletion.augmenter.VectorDBAugmenter;
-
-public class PineconeAugmenter extends VectorDBAugmenter {
-
-    public PineconeAugmenter() {
-        super("pinecone", 5, 0.7f);  // name, topK, threshold
-    }
-
-    @Override
-    protected Mono<float[]> embedQuery(String query) {
-        // 임베딩 API 호출 (예: OpenAI Embeddings)
-        return openAiClient.embeddings(query);
-    }
-
-    @Override
-    protected Flux<IDocument> searchSimilar(float[] embedding, int topK, float threshold) {
-        // 벡터 DB 검색 API 호출
-        return pineconeClient.query(embedding, topK, threshold);
-    }
-}
-```
-
-### IDocument 인터페이스
-
-검색 결과 문서는 `IDocument` 인터페이스를 구현해야 합니다.
-
-```java
-public interface IDocument {
-    String getId();       // 문서 고유 ID
-    String getTitle();    // 제목
-    String getContent();  // 내용
-    default String getUrl() { return null; }  // URL (선택)
-
-    // LLM 프롬프트용 직렬화
-    default String toSerializedPrompt() {
-        // <document id="..."><title>...</title><content>...</content></document>
-    }
-}
-```
-
-기본 구현체 `SimpleDocument`를 제공합니다:
-
-```java
-SimpleDocument doc = SimpleDocument.builder()
-    .id("doc-123")
-    .title("문서 제목")
-    .content("문서 내용")
-    .url("https://example.com/doc")
-    .build();
-```
-
-## Citation Format
-
-LLM 응답에서 `<cite>` 또는 `<rag>` 태그를 자동으로 파싱합니다.
-
-**입력 (LLM 응답):**
-
-```
-서울은 대한민국의 수도입니다<cite><id>doc1</id>수도 정보</cite>.
-```
-
-**출력:**
-
-- `content`: "서울은 대한민국의 수도입니다수도 정보."
-- `citations`: `[{index: 0, id: "doc1", startIndex: 14, endIndex: 19}]`
-
-## Dependencies
-
-- Java 21+
-- Spring WebFlux 6.2.x
-- Jackson Databind 2.18.x
-- [content-stream-adapter](https://github.com/agent-hanju/content-stream-adapter)
-- [fluxhandle](https://github.com/agent-hanju/fluxhandle)
-- [streambind](https://github.com/agent-hanju/streambind)
-
-## License
-
-MIT License

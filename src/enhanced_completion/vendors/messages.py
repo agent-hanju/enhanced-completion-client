@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from ..blocks import (
@@ -28,7 +29,7 @@ from ..blocks import (
     VendorBlock,
 )
 from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, Usage
+from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
@@ -106,7 +107,11 @@ class _ToHub:
         return [HubResponse(content=[self._seed(kind, block, index)])]
 
     def _seed(self, kind: str, block: dict[str, Any], index: Any) -> ContentBlock:
-        common: dict[str, Any] = {"index": index, "source": SOURCE}
+        common: dict[str, Any] = {
+            "index": index,
+            "source": SOURCE,
+            "native": dict(block),
+        }
         if kind == "text":
             text = block.get("text")
             return TextBlock(**common, **({"text": text} if text else {}))
@@ -125,9 +130,7 @@ class _ToHub:
             return ImageBlock(**common, **fields)
         if kind == "redacted_thinking":
             # 내용이 암호화되어 온다. 원문 그대로 되돌려야 하므로 보존만 한다.
-            return VendorBlock(
-                type=kind, raw={k: v for k, v in block.items() if k != "type"}, **common
-            )
+            return VendorBlock(type=kind, raw=dict(block), **common)
         if kind == "tool_use":
             fields = {}
             if block.get("id"):
@@ -141,7 +144,9 @@ class _ToHub:
             if block.get("id"):
                 fields["id"] = block["id"]
             if block.get("server_name"):
-                fields["raw"] = {"server_name": block["server_name"]}
+                fields["raw"] = dict(block)
+            else:
+                fields["raw"] = dict(block)
             return ServerToolBlock(**common, **fields)
         if kind in _SERVER_TOOL_RESULT:
             return ServerToolBlock(
@@ -150,12 +155,11 @@ class _ToHub:
                 output=json.dumps(block.get("content"), ensure_ascii=False)
                 if block.get("content") is not None
                 else "",
-                raw={k: v for k, v in block.items() if k != "type"},
+                raw=dict(block),
                 **common,
             )
         # 허브에 대응물이 없는 블록은 원본을 보존한다. 같은 벤더로 되돌릴 때 무손실이다.
-        raw = {k: v for k, v in block.items() if k != "type"}
-        return VendorBlock(type=kind or "unknown", raw=raw, **common)
+        return VendorBlock(type=kind or "unknown", raw=dict(block), **common)
 
     def _block_delta(self, event: dict[str, Any]) -> list[HubResponse]:
         index = event.get("index")
@@ -174,10 +178,10 @@ class _ToHub:
             fragment = delta.get("partial_json") or ""
             return self._one(ToolUseBlock(input_json=fragment, **common))
         if kind == "citations_delta":
-            return self._citation(delta.get("citation") or {})
+            return self._citation(delta.get("citation") or {}, index)
         return []
 
-    def _citation(self, citation: dict[str, Any]) -> list[HubResponse]:
+    def _citation(self, citation: dict[str, Any], block_index: Any) -> list[HubResponse]:
         """네이티브 인용을 허브 :class:`CitationBlock`으로.
 
         이 벤더는 인용을 본문 태그가 아니라 구조 채널로 준다. beta 헤더도 필요 없다. 그래서
@@ -187,7 +191,10 @@ class _ToHub:
         쪽에서 인용이 걸리는 범위는 이 인용이 실린 text 블록 전체다. 두 축이 다르므로
         ``source_*``만 채우고 답변 구간은 소비 앱이 블록 경계로 판단한다.
         """
-        fields: dict[str, Any] = {"source": SOURCE}
+        fields: dict[str, Any] = {
+            "source": SOURCE,
+            "native": {"citation": dict(citation), "block_index": block_index},
+        }
         cited = citation.get("cited_text")
         if isinstance(cited, str) and cited:
             fields["text"] = cited
@@ -248,16 +255,25 @@ class _ToHub:
 class MessagesAdapter:
     """``POST {base_url}/v1/messages``.
 
-    API key는 ``Bridge(api_key=...)``가 ``Authorization: Bearer``로 보낸다. 이 API는
-    ``x-api-key``를 쓰므로 그쪽을 원하면 ``headers``로 넘긴다.
+    이 API는 ``x-api-key``를 쓰므로 ``Bridge(api_key=...)``가 어댑터의
+    :attr:`api_key_header`를 읽어 올바른 헤더로 보낸다.
     """
 
     name = SOURCE
     path = "/v1/messages"
 
-    def __init__(self, *, version: str = DEFAULT_VERSION, max_tokens: int = 4096) -> None:
+    api_key_header = "x-api-key"
+
+    def __init__(
+        self,
+        *,
+        version: str = DEFAULT_VERSION,
+        max_tokens: int = 4096,
+        betas: Sequence[str] = (),
+    ) -> None:
         self.version = version
         self.max_tokens = max_tokens
+        self.betas = tuple(betas)
 
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
         """허브 요청을 Messages body로.
@@ -267,22 +283,20 @@ class MessagesAdapter:
         """
         system: list[str] = []
         turns: list[dict[str, Any]] = []
+        documents = [
+            block
+            for message in request.messages
+            for block in message.content
+            if isinstance(block, DocumentBlock)
+        ]
+        citations_enabled = any(document.citations_enabled for document in documents)
         for message in request.messages:
-            native, rest = self._split_native(message.content)
-            text = lowerer.lower_text(rest)
             if message.role == "system":
+                text = lowerer.lower_text(message.content)
                 if text:
                     system.append(text)
                 continue
-            if not native and not text:
-                continue
-            if not native:
-                turns.append({"role": message.role, "content": text})
-                continue
-            # 네이티브 블록이 본문보다 앞에 와야 모델이 근거를 먼저 읽는다.
-            if text:
-                native.append({"type": "text", "text": text})
-            turns.append({"role": message.role, "content": native})
+            turns.extend(self._message_turns(message, lowerer, citations_enabled=citations_enabled))
 
         params = dict(request.params)
         body: dict[str, Any] = {
@@ -294,39 +308,103 @@ class MessagesAdapter:
         if system:
             body["system"] = "\n\n".join(system)
         if request.tools:
-            body["tools"] = [
-                {"name": t.name, "description": t.description, "input_schema": t.input_schema}
-                for t in request.tools
-            ]
+            body["tools"] = [self._tool_definition(t) for t in request.tools]
         for key, value in params.items():
             if key not in ("model", "messages", "stream", "tools", "system"):
                 body[key] = value
         return body
 
-    def _split_native(
-        self, blocks: list[ContentBlock]
-    ) -> tuple[list[dict[str, Any]], list[ContentBlock]]:
-        """네이티브 part로 내릴 블록과 본문 text로 접을 블록을 나눈다.
+    def _message_turns(
+        self,
+        message: Any,
+        lowerer: Lowerer,
+        *,
+        citations_enabled: bool,
+    ) -> list[dict[str, Any]]:
+        """블록이 요구하는 role을 지키며 한 허브 턴을 0..N wire 턴으로 펼친다."""
+        turns: list[dict[str, Any]] = []
+        role = message.role
+        pending: list[ContentBlock] = []
+        pending_role: str | None = None
 
-        문서와 이미지는 이 API에 전용 content block이 있으므로 본문 텍스트로 밀어넣지 않는다.
-        도구 결과도 ``tool_result`` 블록이 있어 별도 메시지가 아니라 같은 turn에 들어간다.
-        """
-        documents = [b for b in blocks if isinstance(b, DocumentBlock)]
-        native: list[dict[str, Any]] = self._document_blocks(documents)
+        def flush() -> None:
+            nonlocal pending
+            if not pending or pending_role is None:
+                return
+            content = self._content(
+                pending,
+                lowerer,
+                citations_enabled=citations_enabled,
+            )
+            pending = []
+            if content is not None:
+                turns.append({"role": pending_role, "content": content})
+
+        for block in message.content:
+            block_role = "user" if isinstance(block, ToolResultBlock) else role
+            if pending_role is not None and block_role != pending_role:
+                flush()
+            pending_role = block_role
+            pending.append(block)
+        flush()
+        return turns
+
+    def _content(
+        self,
+        blocks: list[ContentBlock],
+        lowerer: Lowerer,
+        *,
+        citations_enabled: bool,
+    ) -> str | list[dict[str, Any]] | None:
+        parts: list[dict[str, Any]] = []
+        plain: list[ContentBlock] = []
+        last_text_part: dict[str, Any] | None = None
+        text_parts_by_index: dict[int, dict[str, Any]] = {}
+
+        def flush_plain() -> None:
+            nonlocal last_text_part
+            text = lowerer.lower_text(plain)
+            plain.clear()
+            if text:
+                last_text_part = {"type": "text", "text": text}
+                parts.append(last_text_part)
+
         for block in blocks:
-            if isinstance(block, DocumentBlock):
+            if isinstance(block, CitationBlock) and block.source == SOURCE and block.native:
+                flush_plain()
+                native_citation = block.native.get("citation", block.native)
+                block_index = block.native.get("block_index")
+                target = (
+                    text_parts_by_index.get(block_index)
+                    if isinstance(block_index, int)
+                    else last_text_part
+                )
+                if target is not None and isinstance(native_citation, dict):
+                    target.setdefault("citations", []).append(dict(native_citation))
+                continue
+            if isinstance(block, ToolResultBlock):
+                flush_plain()
+                parts.append(self._tool_result_part(block))
                 continue
             part = as_anthropic_part(block)
-            if part is not None:
-                native.append(part)
-            elif isinstance(block, ToolResultBlock):
-                native.append(self._tool_result_part(block))
-        rest = [
-            b
-            for b in blocks
-            if not isinstance(b, DocumentBlock | ImageBlock | ToolResultBlock)
-        ]
-        return native, rest
+            if part is None:
+                plain.append(block)
+                continue
+            flush_plain()
+            if isinstance(block, DocumentBlock):
+                part["citations"] = {"enabled": citations_enabled}
+            parts.append(part)
+            if part.get("type") == "text":
+                last_text_part = part
+                if isinstance(block.index, int):
+                    text_parts_by_index[block.index] = part
+        flush_plain()
+
+        if not parts:
+            return None
+        if len(parts) == 1 and parts[0] == {"type": "text", "text": parts[0].get("text")}:
+            return str(parts[0]["text"])
+        return parts
 
     @staticmethod
     def _tool_result_part(block: ToolResultBlock) -> dict[str, Any]:
@@ -335,7 +413,20 @@ class MessagesAdapter:
         이미지를 돌려주는 도구가 그 경로를 쓴다. 평문만 있으면 문자열로 싣는다.
         """
         part: dict[str, Any] = {"type": "tool_result", "tool_use_id": block.tool_use_id}
-        nested = [as_anthropic_part(b) for b in block.blocks]
+        if block.content and not block.blocks:
+            part["content"] = block.content
+            if block.is_error:
+                part["is_error"] = True
+            return part
+        if block.structured_content is not None and not block.blocks:
+            part["content"] = json.dumps(block.structured_content, ensure_ascii=False)
+            if block.is_error:
+                part["is_error"] = True
+            return part
+        nested = [
+            {"type": "text", "text": b.text} if isinstance(b, TextBlock) else as_anthropic_part(b)
+            for b in block.blocks
+        ]
         inner = [p for p in nested if p is not None]
         if block.content:
             inner.insert(0, {"type": "text", "text": block.content})
@@ -369,12 +460,25 @@ class MessagesAdapter:
             blocks.append(part)
         return blocks
 
+    def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any]:
+        native = tool.native_for(self.name)
+        if native is not None:
+            return native
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+        }
+
     def request_headers(self) -> dict[str, str]:
         """이 벤더가 요구하는 버전 헤더.
 
         인용에는 beta 헤더가 필요 없다. 버전 헤더만 요구한다.
         """
-        return {"anthropic-version": self.version}
+        headers = {"anthropic-version": self.version}
+        if self.betas:
+            headers["anthropic-beta"] = ",".join(self.betas)
+        return headers
 
     def is_terminal(self, frame: SseFrame) -> bool:
         if frame.event.strip() in TERMINAL_EVENTS:

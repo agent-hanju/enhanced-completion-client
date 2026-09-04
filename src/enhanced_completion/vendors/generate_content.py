@@ -20,8 +20,11 @@ import json
 from typing import Any
 
 from ..blocks import (
+    AudioBlock,
     CitationBlock,
     ContentBlock,
+    DocumentBlock,
+    ImageBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -30,10 +33,11 @@ from ..blocks import (
     VendorBlock,
 )
 from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, Usage
+from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
+from .normalize import normalize_role, stop_reason_from_gemini
 from .parts import as_gemini_part
 
 __all__ = ["GenerateContentAdapter", "generate_content"]
@@ -46,12 +50,27 @@ _FUNCTION_CALL = "functionCall"
 _FUNCTION_RESPONSE = "functionResponse"
 
 # 서버가 실행한 코드. 클라이언트가 결과를 되보내지 않는다.
-_SERVER_TOOL_FIELDS = ("executableCode", "codeExecutionResult")
+_SERVER_TOOL_FIELDS = (
+    "executableCode",
+    "codeExecutionResult",
+    "toolCall",
+    "toolResponse",
+)
 
 # 허브에 대응물이 없어 원본을 보존하는 Part 필드.
-_VENDOR_FIELDS = ("inlineData", "fileData", "videoMetadata")
-
-_STOP_REASONS = {"STOP": "stop", "MAX_TOKENS": "length"}
+_PART_FIELDS = frozenset(
+    {
+        "text",
+        "inlineData",
+        "functionCall",
+        "functionResponse",
+        "fileData",
+        "executableCode",
+        "codeExecutionResult",
+        "toolCall",
+        "toolResponse",
+    }
+)
 
 
 def _parse_args(raw: str) -> dict[str, Any]:
@@ -72,12 +91,10 @@ class _ToHub:
     part 인덱스를 주지 않으므로 어댑터가 만들어야 한다.
     """
 
-    TEXT_INDEX = 0
-    THINKING_INDEX = -1
-    TOOL_INDEX_BASE = 1
-
     def __init__(self) -> None:
-        self._tool_index = self.TOOL_INDEX_BASE
+        self._next_index = 0
+        self._last_stream_key: str | None = None
+        self._last_stream_index: int | None = None
 
     def map(self, chunk: dict[str, Any]) -> list[HubResponse]:
         candidates = chunk.get("candidates") or []
@@ -85,9 +102,9 @@ class _ToHub:
         content = head.get("content") or {}
 
         blocks: list[ContentBlock] = []
-        for part in content.get("parts") or []:
+        for position, part in enumerate(content.get("parts") or []):
             if isinstance(part, dict):
-                block = self._part(part)
+                block = self._part(part, self._part_index(part, position=position))
                 if block is not None:
                     blocks.append(block)
 
@@ -101,11 +118,10 @@ class _ToHub:
             fields["id"] = chunk["responseId"]
         role = content.get("role")
         if isinstance(role, str) and role:
-            # Gemini는 assistant를 model이라 부른다. 허브 어휘로 맞춘다.
-            fields["role"] = "assistant" if role == "model" else role
+            fields["role"] = normalize_role(role)
         reason = head.get("finishReason")
         if isinstance(reason, str) and reason:
-            fields["stop_reason"] = _STOP_REASONS.get(reason, reason.lower())
+            fields["stop_reason"] = stop_reason_from_gemini(reason)
         usage = self._usage(chunk.get("usageMetadata"))
         if usage is not None:
             fields["usage"] = usage
@@ -160,27 +176,130 @@ class _ToHub:
             out.append(VendorBlock(type="safetyRatings", raw={"ratings": ratings}, source=SOURCE))
         return out
 
-    def _part(self, part: dict[str, Any]) -> ContentBlock | None:
+    def _part_index(self, part: dict[str, Any], *, position: int) -> int:
+        """명시적 part index가 없는 스트림에서 연속 텍스트 조각만 같은 슬롯에 모은다."""
+        if isinstance(part.get("text"), str):
+            key = "thinking" if part.get("thought") else "text"
+            if (
+                position == 0
+                and key == self._last_stream_key
+                and self._last_stream_index is not None
+            ):
+                return self._last_stream_index
+        else:
+            key = next((field for field in _PART_FIELDS if field in part), "unknown")
+
+        index = self._next_index
+        self._next_index += 1
+        self._last_stream_key = key
+        self._last_stream_index = index
+        return index
+
+    def _part(self, part: dict[str, Any], index: int) -> ContentBlock | None:
         """채워진 필드로 종류를 알아낸다. 판별자가 없어 순서가 계약이다."""
         text = part.get(_TEXT)
-        if isinstance(text, str) and text:
+        # 빈 문자열도 블록을 만든다. 확립된 규칙이 ``text != null``이다.
+        if isinstance(text, str):
             # 같은 필드가 두 채널을 나른다. thought 불리언이 갈림길이다.
             if part.get("thought"):
-                fields: dict[str, Any] = {"thinking": text, "index": self.THINKING_INDEX}
+                fields: dict[str, Any] = {
+                    "thinking": text,
+                    "index": index,
+                    "native": dict(part),
+                }
                 signature = part.get("thoughtSignature")
                 if isinstance(signature, str) and signature:
                     fields["signature"] = signature
                 return ThinkingBlock(source=SOURCE, **fields)
-            return TextBlock(text=text, index=self.TEXT_INDEX, source=SOURCE)
+            fields = {"text": text, "index": index, "native": dict(part)}
+            signature = part.get("thoughtSignature")
+            if isinstance(signature, str) and signature:
+                fields["signature"] = signature
+            return TextBlock(source=SOURCE, **fields)
 
         call = part.get(_FUNCTION_CALL)
         if isinstance(call, dict):
-            return self._call(call)
+            return self._call(call, part, index)
 
         response = part.get(_FUNCTION_RESPONSE)
         if isinstance(response, dict):
-            # 도구 결과는 요청 쪽 어휘다. 응답에서 오면 원본을 보존한다.
-            return VendorBlock(type="function_response", raw=response, source=SOURCE)
+            # 요청 방향 어휘이지만 응답에도 온다. 허브 도구 결과로 올린다.
+            payload = response.get("response")
+            result = payload.get("result") if isinstance(payload, dict) else None
+            nested = self._function_response_blocks(response.get("parts"))
+            return ToolResultBlock(
+                tool_use_id=str(response.get("id") or response.get("name") or ""),
+                name=str(response.get("name") or "") or None,
+                content=(
+                    ""
+                    if result is None
+                    else result
+                    if isinstance(result, str)
+                    else json.dumps(result, ensure_ascii=False)
+                ),
+                structured_content=payload,
+                blocks=nested,
+                native=dict(part),
+                index=index,
+                source=SOURCE,
+            )
+
+        # inlineData는 이미지 또는 음성이다. MIME으로 갈린다.
+        inline = part.get("inlineData")
+        if isinstance(inline, dict):
+            mime = str(inline.get("mimeType") or "")
+            data = inline.get("data")
+            if mime.startswith("audio/"):
+                return AudioBlock(
+                    media_type=mime,
+                    data=data,
+                    native=dict(part),
+                    index=index,
+                    source=SOURCE,
+                )
+            if mime.startswith("image/"):
+                return ImageBlock(
+                    media_type=mime,
+                    data=data,
+                    native=dict(part),
+                    index=index,
+                    source=SOURCE,
+                )
+            return DocumentBlock(
+                media_type=mime or "application/octet-stream",
+                data=data,
+                native=dict(part),
+                index=index,
+                source=SOURCE,
+            )
+
+        file_data = part.get("fileData")
+        if isinstance(file_data, dict):
+            mime = str(file_data.get("mimeType") or "")
+            uri = file_data.get("fileUri")
+            if mime.startswith("image/"):
+                return ImageBlock(
+                    media_type=mime,
+                    url=uri,
+                    native=dict(part),
+                    index=index,
+                    source=SOURCE,
+                )
+            if mime.startswith("audio/"):
+                return AudioBlock(
+                    media_type=mime,
+                    uri=uri,
+                    native=dict(part),
+                    index=index,
+                    source=SOURCE,
+                )
+            return DocumentBlock(
+                media_type=mime or "application/octet-stream",
+                uri=uri,
+                native=dict(part),
+                index=index,
+                source=SOURCE,
+            )
 
         for field in _SERVER_TOOL_FIELDS:
             value = part.get(field)
@@ -192,18 +311,29 @@ class _ToHub:
                     else "",
                     output=str(value.get("output", "")) if field == "codeExecutionResult" else "",
                     raw=value,
+                    native=dict(part),
+                    index=index,
                     source=SOURCE,
                 )
-        for field in _VENDOR_FIELDS:
-            value = part.get(field)
-            if isinstance(value, dict):
-                return VendorBlock(type=field, raw=value, source=SOURCE)
-        return None
+        return VendorBlock(
+            type="gemini_part",
+            raw=dict(part),
+            native=dict(part),
+            index=index,
+            source=SOURCE,
+        )
 
-    def _call(self, call: dict[str, Any]) -> ToolUseBlock:
-        index = self._tool_index
-        self._tool_index += 1
-        fields: dict[str, Any] = {"index": index, "source": SOURCE}
+    def _call(
+        self,
+        call: dict[str, Any],
+        part: dict[str, Any],
+        index: int,
+    ) -> ToolUseBlock:
+        fields: dict[str, Any] = {
+            "index": index,
+            "source": SOURCE,
+            "native": dict(part),
+        }
         if call.get("id"):
             fields["id"] = call["id"]
         if call.get("name"):
@@ -212,7 +342,30 @@ class _ToHub:
         if isinstance(args, (dict, list)):
             # 이 API는 인수를 조각으로 쪼개지 않고 완성된 객체로 준다.
             fields["input_json"] = json.dumps(args, ensure_ascii=False)
+            fields["input"] = args
+        signature = part.get("thoughtSignature")
+        if isinstance(signature, str) and signature:
+            fields["signature"] = signature
         return ToolUseBlock(**fields)
+
+    @staticmethod
+    def _function_response_blocks(raw: Any) -> list[ContentBlock]:
+        blocks: list[ContentBlock] = []
+        for part in raw or []:
+            if not isinstance(part, dict):
+                continue
+            inline = part.get("inlineData") or part.get("inline_data")
+            if not isinstance(inline, dict):
+                continue
+            mime = str(inline.get("mimeType") or inline.get("mime_type") or "")
+            data = inline.get("data")
+            if mime.startswith("image/"):
+                blocks.append(ImageBlock(media_type=mime, data=data))
+            elif mime.startswith("audio/"):
+                blocks.append(AudioBlock(media_type=mime, data=data))
+            else:
+                blocks.append(DocumentBlock(media_type=mime, data=data))
+        return blocks
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
@@ -265,67 +418,21 @@ class GenerateContentAdapter:
         """
         system: list[str] = []
         contents: list[dict[str, Any]] = []
+        call_names: dict[str, str] = {}
         for message in request.messages:
-            # ``parts``는 리스트다. 텍스트 하나로 누르면 inlineData와 fileData를 실을 수 없다.
-            parts: list[dict[str, Any]] = []
-            plain: list[ContentBlock] = []
-            for block in message.content:
-                if isinstance(block, ToolResultBlock):
-                    # 도구 결과는 별개 Part다. 이름을 잃지 않으려면 호출 식별자를 쓴다.
-                    parts.append(
-                        {
-                            "functionResponse": {
-                                "name": block.tool_use_id,
-                                "response": {"result": block.content},
-                            }
-                        }
-                    )
-                    continue
-                if isinstance(block, ToolUseBlock):
-                    parts.append(
-                        {
-                            "functionCall": {
-                                "name": block.name,
-                                "args": _parse_args(block.input_json),
-                            }
-                        }
-                    )
-                    continue
-                part = as_gemini_part(block)
-                if part is not None:
-                    parts.append(part)
-                else:
-                    plain.append(block)
-
-            text = lowerer.lower_text(plain)
             if message.role == "system":
+                text = lowerer.lower_text(message.content)
                 if text:
                     system.append(text)
                 continue
-            if text:
-                parts.append({"text": text})
-            if not parts:
-                continue
-            role = "model" if message.role == "assistant" else message.role
-            contents.append({"role": role, "parts": parts})
+            contents.extend(self._contents(message.role, message.content, lowerer, call_names))
 
         params = dict(request.params)
         body: dict[str, Any] = {"contents": contents}
         if system:
             body["systemInstruction"] = {"parts": [{"text": "\n\n".join(system)}]}
         if request.tools:
-            body["tools"] = [
-                {
-                    "functionDeclarations": [
-                        {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.input_schema,
-                        }
-                        for t in request.tools
-                    ]
-                }
-            ]
+            body["tools"] = self._tools(request.tools)
 
         # 생성 파라미터가 generationConfig 안에 들어간다. 다른 셋은 최상위다.
         config = dict(params.pop("generationConfig", {}) or {})
@@ -344,6 +451,123 @@ class GenerateContentAdapter:
             if key not in ("contents", "tools", "systemInstruction"):
                 body[key] = value
         return body
+
+    def _contents(
+        self,
+        role: str,
+        blocks: list[ContentBlock],
+        lowerer: Lowerer,
+        call_names: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Part가 요구하는 role을 지키며 한 허브 턴을 0..N Content로 펼친다."""
+        contents: list[dict[str, Any]] = []
+        pending: list[ContentBlock] = []
+        pending_role: str | None = None
+
+        def flush() -> None:
+            nonlocal pending
+            if not pending or pending_role is None:
+                return
+            parts = self._parts(pending, lowerer, call_names)
+            pending = []
+            if parts:
+                contents.append({"role": pending_role, "parts": parts})
+
+        default_role = "model" if role == "assistant" else "user"
+        for block in blocks:
+            if isinstance(block, ToolUseBlock):
+                block_role = "model"
+                if block.id and block.name:
+                    call_names[block.id] = block.name
+            elif isinstance(block, ToolResultBlock):
+                block_role = "user"
+            else:
+                block_role = default_role
+            if pending_role is not None and block_role != pending_role:
+                flush()
+            pending_role = block_role
+            pending.append(block)
+        flush()
+        return contents
+
+    def _parts(
+        self,
+        blocks: list[ContentBlock],
+        lowerer: Lowerer,
+        call_names: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        plain: list[ContentBlock] = []
+
+        def flush_plain() -> None:
+            text = lowerer.lower_text(plain)
+            plain.clear()
+            if text:
+                parts.append({"text": text})
+
+        for block in blocks:
+            if isinstance(block, ToolResultBlock):
+                flush_plain()
+                parts.append(self._function_response(block, call_names))
+                continue
+            part = as_gemini_part(block)
+            if part is None:
+                plain.append(block)
+                continue
+            if (
+                isinstance(block, ServerToolBlock | VendorBlock)
+                and not any(field in part for field in _PART_FIELDS)
+                and not block.native
+            ):
+                # candidate 메타데이터는 Part가 아니므로 이력에 넣지 않는다.
+                continue
+            flush_plain()
+            parts.append(part)
+        flush_plain()
+        return parts
+
+    @staticmethod
+    def _function_response(
+        block: ToolResultBlock,
+        call_names: dict[str, str],
+    ) -> dict[str, Any]:
+        if block.source == SOURCE and block.native:
+            return dict(block.native)
+
+        name = block.name or call_names.get(block.tool_use_id) or block.tool_use_id
+        response: Any = block.structured_content
+        if response is None:
+            response = {"result": block.content}
+        elif not isinstance(response, dict):
+            response = {"result": response}
+
+        function_response: dict[str, Any] = {"name": name, "response": response}
+        if block.tool_use_id:
+            function_response["id"] = block.tool_use_id
+        nested = [as_gemini_part(part) for part in block.blocks if isinstance(part, ContentBlock)]
+        rendered = [part for part in nested if part is not None]
+        if rendered:
+            function_response["parts"] = rendered
+        return {"functionResponse": function_response}
+
+    def _tools(self, tools: list[ToolDefinition]) -> list[dict[str, Any]]:
+        native: list[dict[str, Any]] = []
+        declarations: list[dict[str, Any]] = []
+        for tool in tools:
+            wire = tool.native_for(self.name)
+            if wire is not None:
+                native.append(wire)
+                continue
+            declarations.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }
+            )
+        if declarations:
+            native.insert(0, {"functionDeclarations": declarations})
+        return native
 
     def is_terminal(self, frame: SseFrame) -> bool:
         """종료 표지가 없다. 스트림이 끊기면 끝이다."""
