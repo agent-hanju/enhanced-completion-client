@@ -29,7 +29,7 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 | sync/async API | 2/2 | `SyncBridge`, `Bridge` |
 | 공통 Hub content | 10 blocks + nested citation + fallback | text, thinking, tool use/result, image, audio, document, annotation, grounding, server tool + vendor fallback |
 | 공통 요청 옵션 투영 | 4/4 | `Hyperparameters`를 API별 wire 이름과 중첩으로 변환 |
-| API/벤더 전용 요청 옵션 | 지원 | 활성 API 섹션만 선택하고 사용자 정의 adapter 이름으로도 격리 |
+| API 고유 요청 옵션 | 지원 | 평평한 필드 중 활성 API가 지원하는 것만 선택, 나머지는 생략 |
 | 사용자 정의 block/vocabulary 확장 | 지원 | 런타임 등록, stream lifting, request lowering 왕복 테스트 |
 | generic function call/result 교차 변환 | 4/4 | 여러 ReAct 턴 포함 |
 | stateless web search native 정의 | 3/3 | Messages, Responses, GenerateContent에 명시적으로 전달 |
@@ -92,15 +92,16 @@ synthetic index를 사용해야 한다.
 
 ### 요청 Hyperparameters 지원표
 
-`Hyperparameters`의 공통 필드는 같은 의미가 확인된 API에만 투영한다. 공통 필드에 없는 API
-기능은 해당 전용 섹션에 넣으면 다른 요청으로 새지 않는다. 전용 모델은 알려진 필드를 타입으로
-노출하면서 `extra="allow"`이므로 SDK보다 먼저 추가된 wire 필드도 명시적으로 보낼 수 있다.
+`Hyperparameters`는 공통 필드와 API 고유 필드를 한 평평한 모델에 선언한다. 각 어댑터는 지원
+목록만 선택하므로 알려진 미지원 필드는 조용히 빠진다. 반면 모델에 정의되지 않은 이름은
+`extra="forbid"` 검증 오류가 되어 오타를 숨기지 않는다. 표준보다 먼저 추가된 호환 서버 필드는
+명시적 escape hatch인 `extensions`로 현재 대상 요청에만 통과시킬 수 있다.
 
 | 공통 의도 | Chat Completions | Anthropic Messages | OpenAI Responses | Gemini GenerateContent |
 |---|---|---|---|---|
 | 출력 예산 | `max_completion_tokens` | `max_tokens` | `max_output_tokens` | `generationConfig.maxOutputTokens` |
-| temperature/top-p | 최상위 | 최신 모델의 폐기 정책 때문에 공통 자동 투영 안 함 | 최상위 | `generationConfig.temperature/topP` |
-| top-k | 공통 자동 투영 안 함 | 공통 자동 투영 안 함 | 공통 자동 투영 안 함 | `generationConfig.topK` |
+| temperature/top-p | 최상위 | 최상위, 모델별 제한은 서버가 검증 | 최상위 | `generationConfig.temperature/topP` |
+| top-k | 생략 | 최상위, 모델별 제한은 서버가 검증 | 생략 | `generationConfig.topK` |
 | seed | 최상위 | 해당 없음 | 공통 자동 투영 안 함 | `generationConfig.seed` |
 | stop sequence | `stop` | `stop_sequences` | 해당 없음 | `generationConfig.stopSequences` |
 | presence/frequency penalty | 최상위 | 해당 없음 | 해당 없음 | `generationConfig`의 camelCase 필드 |
@@ -108,22 +109,29 @@ synthetic index를 사용해야 한다.
 | named tool choice | function wrapper | `type=tool` | function item | `ANY + allowedFunctionNames` |
 | parallel tool 제어 | `parallel_tool_calls` | `disable_parallel_tool_use` 반전 | `parallel_tool_calls` | 공통 자동 투영 안 함 |
 | JSON schema 출력 | `response_format.json_schema` | `output_config.format` | `text.format` | `responseJsonSchema` |
+| service tier | `service_tier` | `anthropic_service_tier` → `service_tier` | `service_tier` | `gemini_service_tier` → `serviceTier` |
 
-API별 모델은 다음 필드군을 대표적으로 선언한다.
+평면 모델은 다음 API 고유 필드군도 선언한다.
 
-- `ChatCompletionsParameters`: audio/modalities, logprobs, prediction, service tier, store,
-  stream options, verbosity, web-search options 등
-- `ResponsesParameters`: background, conversation/previous response, include, prompt, store,
-  text, truncation, service tier 등
-- `MessagesParameters`: container, context management, inference geo, MCP servers, metadata,
-  thinking, output config, service tier 등
-- `GenerateContentParameters`: generation/tool config, safety settings, cached content, service
-  tier, store 등
+- Chat Completions: `audio`, `modalities`, `logprobs`, `prediction`, `response_format`,
+  `verbosity`, `web_search_options` 등
+- Responses: `background`, `conversation`, `previous_response_id`, `include`, `prompt`,
+  `reasoning`, `text`, `truncation` 등
+- Messages: `container`, `context_management`, `inference_geo`, `mcp_servers`, `thinking`,
+  `output_config` 등
+- GenerateContent: `generation_config`, `tool_config`, `safety_settings`, `cached_content` 등
+- 둘 이상이 공유: `prompt_cache_key`, `store`, `stream_options`, `top_logprobs`, `user` 등.
+  실제 지원 대상만 선택한다.
+
+wire 이름은 같지만 값 계약이 다른 필드는 섹션 대신 평평한 벤더 접두 필드로 구분한다. 예를
+들어 OpenAI 계열 `service_tier`와 Anthropic의 `anthropic_service_tier`, Gemini의
+`gemini_service_tier`는 서로 다른 필드다. `metadata`도 OpenAI 계열용이고 Anthropic 구조는
+`anthropic_metadata`로 분리한다.
 
 생성자 기본값과 호출별 `hyperparameters=`는 deep-merge된다. 레거시 `**params`는 활성 API
 request에만 마지막 덮어쓰기로 적용된다. 후보 수(`n`, `candidateCount`)는 현재 Hub가 후보 하나만
-표현하므로 공통 옵션으로 지원하지 않으며, 필요하면 API별 섹션에서 명시하고 다중 후보 응답
-처리를 별도로 구현해야 한다.
+표현하므로 선언하지 않는다. `extensions`로 wire에 넣을 수는 있지만 다중 후보 응답 처리는
+별도로 구현해야 한다.
 
 ### 최신 공식 타입과의 차이
 
@@ -168,7 +176,9 @@ request에만 마지막 덮어쓰기로 적용된다. 후보 수(`n`, `candidate
   DeepSeek thinking은 `ChatCompletionsAdapter`의 `reasoning_content` 설정으로 처리한다.
 
 요청 옵션은 2026-09-05의 공식 create 계약을 다시 대조했다. 공통 이름이 같아 보여도 중첩과
-허용 모델이 다른 필드는 자동 변환하지 않고 API별 섹션에 남겼다.
+허용 모델이 다른 필드는 평면 모델에 두되 각 어댑터의 지원 목록으로 필터링한다. 세부 중첩
+설정은 `reasoning`, `text`, `output_config`, `generation_config`, `tool_config`가 공통 투영 결과를
+deep-merge해 덮는다.
 
 - [OpenAI Chat Completions create](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 - [OpenAI Responses create](https://developers.openai.com/api/reference/resources/responses/methods/create)
@@ -278,7 +288,7 @@ Responses API에 재생한다.
 | Anthropic `container_upload.file_id` | 응답 보존만 | raw로 조회 가능하지만 요청 재생은 거부 |
 | Anthropic code execution 결과 포함 정책 | 외부 책임 | native tool 정의와 `response_inclusion` 같은 요청값을 호출자가 구성 |
 | Gemini code execution 세션 연속성 | 외부 책임 | executable code/result Part는 보존하지만 원격 상태는 관리하지 않음 |
-| `previous_response_id`/conversation ID | 외부 책임 | `ResponsesParameters`로 명시 통과 가능하나 자동 저장·주입하지 않음 |
+| `previous_response_id`/conversation ID | 외부 책임 | 평면 `Hyperparameters`로 명시 통과 가능하나 자동 저장·주입하지 않음 |
 | MCP 서버 인증 갱신·연결 상태 | 비지원 | connector 설정은 native tool로 전달보낼 수 있으나 인증 수명주기는 외부 책임 |
 
 따라서 “raw block을 보존한다”는 것은 관찰·로그·별도 처리용 정보가 남는다는 뜻이지, 그 ID를
@@ -400,7 +410,7 @@ SDK가 소유한다. 브리지는 요청 body 생성, SSE 해석, Hub block 보�
 
 | 검증 | 결과 | 비고 |
 |---|---:|---|
-| `uv run pytest -q` | 350 passed, 23 deselected | 생성 문서 snapshot과 파라미터 투영 포함 |
+| `uv run pytest -q` | 352 passed, 23 deselected | 생성 문서 snapshot과 파라미터 투영 포함 |
 | `uv run ruff check src tests examples` | 통과 | lint/import 순서 포함 |
 | `uv run mypy src` | 통과 | strict 설정 |
 | `uv build` | 통과 | sdist와 wheel 생성 |

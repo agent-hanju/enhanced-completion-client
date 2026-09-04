@@ -94,17 +94,13 @@ with SyncBridge(
 
 ## 요청 옵션과 Hyperparameters
 
-대화 이외의 생성 옵션은 `Hyperparameters`에 둔다. 공통 필드는 의미가 같은 API에만 각 wire
-이름과 중첩 구조로 투영하고, 나머지는 API별 섹션에 격리한다.
+대화 이외의 생성 옵션은 평평한 `Hyperparameters` 하나에 둔다. 공통 필드는 의미가 같은 API의
+wire 이름과 중첩 구조로 투영하고, API 고유 필드는 지원하는 어댑터만 선택한다.
 
 ```python
 from enhanced_completion import (
-    ChatCompletionsParameters,
-    GenerateContentParameters,
     Hyperparameters,
-    MessagesParameters,
     OutputFormat,
-    ResponsesParameters,
     SyncBridge,
     ToolChoice,
 )
@@ -121,11 +117,16 @@ defaults = Hyperparameters(
         name="answer",
         json_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
     ),
-    chat_completions=ChatCompletionsParameters(verbosity="low"),
-    responses=ResponsesParameters(include=["reasoning.encrypted_content"]),
-    messages=MessagesParameters(inference_geo="us"),
-    generate_content=GenerateContentParameters(service_tier="PRIORITY"),
-    vendor={"vllm": {"chat_template_kwargs": {"enable_thinking": False}}},
+    # 알려진 API 고유 필드도 같은 객체에 평평하게 둔다.
+    verbosity="low",                              # Chat에서만 사용
+    include=["reasoning.encrypted_content"],      # Responses에서만 사용
+    inference_geo="us",                          # Messages에서만 사용
+    safety_settings=[{"category": "HARM_CATEGORY_HATE_SPEECH"}],  # Gemini만 사용
+    service_tier="auto",                         # Chat/Responses에서 사용
+    anthropic_service_tier="standard_only",      # Messages에서만 사용
+    gemini_service_tier="PRIORITY",              # Gemini에서만 사용
+    # 표준 목록 밖 호환 서버 확장은 현재 대상 요청에 명시적으로 통과시킨다.
+    extensions={"chat_template_kwargs": {"enable_thinking": False}},
 )
 
 bridge = SyncBridge(
@@ -147,12 +148,15 @@ parallel-tool 정책, 출력 형식이다. 예를 들어 출력 예산은 Chat�
 `max_completion_tokens`, Responses의 `max_output_tokens`, Messages의 `max_tokens`, Gemini의
 `generationConfig.maxOutputTokens`가 된다. 지원하지 않는 필드는 그 요청에서 빠진다.
 
-`chat_completions`/`responses`/`messages`/`generate_content` 섹션은 해당 API에서만 전송된다.
-이 모델들은 선언된 주요 필드 외에도 `extra="allow"`이므로 새 API 필드를 해당 섹션 안에서 즉시
-사용할 수 있다. 사용자 정의 어댑터는 `vendor={adapter.name: {...}}`로 확장한다. 기존
-`complete(..., **params)` 호출도 유지하며, 이 값은 선택된 API 요청에만 마지막 덮어쓰기로
-적용한다. 여러 후보를 반환하는 `n`/`candidateCount`는 Bridge가 후보 하나만 표현하므로 공통
-필드로 만들지 않았다.
+API 고유 필드도 같은 객체에 평평하게 선언한다. 각 어댑터는 지원 목록만 선택하므로
+`previous_response_id`를 Chat/Messages/Gemini가 받거나 `safety_settings`를 OpenAI가 받는 일은
+없다. 알려졌지만 대상이 지원하지 않는 필드는 조용히 빠지고, 정의되지 않은 필드는 Pydantic
+검증 오류가 되어 오타를 숨기지 않는다.
+
+표준 목록보다 먼저 추가된 호환 서버 필드는 `extensions`에 넣는다. 이 값만은 명시적 escape
+hatch이므로 현재 대상 요청에 그대로 적용된다. 기존 `complete(..., **params)` 호출도 유지하며
+같은 방식으로 마지막 덮어쓰기가 된다. 여러 후보를 반환하는 `n`/`candidateCount`는 Bridge가
+후보 하나만 표현하므로 필드로 만들지 않았다.
 
 ## 도구 호출과 결과
 

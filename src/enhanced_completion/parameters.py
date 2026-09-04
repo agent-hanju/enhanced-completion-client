@@ -1,8 +1,8 @@
-"""벤더 중립 생성 옵션과 벤더별 요청 확장.
+"""평평한 요청 옵션을 각 API가 지원하는 wire 필드로 투영한다.
 
-공통 필드는 의미가 실제로 같은 API에만 투영한다. 이름만 비슷하고 계약이 다른 옵션은 각
-벤더 섹션에 둔다. 벤더 섹션은 ``extra="allow"``라 API가 새 필드를 추가해도 즉시 사용할 수
-있지만, 다른 벤더 요청으로는 절대 새지 않는다.
+알려진 필드는 하나의 :class:`Hyperparameters`에 둔다. 각 어댑터는 자기 API가 지원하는 필드만
+골라 쓰므로 같은 객체를 다른 Bridge에 넣어도 관계없는 값은 조용히 빠진다. 반면 정의되지 않은
+필드는 Pydantic 검증 오류로 처리해 오타까지 조용히 사라지는 일은 막는다.
 """
 
 from __future__ import annotations
@@ -13,97 +13,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
-    "ChatCompletionsParameters",
-    "GenerateContentParameters",
     "Hyperparameters",
-    "MessagesParameters",
     "OutputFormat",
-    "ResponsesParameters",
     "ToolChoice",
 ]
-
-
-class _VendorParameters(BaseModel):
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
-
-    def wire(self) -> dict[str, Any]:
-        return self.model_dump(by_alias=True, exclude_none=True, exclude_unset=True)
-
-
-class ChatCompletionsParameters(_VendorParameters):
-    """Chat Completions 전용 필드. 미선언 확장도 이 섹션 안에서만 허용한다."""
-
-    audio: dict[str, Any] | None = None
-    logit_bias: dict[str, float] | None = None
-    logprobs: bool | None = None
-    max_completion_tokens: int | None = None
-    metadata: dict[str, str] | None = None
-    modalities: list[str] | None = None
-    prediction: dict[str, Any] | None = None
-    prompt_cache_key: str | None = None
-    safety_identifier: str | None = None
-    service_tier: str | None = None
-    store: bool | None = None
-    stream_options: dict[str, Any] | None = None
-    top_logprobs: int | None = None
-    user: str | None = None
-    verbosity: str | None = None
-    web_search_options: dict[str, Any] | None = None
-
-
-class ResponsesParameters(_VendorParameters):
-    """Responses 전용 필드."""
-
-    background: bool | None = None
-    conversation: str | dict[str, Any] | None = None
-    include: list[str] | None = None
-    metadata: dict[str, str] | None = None
-    previous_response_id: str | None = None
-    prompt: dict[str, Any] | None = None
-    prompt_cache_key: str | None = None
-    safety_identifier: str | None = None
-    service_tier: str | None = None
-    store: bool | None = None
-    stream_options: dict[str, Any] | None = None
-    text: dict[str, Any] | None = None
-    top_logprobs: int | None = None
-    truncation: str | None = None
-    user: str | None = None
-
-
-class MessagesParameters(_VendorParameters):
-    """Anthropic Messages 전용 필드.
-
-    ``temperature``/``top_p``/``top_k``는 최신 모델에서 폐기되었지만 구형 모델 호환을 위해
-    명시적 벤더 섹션에는 남긴다. 공통 sampling 옵션에서는 자동 투영하지 않는다.
-    """
-
-    cache_control: dict[str, Any] | None = None
-    container: str | dict[str, Any] | None = None
-    context_management: dict[str, Any] | None = None
-    inference_geo: str | None = None
-    max_tokens: int | None = None
-    mcp_servers: list[dict[str, Any]] | None = None
-    metadata: dict[str, Any] | None = None
-    output_config: dict[str, Any] | None = None
-    service_tier: str | None = None
-    stop_sequences: list[str] | None = None
-    temperature: float | None = None
-    thinking: dict[str, Any] | None = None
-    tool_choice: dict[str, Any] | None = None
-    top_k: int | None = None
-    top_p: float | None = None
-
-
-class GenerateContentParameters(_VendorParameters):
-    """Gemini GenerateContent 전용 필드. JSON 이름은 REST wire 이름으로 직렬화한다."""
-
-    generation_config: dict[str, Any] | None = Field(default=None, alias="generationConfig")
-    tool_config: dict[str, Any] | None = Field(default=None, alias="toolConfig")
-    safety_settings: list[dict[str, Any]] | None = Field(default=None, alias="safetySettings")
-    cached_content: str | None = Field(default=None, alias="cachedContent")
-    service_tier: str | None = Field(default=None, alias="serviceTier")
-    store: bool | None = None
 
 
 class ToolChoice(BaseModel):
@@ -127,11 +40,12 @@ class OutputFormat(BaseModel):
 
 
 class Hyperparameters(BaseModel):
-    """요청마다 쓰는 공통 생성 옵션과 격리된 벤더 확장.
+    """공통 및 API 고유 요청 옵션의 평평한 합집합.
 
-    공통 필드는 지원되는 API에만 들어간다. 예를 들어 ``top_k``는 Gemini에만,
-    ``stop_sequences``는 Chat/Messages/Gemini에만 들어간다. ``vendor``는 사용자 정의 어댑터의
-    정확한 ``name``을 키로 하는 마지막 확장점이다.
+    필드가 어느 API에서 쓰이는지는 :meth:`for_vendor`가 결정한다. 예를 들어
+    ``previous_response_id``는 Responses에서만, ``inference_geo``는 Messages에서만,
+    ``safety_settings``는 Gemini에서만 나간다. 중첩 wire 객체는 공통 변환 결과 위에 deep-merge
+    되므로 세부 옵션만 직접 지정할 수도 있다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -149,15 +63,60 @@ class Hyperparameters(BaseModel):
     parallel_tool_calls: bool | None = None
     output_format: OutputFormat | None = None
 
-    chat_completions: ChatCompletionsParameters = Field(
-        default_factory=ChatCompletionsParameters
-    )
-    responses: ResponsesParameters = Field(default_factory=ResponsesParameters)
-    messages: MessagesParameters = Field(default_factory=MessagesParameters)
-    generate_content: GenerateContentParameters = Field(
-        default_factory=GenerateContentParameters
-    )
-    vendor: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Chat Completions
+    audio: dict[str, Any] | None = None
+    logit_bias: dict[str, float] | None = None
+    logprobs: bool | None = None
+    max_completion_tokens: int | None = None
+    modalities: list[str] | None = None
+    prediction: dict[str, Any] | None = None
+    response_format: dict[str, Any] | None = None
+    verbosity: str | None = None
+    web_search_options: dict[str, Any] | None = None
+
+    # Responses
+    background: bool | None = None
+    conversation: str | dict[str, Any] | None = None
+    include: list[str] | None = None
+    previous_response_id: str | None = None
+    prompt: dict[str, Any] | None = None
+    reasoning: dict[str, Any] | None = None
+    text: dict[str, Any] | None = None
+    truncation: str | None = None
+
+    # Anthropic Messages
+    cache_control: dict[str, Any] | None = None
+    container: str | dict[str, Any] | None = None
+    context_management: dict[str, Any] | None = None
+    inference_geo: str | None = None
+    max_tokens: int | None = None
+    mcp_servers: list[dict[str, Any]] | None = None
+    anthropic_metadata: dict[str, Any] | None = None
+    anthropic_service_tier: Literal["auto", "standard_only"] | None = None
+    output_config: dict[str, Any] | None = None
+    thinking: dict[str, Any] | None = None
+
+    # Gemini GenerateContent
+    cached_content: str | None = None
+    generation_config: dict[str, Any] | None = None
+    gemini_service_tier: str | None = None
+    safety_settings: list[dict[str, Any]] | None = None
+    tool_config: dict[str, Any] | None = None
+
+    # 둘 이상의 API가 같은 wire 이름으로 지원하는 옵션
+    metadata: dict[str, str] | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_retention: str | None = None
+    safety_identifier: str | None = None
+    service_tier: str | None = None
+    store: bool | None = None
+    stream_options: dict[str, Any] | None = None
+    top_logprobs: int | None = None
+    user: str | None = None
+
+    # 알려진 표준 필드와 달리 검증·필터링하지 않는 명시적 escape hatch. 기본 어댑터에서도
+    # 호출자가 의도적으로 사용한 값이므로 현재 대상 요청에만 마지막으로 적용한다.
+    extensions: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def coerce(cls, value: Hyperparameters | Mapping[str, Any] | None) -> Hyperparameters:
@@ -175,13 +134,12 @@ class Hyperparameters(BaseModel):
         return type(self).model_validate(_merge(left, right))
 
     def for_vendor(self, family: str, *, name: str | None = None) -> dict[str, Any]:
-        common = self._common_for(family)
-        section = getattr(self, family, None)
-        if isinstance(section, _VendorParameters):
-            common = _merge(common, section.wire())
-        if name and name in self.vendor:
-            common = _merge(common, self.vendor[name])
-        return common
+        """대상 계열이 지원하는 값만 선택하고 명시적 extension을 마지막에 적용한다."""
+        selected = self._common_for(family)
+        if self.extensions:
+            selected = _merge(selected, self.extensions)
+        _ = name
+        return selected
 
     def _common_for(self, family: str) -> dict[str, Any]:
         if family == "chat_completions":
@@ -202,7 +160,29 @@ class Hyperparameters(BaseModel):
         _put(out, "parallel_tool_calls", self.parallel_tool_calls)
         _put(out, "tool_choice", _tool_choice(self.tool_choice, "chat_completions"))
         _put(out, "response_format", _output_format(self.output_format, "chat_completions"))
-        return out
+        return _merge(
+            out,
+            self._select(
+                "audio",
+                "logit_bias",
+                "logprobs",
+                "max_completion_tokens",
+                "metadata",
+                "modalities",
+                "prediction",
+                "prompt_cache_key",
+                "prompt_cache_retention",
+                "response_format",
+                "safety_identifier",
+                "service_tier",
+                "store",
+                "stream_options",
+                "top_logprobs",
+                "user",
+                "verbosity",
+                "web_search_options",
+            ),
+        )
 
     def _responses(self) -> dict[str, Any]:
         out = self._sampling(seed=False, penalties=False, top_k=False)
@@ -214,10 +194,29 @@ class Hyperparameters(BaseModel):
         formatted = _output_format(self.output_format, "responses")
         if formatted is not None:
             out["text"] = {"format": formatted}
-        return out
+        direct = self._select(
+            "background",
+            "conversation",
+            "include",
+            "metadata",
+            "previous_response_id",
+            "prompt",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "reasoning",
+            "safety_identifier",
+            "service_tier",
+            "store",
+            "stream_options",
+            "text",
+            "top_logprobs",
+            "truncation",
+            "user",
+        )
+        return _merge(out, direct)
 
     def _messages(self) -> dict[str, Any]:
-        out: dict[str, Any] = {}
+        out = self._sampling(seed=False, penalties=False)
         _put(out, "max_tokens", self.max_output_tokens)
         _put(out, "stop_sequences", self.stop_sequences)
         choice = _tool_choice(self.tool_choice, "messages")
@@ -235,7 +234,19 @@ class Hyperparameters(BaseModel):
         _put(output_config, "format", formatted)
         if output_config:
             out["output_config"] = output_config
-        return out
+        direct = self._select(
+            "cache_control",
+            "container",
+            "context_management",
+            "inference_geo",
+            "max_tokens",
+            "mcp_servers",
+            "output_config",
+            "thinking",
+            anthropic_metadata="metadata",
+            anthropic_service_tier="service_tier",
+        )
+        return _merge(out, direct)
 
     def _gemini(self) -> dict[str, Any]:
         config = self._sampling()
@@ -257,7 +268,23 @@ class Hyperparameters(BaseModel):
         choice = _tool_choice(self.tool_choice, "generate_content")
         if choice is not None:
             out["toolConfig"] = choice
-        return out
+        direct = self._select(
+            cached_content="cachedContent",
+            generation_config="generationConfig",
+            safety_settings="safetySettings",
+            gemini_service_tier="serviceTier",
+            store="store",
+            tool_config="toolConfig",
+        )
+        return _merge(out, direct)
+
+    def _select(self, *fields: str, **aliases: str) -> dict[str, Any]:
+        selected: dict[str, Any] = {}
+        for field in fields:
+            _put(selected, field, getattr(self, field))
+        for field, wire_name in aliases.items():
+            _put(selected, wire_name, getattr(self, field))
+        return selected
 
     def _sampling(
         self,

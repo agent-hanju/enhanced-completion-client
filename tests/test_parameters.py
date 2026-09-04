@@ -1,4 +1,4 @@
-"""공통 Hyperparameters의 벤더별 투영과 격리."""
+"""평면 Hyperparameters의 벤더별 투영과 미지원 필드 제거."""
 
 from __future__ import annotations
 
@@ -6,12 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from enhanced_completion import (
-    ChatCompletionsParameters,
-    GenerateContentParameters,
     Hyperparameters,
-    MessagesParameters,
     OutputFormat,
-    ResponsesParameters,
     SyncBridge,
     ToolChoice,
 )
@@ -58,8 +54,9 @@ class TestCommonProjection:
         anthropic = body(messages, parameters)
         assert anthropic["max_tokens"] == 64
         assert anthropic["stop_sequences"] == ["끝"]
-        assert "temperature" not in anthropic
-        assert "top_p" not in anthropic and "top_k" not in anthropic
+        assert anthropic["temperature"] == 0.2
+        assert anthropic["top_p"] == 0.9
+        assert anthropic["top_k"] == 20
 
         gemini = body(generate_content.for_model("m"), parameters)
         assert gemini["generationConfig"] == {
@@ -130,29 +127,67 @@ class TestCommonProjection:
         }
 
 
-class TestVendorIsolation:
-    def test_only_selected_vendor_section_is_sent(self) -> None:
+class TestVendorFiltering:
+    def test_flat_known_fields_are_only_sent_to_supporting_vendor(self) -> None:
         parameters = Hyperparameters(
-            chat_completions=ChatCompletionsParameters(verbosity="low"),
-            responses=ResponsesParameters(include=["reasoning.encrypted_content"]),
-            messages=MessagesParameters(inference_geo="us"),
-            generate_content=GenerateContentParameters(service_tier="PRIORITY"),
+            verbosity="low",
+            include=["reasoning.encrypted_content"],
+            inference_geo="us",
+            safety_settings=[{"category": "HARM_CATEGORY_HATE_SPEECH"}],
+            service_tier="auto",
+            anthropic_service_tier="standard_only",
+            gemini_service_tier="PRIORITY",
         )
         assert body(ChatCompletionsAdapter(), parameters)["verbosity"] == "low"
+        assert body(ChatCompletionsAdapter(), parameters)["service_tier"] == "auto"
         assert "include" not in body(ChatCompletionsAdapter(), parameters)
         assert body(responses, parameters)["include"] == ["reasoning.encrypted_content"]
+        assert "verbosity" not in body(responses, parameters)
         assert body(messages, parameters)["inference_geo"] == "us"
-        assert body(generate_content.for_model("m"), parameters)["serviceTier"] == "PRIORITY"
+        assert body(messages, parameters)["service_tier"] == "standard_only"
+        assert "include" not in body(messages, parameters)
+        gemini = body(generate_content.for_model("m"), parameters)
+        assert gemini["serviceTier"] == "PRIORITY"
+        assert gemini["safetySettings"] == [{"category": "HARM_CATEGORY_HATE_SPEECH"}]
+        assert "inference_geo" not in gemini
 
-    def test_custom_chat_adapter_gets_family_and_exact_name_extension(self) -> None:
+    def test_explicit_extensions_apply_only_to_the_current_request(self) -> None:
         adapter = ChatCompletionsAdapter(name="vllm")
         parameters = Hyperparameters(
             max_output_tokens=8,
-            vendor={"vllm": {"chat_template_kwargs": {"enable_thinking": False}}},
+            extensions={"chat_template_kwargs": {"enable_thinking": False}},
         )
         request = body(adapter, parameters)
         assert request["max_completion_tokens"] == 8
         assert request["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_wire_specific_limits_override_common_limit_only_on_their_api(self) -> None:
+        parameters = Hyperparameters(
+            max_output_tokens=64,
+            max_completion_tokens=32,
+            max_tokens=16,
+        )
+        assert body(ChatCompletionsAdapter(), parameters)["max_completion_tokens"] == 32
+        assert body(messages, parameters)["max_tokens"] == 16
+        assert body(responses, parameters)["max_output_tokens"] == 64
+        assert body(generate_content.for_model("m"), parameters)["generationConfig"][
+            "maxOutputTokens"
+        ] == 64
+
+    def test_native_nested_config_deep_merges_over_common_projection(self) -> None:
+        parameters = Hyperparameters(
+            max_output_tokens=64,
+            generation_config={"thinkingConfig": {"thinkingBudget": 0}},
+            reasoning_effort="low",
+            reasoning={"summary": "auto"},
+        )
+        gemini = body(generate_content.for_model("m"), parameters)
+        assert gemini["generationConfig"] == {
+            "maxOutputTokens": 64,
+            "thinkingConfig": {"thinkingBudget": 0},
+        }
+        response = body(responses, parameters)
+        assert response["reasoning"] == {"effort": "low", "summary": "auto"}
 
     def test_constructor_defaults_merge_with_call_override(self) -> None:
         bridge = SyncBridge(

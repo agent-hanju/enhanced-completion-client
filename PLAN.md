@@ -68,10 +68,10 @@ bridge = Bridge(
 ### 1.3 요청 Hyperparameters
 
 `Hyperparameters`는 네 API에 공통인 생성 의도를 표현하고, 각 어댑터는 자신이 실제 지원하는
-필드명과 중첩 구조만 wire body에 만든다. API별 옵션은
-`ChatCompletionsParameters`/`ResponsesParameters`/`MessagesParameters`/
-`GenerateContentParameters`에 격리하고, 사용자 정의 호환 서버는 `vendor[adapter.name]`을 쓴다.
-생성자 기본값과 호출별 값은 deep-merge하며 레거시 `**params`가 마지막으로 덮는다.
+필드명과 중첩 구조만 wire body에 만든다. API 고유 옵션도 같은 평평한 객체에 선언하며 대상이
+지원하지 않는 알려진 필드는 조용히 생략한다. 정의되지 않은 이름은 검증 오류로 잡고, 사용자
+정의 호환 서버의 명시적 예외만 `extensions`로 통과시킨다. 생성자 기본값과 호출별 값은
+deep-merge하며 레거시 `**params`가 마지막으로 덮는다.
 
 ### 1.4 도구 호출/결과 변환
 
@@ -162,7 +162,7 @@ API 문서를 호환성 감사 자료로 사용하고 wire JSON/SSE는 이 패�
 | 단계 | 상태 | 완료 조건 |
 |---|---|---|
 | Python 패키지/Bridge/SyncBridge | 완료 | 인스턴스 생성, build/stream/complete, context manager |
-| 공통/벤더별 Hyperparameters | 완료 | 지원 필드 투영, API별 격리, 호출별 override |
+| 평면형 Hyperparameters | 완료 | 지원 필드 선택·투영, 미지원 생략, 호출별 override |
 | SSE parser와 merger | 완료 | split frame/tag/tool args, terminal payload, flush 회귀 테스트 |
 | custom Vocabulary/Citations | 완료 | XML stream lift/lower, nested text citation, 요청 재전송 |
 | Chat Completions/vLLM | 완료 | reasoning, tools, image/audio/file, refusal/audio/annotations |
@@ -182,7 +182,7 @@ API 문서를 호환성 감사 자료로 사용하고 wire JSON/SSE는 이 패�
 | 실행 | async와 sync |
 | 도구 | call/result ID·이름 연결, nested result blocks, server tool raw replay |
 | 멀티모달 | base64, HTTP URL, file ID 명시적 거부, MIME별 Image/Audio/Document |
-| 요청 옵션 | 공통 필드별 wire 투영, API별 격리, 사용자 정의 벤더 override |
+| 요청 옵션 | 공통 필드별 wire 투영, API 고유 필드 선택, 미지원 필드 생략 |
 | 추론 | Chat aliases, Anthropic signature, Responses encrypted item, Gemini signature |
 | 인용 | XML-like stream split, native citation, answer/source coordinates |
 | 견고성 | unknown block/item/part, extra fields, error/terminal/heartbeat |
