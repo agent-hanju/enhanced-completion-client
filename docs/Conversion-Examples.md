@@ -3670,7 +3670,7 @@ Bridge는 내장 도구를 자동 등록하지 않는다. `tools`를 생략한 �
 
 ## 7. 공통 Hyperparameters의 API별 투영
 
-같은 공통 옵션 객체를 네 request builder에 넣고, 대화·도구 정의를 제외한 실제 wire 파라미터만 표시했다. 지원하지 않는 공통 필드는 빠지고 API별 전용 섹션은 해당 대상에만 남는다.
+같은 공통 옵션 객체를 네 request builder에 넣고, 대화·도구 정의를 제외한 실제 wire 파라미터만 표시했다. 지원하지 않는 필드는 빠지고 API 고유 필드는 해당 대상에만 남는다.
 
 <table>
 <tr><th>Chat Completions</th><td><pre>{
@@ -3706,10 +3706,14 @@ Bridge는 내장 도구를 자동 등록하지 않는다. `tools`를 생략한 �
       "strict": true
     }
   },
+  "service_tier": "auto",
   "verbosity": "low"
 }</pre></td></tr>
 <tr><th>Anthropic Messages</th><td><pre>{
   "max_tokens": 64,
+  "temperature": 0.2,
+  "top_p": 0.9,
+  "top_k": 20,
   "stop_sequences": [
     "&lt;END&gt;"
   ],
@@ -3732,7 +3736,8 @@ Bridge는 내장 도구를 자동 등록하지 않는다. `tools`를 생략한 �
       }
     }
   },
-  "inference_geo": "us"
+  "inference_geo": "us",
+  "service_tier": "standard_only"
 }</pre></td></tr>
 <tr><th>OpenAI Responses</th><td><pre>{
   "temperature": 0.2,
@@ -3763,7 +3768,8 @@ Bridge는 내장 도구를 자동 등록하지 않는다. `tools`를 생략한 �
   },
   "include": [
     "reasoning.encrypted_content"
-  ]
+  ],
+  "service_tier": "auto"
 }</pre></td></tr>
 <tr><th>Gemini GenerateContent</th><td><pre>{
   "generationConfig": {

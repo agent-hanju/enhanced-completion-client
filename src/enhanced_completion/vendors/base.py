@@ -48,8 +48,9 @@ class VendorAdapter(Protocol):
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
         """허브 요청을 이 벤더의 wire body로 만든다.
 
-        ``request.hyperparameters``의 공통 필드는 이 어댑터 계열에 맞게 투영되고, 벤더별
-        섹션만 선택된다. ``request.params``는 구 버전 호출 호환을 위한 마지막 덮어쓰기다.
+        ``request.hyperparameters``의 공통 필드는 이 어댑터 계열에 맞게 투영되고, 평평한 API
+        고유 필드 중 지원하는 값만 선택된다. ``request.params``는 구 버전 호출 호환을 위한
+        마지막 덮어쓰기다.
         """
         ...
 

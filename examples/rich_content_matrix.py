@@ -9,16 +9,12 @@ from conversion_matrix import TARGETS, bridge, cell, conversation, table
 
 from enhanced_completion import (
     AudioBlock,
-    ChatCompletionsParameters,
     DocumentBlock,
-    GenerateContentParameters,
     HubMessage,
     HubResponse,
     Hyperparameters,
     ImageBlock,
-    MessagesParameters,
     OutputFormat,
-    ResponsesParameters,
     StreamMerger,
     TextBlock,
     ToolChoice,
@@ -149,10 +145,12 @@ PARAMETERS = Hyperparameters(
         json_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
         strict=True,
     ),
-    chat_completions=ChatCompletionsParameters(verbosity="low"),
-    responses=ResponsesParameters(include=["reasoning.encrypted_content"]),
-    messages=MessagesParameters(inference_geo="us"),
-    generate_content=GenerateContentParameters(service_tier="PRIORITY"),
+    verbosity="low",
+    include=["reasoning.encrypted_content"],
+    inference_geo="us",
+    service_tier="auto",
+    anthropic_service_tier="standard_only",
+    gemini_service_tier="PRIORITY",
 )
 
 PARAMETER_TOOL = ToolDefinition(
@@ -688,8 +686,8 @@ def render_document() -> str:
             "## 7. 공통 Hyperparameters의 API별 투영",
             "",
             "같은 공통 옵션 객체를 네 request builder에 넣고, 대화·도구 정의를 제외한 실제 "
-            "wire 파라미터만 표시했다. 지원하지 않는 공통 필드는 빠지고 API별 전용 섹션은 "
-            "해당 대상에만 남는다.",
+            "wire 파라미터만 표시했다. 지원하지 않는 필드는 빠지고 API 고유 필드는 해당 "
+            "대상에만 남는다.",
             "",
             table(_parameter_rows()),
             "",

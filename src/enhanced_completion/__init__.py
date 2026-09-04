@@ -49,12 +49,8 @@ from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition, Usage
 from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
 from .parameters import (
-    ChatCompletionsParameters,
-    GenerateContentParameters,
     Hyperparameters,
-    MessagesParameters,
     OutputFormat,
-    ResponsesParameters,
     ToolChoice,
 )
 from .transport.sse import SseFrame, SseParser
@@ -115,11 +111,7 @@ __all__ = [
     "identity_mapper",
     "register_block",
     "registered_blocks",
-    "ChatCompletionsParameters",
-    "GenerateContentParameters",
     "Hyperparameters",
-    "MessagesParameters",
     "OutputFormat",
-    "ResponsesParameters",
     "ToolChoice",
 ]
