@@ -728,9 +728,10 @@ curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
 
 다음은 설계 자리만 두고 구현하지 않는다.
 
-- `messages`, `responses`, `generate_content` 어댑터. 벤더 축 확장이므로 추가만 하면 된다
-- 사내 챗 서버의 Turn 이벤트 SSE 소비. 0단계 결과에 따라 어댑터 하나로 붙인다
-- 문서 첨부 어휘. cite 어휘가 자리를 잡은 뒤 같은 틀로 만든다
+- `messages`, `responses`, `generate_content` 어댑터. 벤더 축 확장이므로 추가만 하면 된다.
+  사내 agent 어댑터가 통과했으므로 어댑터 경계 설계는 검증됐다. 이 셋은 규격이 더 정연하다
+- 사내 챗 서버의 Turn 이벤트 SSE 소비. 재연결과 스냅샷 폴백이 새 요구로 들어온다
+- 문서 첨부 어휘. cite 어휘가 자리를 잡았으므로 같은 틀로 만든다
 
 ---
 
@@ -742,7 +743,9 @@ curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
 |---|---|
 | 패키지 이름 | 배포 `enhanced-completion-client`, 모듈 `enhanced_completion` |
 | 동기 API | 낸다. `SyncBridge`로 같은 모양 |
-| 사내 agent SSE | agent-studio 1.4.1 프론트 번들에서 확정. 2.2절 |
+| 사내 agent SSE | agent-studio 1.4.1 프론트 번들에서 확정. 2.2절. 어댑터 구현 완료 |
+| 인용 태그 문법 | 속성형 `<cite id="d1">본문</cite>`. 모델이 정하지 않으므로 어휘가 프롬프트 지시도 함께 든다 |
+| code agent 도구 이벤트 | `tool_use`가 아니라 `agent_activity`. 실행 요청이 아니라 사후 보고다 |
 | vLLM 응답 형태 | 로컬 qwen3-8b로 실측 확정. 4절 0단계 |
 | 추론 필드 이름 | `reasoning` |
 
@@ -750,10 +753,9 @@ curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
 
 | 항목 | 필요한 결정 | 막는 단계 |
 |---|---|---|
-| 인용 태그 문법 | 모델이 정하지 않으므로 우리가 고른다. 속성형(`<cite id=>`) 권장. 어휘가 프롬프트 지시도 함께 들어야 한다 | 5단계 |
 | 사내 LUXIA 실제 응답 | `172.16.100.200:14100`이 닿을 때 라이브 시험 재실행. qwen3-8b와 다른 점이 있는지 | 없음. 지금 구조로 대응 가능 |
-| agent SSE 페이로드 상세 | 이벤트 이름은 확정. 각 이벤트의 본문 필드 구성은 API 이미지(903 MB) 또는 실제 호출로 확인 | agent 어댑터 |
-| `sources` 이벤트 | cite 어휘와 같은 자리로 모을지, 별도 블록으로 둘지 | agent 어댑터 |
+| agent SSE 실제 호출 | 이벤트 이름과 프레임 규칙은 확정하고 어댑터를 구현했다. 각 이벤트 본문의 필드 이름은 프론트가 훑는 아홉 경로로 흡수했으나, 실제 서버를 띄워 확인하면 `tool_call`/`sources` 매핑을 좁힐 수 있다 | 없음. 지금 구조로 동작 |
+| `tool_call` 의미 | agent가 스스로 실행하는지 HITL 승인을 기다리는지. 후자면 `tool_use`가 맞고 전자면 `agent_activity`로 옮겨야 한다 | 없음. 현재 `tool_use` |
 | 챗 서버 Turn 스트림 소비 | 소비하면 재연결·스냅샷 폴백이 새 요구로 들어온다 | 범위 밖 항목 |
 | 배포 경로 | PyPI 공개 대 사내 인덱스 대 git 의존 | 6단계 |
 | `streambind` 0.1.1 | 합성 연산자 유무. 로컬 캐시에 없어 미확인 | 3단계 (없다고 가정하고 진행 가능) |
