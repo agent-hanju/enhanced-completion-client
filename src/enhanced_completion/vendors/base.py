@@ -4,8 +4,8 @@
 해석이다. 이 둘만 어댑터로 분리한다.
 
 ``decode``와 ``is_terminal``이 ``data`` 문자열이 아니라 프레임 전체를 받는 것이 설계의 핵심이다.
-사내 agent SSE는 이벤트 이름을 ``event:`` 필드에 싣거나 본문 JSON의 ``event``/``type``에 싣고,
-종료도 ``[DONE]`` 페이로드와 ``done`` 이벤트 둘 다 쓴다. ``data``만 넘기면 대응할 수 없다.
+API마다 이벤트 이름과 종료 표지를 서로 다른 SSE 필드에 실을 수 있다. ``data``만 넘기면
+어댑터가 그 차이를 판별할 수 없다.
 """
 
 from __future__ import annotations

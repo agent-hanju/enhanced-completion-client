@@ -40,7 +40,7 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 | audio 응답 수집 | 2/4 | Chat assistant audio, Responses 전역 audio stream |
 | citation/annotation 응답 수집 | 4/4 | 원형 종류를 분리하며 다음 요청 재생 가능 여부는 API별로 다름 |
 | Gemini grounding graph | 지원 | source/support 관계와 검색 질의를 별도 block으로 보존 |
-| server tool 응답 수집 | 3/3 + agent | Chat Completions에는 해당 Item 계층이 없음 |
+| server tool 응답 수집 | 3/3 | Chat Completions에는 해당 Item 계층이 없음 |
 | 업로드·파일 수명주기 | 0/4 | 의도적 외부 책임 |
 | 원격 실행 세션 수명주기 | 0/3 | 의도적 외부 책임 |
 | 자동 tool 실행 loop | 0/4 | 의도적 비지원 |
@@ -242,7 +242,7 @@ Responses API에 재생한다.
 요청에서만 활성화된다. 다른 벤더용 native 정의를 전달하면 그 대상에서는 생략한다.
 
 도구별 call/result content block을 **파싱하는 것**은 도구를 **활성화하거나 실행하는 것**과
-별개다. 파서는 실제 응답, 저장 이력, 사내 agent activity를 관찰할 수 있게 남겨둔다.
+별개다. 파서는 실제 응답과 저장 이력을 관찰할 수 있게 남겨둔다.
 
 | 기능 | 상태 | 현재 동작 |
 |---|---|---|
@@ -255,11 +255,7 @@ Responses API에 재생한다.
 | Responses MCP approval | 지원 | approval request를 client `ToolUseBlock`, response를 `ToolResultBlock`으로 표현 |
 | Gemini executable code/result, toolCall/toolResponse | 원형 보존 | 원래 Part와 순서를 보존 |
 | Gemini grounding/url context metadata | 부분 지원 | Hub에 보존하지만 candidate 전용이므로 요청 이력에서는 생략 |
-| agent-studio activity/code tool event | 응답 지원 | 서버에 미리 설정된 도구 활동을 `ServerToolBlock`으로 관찰 |
 | server tool을 다른 벤더 client tool로 변환 | 비지원 | 실행 주체와 보안 의미가 달라 의도적으로 변환하지 않음 |
-
-agent-studio는 예외적으로 요청 body에 `tools`를 받지 않는다. 서버의 agent 설정에 Bash나 검색이
-이미 연결되어 있다면 Bridge가 이를 끌 수 없으며, adapter는 발생한 activity만 파싱한다.
 
 ## 파일·세션·외부 리소스 수명주기
 
@@ -341,7 +337,6 @@ delta는 한 블록에 누적하고, 다른 index는 타입이 같아도 독립 
 | OpenAI Responses | `output_index` + `content_index`, reasoning의 `summary_index`로 독립 Item/Part를 정확히 구분 |
 | Gemini GenerateContent | 한 chunk의 `parts[]` 위치는 정확히 구분; chunk 사이에는 part index가 없어 같은 위치·같은 종류의 연속 text를 하나의 streaming block으로 누적 |
 | Chat Completions | content, reasoning, refusal, audio는 각각 단일 delta 채널이라 채널 안의 원래 block 경계를 복원할 수 없음; `tool_calls[].index`만 복수 호출을 구분 |
-| 사내 agent SSE | text/thinking은 각각 단일 채널로 누적하고 tool은 call ID별 슬롯으로 구분 |
 
 [변환 규칙 및 실행 예시](Conversion-Examples.md)는 같은 메시지 안의 독립 text block 두 개를 네
 request 형식으로 내린 실제 JSON을 포함한다. [ReAct 순서 테스트](../tests/test_react_sequences.py)는
@@ -405,7 +400,7 @@ SDK가 소유한다. 브리지는 요청 body 생성, SSE 해석, Hub block 보�
 
 | 검증 | 결과 | 비고 |
 |---|---:|---|
-| `uv run pytest -q` | 401 passed, 23 deselected | 생성 문서 snapshot과 파라미터 투영 포함 |
+| `uv run pytest -q` | 350 passed, 23 deselected | 생성 문서 snapshot과 파라미터 투영 포함 |
 | `uv run ruff check src tests examples` | 통과 | lint/import 순서 포함 |
 | `uv run mypy src` | 통과 | strict 설정 |
 | `uv build` | 통과 | sdist와 wheel 생성 |

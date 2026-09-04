@@ -9,7 +9,6 @@
 | `responses` | OpenAI Responses |
 | `messages` | Anthropic Messages |
 | `generate_content` | Gemini `streamGenerateContent` |
-| `single_agent`, `code_agent` | 사내 agent-studio SSE |
 
 모든 응답은 `HubResponse`로 수렴하고 `HubMessage.of_response(response)`로 다음 요청 이력이 된다.
 텍스트, 멀티모달 입력, 클라이언트 도구 호출·결과는 대상 벤더의 네이티브 wire 형태로 변환한다.

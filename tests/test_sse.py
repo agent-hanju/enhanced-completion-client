@@ -1,4 +1,4 @@
-"""SSE 파서. 청크 경계와 사내 서버의 형태 편차를 검증한다."""
+"""SSE 파서. 청크 경계와 표준에서 허용하는 형태 편차를 검증한다."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class TestDataPrefix:
         assert parse_all("data: hello\n\n") == [("", "hello", "")]
 
     def test_no_space_after_colon(self) -> None:
-        """사내 agent SSE가 공백 없이 보내는 경우가 있다."""
+        """SSE 표준은 콜론 뒤 공백을 선택 사항으로 둔다."""
         assert parse_all("data:hello\n\n") == [("", "hello", "")]
 
     def test_only_one_space_is_stripped(self) -> None:

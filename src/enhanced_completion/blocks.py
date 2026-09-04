@@ -368,7 +368,7 @@ class ServerToolBlock(ContentBlock):
     일반적으로 클라이언트가 결과를 되보낼 필요가 없다. 클라이언트 실행이나 승인이 필요한
     호출은 ``ToolUseBlock``으로 분류하고 이 블록과 구분한다.
 
-    Responses, Anthropic, Gemini와 agent SSE가 이 개념을 갖는다.
+    Responses, Anthropic, Gemini가 이 개념을 갖는다.
 
     - Anthropic: ``server_tool_use``, ``web_search_tool_result``, ``web_fetch_tool_result``,
       ``mcp_tool_use``, ``mcp_tool_result``, ``code_execution_tool_result``,
@@ -379,7 +379,6 @@ class ServerToolBlock(ContentBlock):
       ``ToolUseBlock``이다
     - Gemini: ``executableCode``, ``codeExecutionResult``. ``groundingMetadata``는 관계형
       :class:`GroundingBlock`으로 분리한다
-    - agent-studio: ``bash``, ``edit``, ``read``, ``write``, ``web_search``, ``skill_run`` 등
     - chat completions: 없음
     """
 
@@ -396,8 +395,8 @@ class ServerToolBlock(ContentBlock):
 class VendorBlock(ContentBlock):
     """등록되지 않은 벤더 고유 블록.
 
-    Responses의 ``web_search_call``, Gemini의 ``executableCode``, agent SSE의 ``activity``
-    처럼 허브에 대응물이 없는 블록이 여기로 떨어진다. ``raw``에 원본을 그대로 들고 있으므로
+    Responses나 Gemini의 새 Item/Part처럼 허브에 대응물이 없는 블록이 여기로 떨어진다.
+    ``raw``에 원본을 그대로 들고 있으므로
     같은 벤더로 되돌릴 때는 손실이 없고, 다른 벤더로 내릴 때는 생략된다.
     """
 

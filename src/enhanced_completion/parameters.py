@@ -13,7 +13,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
-    "AgentParameters",
     "ChatCompletionsParameters",
     "GenerateContentParameters",
     "Hyperparameters",
@@ -107,16 +106,6 @@ class GenerateContentParameters(_VendorParameters):
     store: bool | None = None
 
 
-class AgentParameters(_VendorParameters):
-    """Saltlux Agent Studio 전용 요청 필드."""
-
-    session_id: str | None = Field(default=None, alias="sessionId")
-    file_ids: list[str] | None = Field(default=None, alias="fileIds")
-    attachment_ids: list[str] | None = Field(default=None, alias="attachmentIds")
-    web_search_enabled: bool | None = Field(default=None, alias="webSearchEnabled")
-    task_id: str | None = Field(default=None, alias="taskId")
-
-
 class ToolChoice(BaseModel):
     """공통 함수 도구 선택 정책."""
 
@@ -168,7 +157,6 @@ class Hyperparameters(BaseModel):
     generate_content: GenerateContentParameters = Field(
         default_factory=GenerateContentParameters
     )
-    agent: AgentParameters = Field(default_factory=AgentParameters)
     vendor: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @classmethod

@@ -10,8 +10,7 @@ API와 도메인 객체 사이의 변환기로 사용한다.
 
 - 패키지 이름: `enhanced-completion-client`
 - Python 모듈: `enhanced_completion`
-- 지원 API: Chat Completions, OpenAI Responses, Anthropic Messages, Gemini GenerateContent,
-  사내 single/coding agent SSE
+- 지원 API: Chat Completions, OpenAI Responses, Anthropic Messages, Gemini GenerateContent
 - Augment/RAG 실행 계층: 제거. 문서와 인용 content block만 유지
 - 재시도·SSE 재연결: 내장하지 않음. 주입한 httpx 클라이언트와 소비 애플리케이션의 정책
 - 보존 정책: 공통 의미는 교차 벤더 변환, 벤더 고유 정보는 같은 벤더 재전송
@@ -109,7 +108,7 @@ bridge = Bridge(
 - `to_hub() -> StreamMapper[chunk, HubResponse]`
 
 SSE의 `event`, `data`, `id`, comment를 모두 봐야 하므로 SDK가 감춘 token iterator가 아니라
-`SseFrame`을 경계로 둔다. 이것이 사내 agent SSE와 표준 SSE를 같은 전송 계층에서 처리하는
+`SseFrame`을 경계로 둔다. API별 이름 붙은 이벤트와 종료 표지를 같은 전송 계층에서 처리하는
 조건이다.
 
 ## 2. 사용할 레거시 자산
@@ -170,7 +169,6 @@ API 문서를 호환성 감사 자료로 사용하고 wire JSON/SSE는 이 패�
 | Anthropic Messages | 완료 | 문서 citations, signed thinking, tool/server blocks, beta header 설정 |
 | OpenAI Responses | 완료 | Item/Part, reasoning replay, tools/results, server tools, terminal usage |
 | Gemini GenerateContent | 완료 | Part MIME 분류, function response, signatures, server/new parts |
-| agent-studio SSE | 완료(오프라인 fixture) | single/coding event 변형, terminal/error/source/tool 처리 |
 | 최신 API 감사 | 완료 | 공식 문서와 레거시 규칙 차이 기록 |
 | 오프라인 품질 게이트 | 완료 | pytest, ruff, mypy |
 | 라이브 게이트 | 환경 의존 | `.env`가 채워진 endpoint만 명시 실행 |
@@ -196,7 +194,6 @@ API 문서를 호환성 감사 자료로 사용하고 wire JSON/SSE는 이 패�
 ## 6. 남은 운영 결정
 
 - 사내 패키지 인덱스 또는 git 의존 중 배포 경로
-- agent-studio 실제 서버를 띄운 후 프론트 번들에서 추출한 fixture와 최종 대조
 - Gemini Interactions API가 실제 사용처가 되면 별도 어댑터 추가
 - 변환 중 생략된 벤더 고유 블록을 호출자에게 보고하는 선택적 diagnostics/strict 정책
 

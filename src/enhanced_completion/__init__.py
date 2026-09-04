@@ -49,7 +49,6 @@ from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition, Usage
 from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
 from .parameters import (
-    AgentParameters,
     ChatCompletionsParameters,
     GenerateContentParameters,
     Hyperparameters,
@@ -66,7 +65,6 @@ from .vocabulary import Vocabulary
 __version__ = "0.1.0"
 
 __all__ = [
-    "AgentParameters",
     "AnnotationBlock",
     "AsyncStream",
     "AudioBlock",

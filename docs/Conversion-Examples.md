@@ -3801,7 +3801,7 @@ Bridge는 내장 도구를 자동 등록하지 않는다. `tools`를 생략한 �
 
 ## 8. 견본 범위
 
-이 문서는 core Hub content 계열 전부(text, thinking, tool use/result, image, audio, document, nested citation, annotation, grounding, server tool, vendor fallback)와 agent 전용 응답 계열 및 공통/전용 요청 Hyperparameters의 변환 정책을 실제 adapter 또는 해당 adapter의 회귀 테스트에 통과시킨다. 각 서버 도구의 모든 버전 문자열을 반복하지는 않고 실행 주체와 변환 정책이 같은 계열별 대표 wire payload를 사용한다. 전체 subtype 목록은 [지원표](Support-Matrix.md)에 있다.
+이 문서는 core Hub content 계열 전부(text, thinking, tool use/result, image, audio, document, nested citation, annotation, grounding, server tool, vendor fallback)와 공통/전용 요청 Hyperparameters의 변환 정책을 실제 adapter 또는 해당 adapter의 회귀 테스트에 통과시킨다. 각 서버 도구의 모든 버전 문자열을 반복하지는 않고 실행 주체와 변환 정책이 같은 계열별 대표 wire payload를 사용한다. 전체 subtype 목록은 [지원표](Support-Matrix.md)에 있다.
 
 ---
 

@@ -2,11 +2,10 @@
 
 프레임 전체를 보존하는 것이 이 모듈의 존재 이유다. Spring의 ``bodyToFlux(String)``이나 벤더
 SDK는 ``data`` 필드만 넘겨주는데, 그러면 이름 붙은 이벤트를 쓰는 서버에 대응할 수 없다.
-사내 agent SSE가 그렇다. 이벤트 이름이 ``event:`` 필드에 없으면 본문 JSON의 ``event`` 또는
-``type``을 봐야 하고, 종료 판정도 ``[DONE]``과 ``done`` 이벤트 둘 다다.
+응답 어댑터는 필요에 따라 ``event``, ``data``, ``id``와 comment를 모두 볼 수 있어야 한다.
 
 W3C SSE 규칙을 그대로 따른다. 콜론 뒤 공백 하나만 벗기므로 ``data: x``와 ``data:x``가 같은
-값으로 파싱된다. 사내 서버가 둘을 섞어 보내는데, 방어 코드가 아니라 표준 준수로 해결된다.
+값으로 파싱된다.
 """
 
 from __future__ import annotations
