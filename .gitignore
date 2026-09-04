@@ -50,6 +50,8 @@ Thumbs.db
 # Local configuration
 local.properties
 *.local
+.env
+!.env.example
 
 # Test output
 test-output/

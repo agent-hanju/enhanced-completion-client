@@ -306,9 +306,7 @@ class TestStreaming:
     async def test_data_without_space_and_heartbeat(self) -> None:
         # 공백 없는 ``data:``와 주석 전용 하트비트가 섞인 프레임.
         payload = (
-            ": keep-alive\n\n"
-            'event: answer\ndata:{"content":"공백없음"}\n\n'
-            "data: [DONE]\n\n"
+            ': keep-alive\n\nevent: answer\ndata:{"content":"공백없음"}\n\ndata: [DONE]\n\n'
         ).encode()
         respx.post(URL).mock(return_value=httpx.Response(200, content=payload))
         assert (await bridge().complete(["x"])).text == "공백없음"

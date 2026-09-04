@@ -90,16 +90,21 @@ class _StreamBase:
         return self._merger.build()
 
     def _process(self, frame: SseFrame) -> tuple[list[HubResponse], bool]:
-        """프레임 하나를 델타 리스트와 종료 여부로 바꾼다."""
-        if self._vendor.is_terminal(frame):
-            return [], True
+        """프레임 하나를 델타 리스트와 종료 여부로 바꾼다.
+
+        종료 프레임도 먼저 해석한다. 마지막 프레임이 알맹이를 싣는 벤더가 있다. OpenAI
+        Responses의 ``response.completed``에 ``stop_reason``과 ``usage``가 들어 있고,
+        종료라고 바로 버리면 그 둘을 잃는다. ``[DONE]``처럼 알맹이가 없는 표지는 ``decode``가
+        ``None``을 돌려주므로 그냥 지나간다.
+        """
         if frame.is_comment_only:
             # 하트비트다. 흘려보낸다.
             return [], False
+        terminal = self._vendor.is_terminal(frame)
         chunk = self._vendor.decode(frame)
         if chunk is None:
-            return [], False
-        return self._emit(self._pipeline.map(chunk)), False
+            return [], terminal
+        return self._emit(self._pipeline.map(chunk)), terminal
 
     def _finish(self) -> list[HubResponse]:
         return self._emit(self._pipeline.flush())
@@ -246,11 +251,20 @@ class _BridgeBase:
         return self._vendor.build_body(request, self._lowerer)
 
     def _request_headers(self) -> dict[str, str]:
+        """전송 헤더를 조립한다.
+
+        우선순위가 셋이다. 기본값, 어댑터가 요구하는 것, 호출자가 준 것 순으로 덮인다.
+        Anthropic의 ``anthropic-version``처럼 벤더가 요구하는 헤더가 있고, 사내 게이트웨이의
+        CSRF 토큰처럼 호출자만 아는 것이 있다.
+        """
         headers = {
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
-            **self._headers,
         }
+        vendor_headers = getattr(self._vendor, "request_headers", None)
+        if callable(vendor_headers):
+            headers.update(vendor_headers())
+        headers.update(self._headers)
         if self._api_key:
             headers.setdefault("Authorization", f"Bearer {self._api_key}")
         return headers

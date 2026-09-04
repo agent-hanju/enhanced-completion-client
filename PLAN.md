@@ -728,10 +728,9 @@ curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
 
 다음은 설계 자리만 두고 구현하지 않는다.
 
-- `messages`, `responses`, `generate_content` 어댑터. 벤더 축 확장이므로 추가만 하면 된다.
-  사내 agent 어댑터가 통과했으므로 어댑터 경계 설계는 검증됐다. 이 셋은 규격이 더 정연하다
 - 사내 챗 서버의 Turn 이벤트 SSE 소비. 재연결과 스냅샷 폴백이 새 요구로 들어온다
 - 문서 첨부 어휘. cite 어휘가 자리를 잡았으므로 같은 틀로 만든다
+- 외부 벤더 라이브 검증. 어댑터와 오프라인 시험은 끝났고 `.env`에 키를 채우면 돈다
 
 ---
 
@@ -747,6 +746,8 @@ curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
 | 인용 태그 문법 | 속성형 `<cite id="d1">본문</cite>`. 모델이 정하지 않으므로 어휘가 프롬프트 지시도 함께 든다 |
 | code agent 도구 이벤트 | `tool_use`가 아니라 `agent_activity`. 실행 요청이 아니라 사후 보고다 |
 | vLLM 응답 형태 | 로컬 qwen3-8b로 실측 확정. 4절 0단계 |
+| 벤더 스포크 | 다섯 개 구현 완료. chat_completions, messages, responses, generate_content, agent |
+| 종료 프레임 처리 | 버리지 않고 먼저 해석한다. Responses가 마지막 프레임에 stop_reason과 usage를 싣는다 |
 | 추론 필드 이름 | `reasoning` |
 
 ## 남은 것
