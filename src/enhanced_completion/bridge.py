@@ -23,10 +23,10 @@ MessageInput = HubMessage | str | Mapping[str, Any]
 
 
 class _Lowerer:
-    """등록된 어휘를 모아 블록 리스트를 요청 text로 되쓴다.
+    """등록된 어휘를 차례로 적용해 블록 리스트를 요청 text로 되쓴다.
 
-    본문 블록은 그대로, 어휘가 아는 블록은 그 어휘의 규칙대로 내린다. 아무도 모르는 블록은
-    생략한다. 다른 벤더로 옮길 수 없는 추론 블록이 이 경로로 조용히 빠진다.
+    각 어휘가 자기 블록을 text로 접어 넣고, 남은 본문 블록만 wire에 실린다. 아무 어휘도
+    가져가지 않은 블록은 생략된다. 다른 벤더로 옮길 수 없는 추론 블록이 이 경로로 조용히 빠진다.
     """
 
     def __init__(self, vocabularies: Sequence[Vocabulary], vendor_name: str) -> None:
@@ -34,22 +34,12 @@ class _Lowerer:
         self._vendor = vendor_name
 
     def lower_text(self, blocks: Any) -> str:
-        parts: list[str] = []
-        for block in blocks:
-            if isinstance(block, TextBlock):
-                parts.append(block.text)
-                continue
-            rendered = self._lower_one(block)
-            if rendered:
-                parts.append(rendered)
-        return "".join(parts)
-
-    def _lower_one(self, block: ContentBlock) -> str | None:
-        # 발급 벤더가 다른 블록은 되돌릴 수 없다. 어휘가 명시적으로 내리지 않으면 생략한다.
+        current: list[ContentBlock] = list(blocks)
         for vocabulary in self._vocabularies:
-            if any(isinstance(block, cls) for cls in vocabulary.blocks):
-                return vocabulary.lower(block)
-        return None
+            replaced = vocabulary.lower(current)
+            if replaced is not None:
+                current = list(replaced)
+        return "".join(b.text for b in current if isinstance(b, TextBlock))
 
 
 class _Pipeline:

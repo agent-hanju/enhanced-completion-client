@@ -23,7 +23,17 @@ import os
 import httpx
 import pytest
 
-from enhanced_completion import Bridge, SyncBridge, TextBlock, ThinkingBlock
+from enhanced_completion import (
+    Bridge,
+    CitationBlock,
+    CiteVocabulary,
+    HubMessage,
+    HubResponse,
+    StreamMerger,
+    SyncBridge,
+    TextBlock,
+    ThinkingBlock,
+)
 from enhanced_completion.vendors import chat_completions
 
 BASE_URL = os.getenv("ECC_LIVE_BASE_URL", "")
@@ -52,6 +62,20 @@ NO_THINKING: dict[str, object] = {"chat_template_kwargs": {"enable_thinking": Fa
 # 추론을 끝내고 본문까지 받으려면 예산이 필요하다. 실측에서 qwen3-8b가 "1+1은?"에도 추론에
 # 900자 남짓을 쓴다. 600 토큰이면 stop_reason이 stop으로 끝난다.
 REASONING_BUDGET = 600
+
+
+def _relift(vocabulary: CiteVocabulary, text: str) -> list[CitationBlock]:
+    """되쓴 문자열을 다시 올려서 인용 블록을 꺼낸다.
+
+    태그 문자열이 들어 있는지만 보면 태그는 맞는데 위치가 틀린 경우를 놓친다. 다시 올려
+    같은 블록이 나오는 것이 "제대로 직렬화됐다"의 가장 강한 형태다.
+    """
+    mapper = vocabulary.lift_mapper()
+    deltas = [*mapper.map(HubResponse(content=[TextBlock(text=text, index=0)])), *mapper.flush()]
+    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    for delta in deltas:
+        merger.apply(delta)
+    return [b for b in merger.build().content if isinstance(b, CitationBlock)]
 
 
 def _bridge(client: httpx.AsyncClient) -> Bridge:
@@ -172,22 +196,78 @@ class TestLiveStreaming:
         print(f"[live] thinking {len(thinking.thinking)}자={thinking.thinking[:120]!r}")
         print(f"[live] text={text.text!r}")
 
-    async def test_citation_tag_shape_if_documents_given(self) -> None:
-        """인용 태그 문법이 중첩인지 속성인지 확인한다.
+    async def test_citation_round_trip_through_a_second_turn(self) -> None:
+        """인용이 실린 응답을 다음 요청의 이력으로 되쓰고, 그 요청이 실제로 통하는지.
 
-        어휘 구현 전이라 태그를 파싱하지 않는다. 본문 원문을 그대로 보고 어느 모양으로 오는지
-        눈으로 정한다.
+        모델은 프롬프트가 지시하지 않으면 이 태그를 쓰지 않는다. 실측에서 입력 문서의 태그를
+        흉내내는 것을 확인했다. 그래서 어휘가 :meth:`prompt_hint`를 들고 그것을 프롬프트에 넣는다.
+
+        확인하려는 것이 다섯이다.
+
+        1. 태그가 청크에 쪼개져 와도 인덱스가 본문 위치를 정확히 가리킨다
+        2. 인용 텍스트가 본문에도 남는다. 빼면 답변이 끊긴다
+        3. 되쓴 wire body에 태그가 복원된다
+        4. 되쓴 문자열을 다시 올리면 같은 블록이 나온다. 올림과 내림이 서로의 역이다
+        5. 그 이력을 실은 두 번째 요청이 서버에 실제로 받아들여진다
         """
+        vocabulary = CiteVocabulary()
         prompt = (
-            "다음 문서를 근거로 한 문장만 답하고, 근거 부분을 인용 태그로 감싸세요.\n"
-            '<documents><document id="d1">서울은 대한민국의 수도다.</document></documents>\n'
-            "질문: 대한민국의 수도는?"
+            vocabulary.prompt_hint() + "\n\n"
+            '<documents><document id="d1">서울은 대한민국의 수도다.</document>'
+            '<document id="d2">부산은 제2의 도시다.</document></documents>\n'
+            "질문: 대한민국의 수도와 제2도시는? 한 문장으로."
         )
         async with httpx.AsyncClient(timeout=300.0) as client:
-            result = await _bridge(client).complete(
-                [prompt], max_tokens=96, temperature=0.0, **NO_THINKING
+            bridge = Bridge(
+                vendor=chat_completions,
+                base_url=BASE_URL,
+                model=MODEL,
+                api_key=API_KEY,
+                vocabularies=[vocabulary],
+                http_client=client,
             )
-        print(f"\n[live] raw answer={result.text!r}")
+            first = await bridge.complete([prompt], max_tokens=160, temperature=0.0, **NO_THINKING)
+
+            history = [prompt, HubMessage.of_response(first), "방금 답을 한 단어로 줄이면?"]
+            body = bridge.build_request(history)
+
+            # 5. 되쓴 이력이 실린 요청이 실제로 통한다. 400이면 여기서 터진다.
+            second = await bridge.complete(
+                history, max_tokens=SHORT, temperature=0.0, **NO_THINKING
+            )
+
+        cites = [b for b in first.content if isinstance(b, CitationBlock)]
+        assistant = body["messages"][1]
+        assert isinstance(assistant, dict)
+        lowered = assistant["content"]
+        assert isinstance(lowered, str)
+
+        print(f"\n[live] first={first.text!r}")
+        print(f"[live] blocks={[b.type for b in first.content]}")
+        for cite in cites:
+            print(f"[live] cite id={cite.id!r} [{cite.start_index}:{cite.end_index}]")
+        print(f"[live] lowered={lowered!r}")
+        print(f"[live] second={second.text!r}")
+
+        assert second.text.strip(), "되쓴 이력을 실은 두 번째 턴이 빈 답을 냈다"
+        assert assistant["role"] == "assistant"
+
+        if not cites:
+            pytest.skip("모델이 인용 태그를 쓰지 않았다. 프롬프트 준수 문제이며 파서 문제가 아니다")
+
+        # 1. 인덱스가 본문 위치를 가리킨다. 두 경로가 같은 커서를 공유한다는 증거다.
+        for cite in cites:
+            assert first.text[cite.start_index : cite.end_index] == cite.text
+
+        # 2, 3.
+        for cite in cites:
+            assert cite.text in first.text
+            assert f'<cite id="{cite.id}">{cite.text}</cite>' in lowered
+
+        # 4. 되쓴 문자열을 다시 올리면 같은 블록이 나온다.
+        relifted = _relift(vocabulary, lowered)
+        assert [(c.id, c.text) for c in relifted] == [(c.id, c.text) for c in cites]
+        print(f"[live] relifted={[(c.id, c.text) for c in relifted]}")
 
     async def test_tool_call_shape(self) -> None:
         from enhanced_completion import ToolDefinition, ToolUseBlock

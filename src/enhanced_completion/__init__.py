@@ -29,6 +29,7 @@ from .blocks import (
     registered_blocks,
 )
 from .bridge import AsyncStream, Bridge, SyncBridge, SyncStream
+from .contentstream import ContentSchema, Enter, Exit, ParseEvent, TagParser, TextRun
 from .errors import (
     EnhancedCompletionError,
     MappingError,
@@ -40,6 +41,7 @@ from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
 from .transport.sse import SseFrame, SseParser
 from .vendors.base import Lowerer, VendorAdapter
+from .vocabularies import CitationBlock, CiteVocabulary, cite_schema
 from .vocabulary import Vocabulary
 
 __version__ = "0.1.0"
@@ -48,22 +50,30 @@ __all__ = [
     "AsyncStream",
     "Block",
     "Bridge",
+    "CitationBlock",
+    "CiteVocabulary",
+    "ContentSchema",
     "ContentBlock",
+    "Enter",
     "EnhancedCompletionError",
+    "Exit",
     "HubMessage",
     "HubRequest",
     "HubResponse",
     "ImageBlock",
     "Lowerer",
     "MappingError",
+    "ParseEvent",
     "SseFrame",
     "SseParser",
+    "TagParser",
     "StreamMapper",
     "StreamMerger",
     "StreamNotFinished",
     "SyncBridge",
     "SyncStream",
     "TextBlock",
+    "TextRun",
     "ThinkingBlock",
     "ToolDefinition",
     "ToolResultBlock",
@@ -74,6 +84,7 @@ __all__ = [
     "VendorBlock",
     "Vocabulary",
     "__version__",
+    "cite_schema",
     "compose",
     "identity_mapper",
     "register_block",

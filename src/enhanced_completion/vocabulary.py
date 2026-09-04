@@ -43,15 +43,21 @@ class Vocabulary:
         for cls in self.blocks:
             register_block(cls)
 
-    def lower(self, block: ContentBlock) -> str | None:
-        """블록을 요청 text로 되쓴다.
+    def lower(self, blocks: Sequence[ContentBlock]) -> list[ContentBlock] | None:
+        """이 어휘의 블록을 text로 접어 넣는다.
 
-        ``None``을 돌려주면 그 블록은 요청에 실리지 않는다. 다른 벤더로 옮길 수 없는 블록을
-        의도적으로 생략하는 통로다.
+        블록 하나가 아니라 리스트 전체를 받는 것이 중요하다. 내림은 올림의 역이고, 올림이
+        스트림 전체를 보고 ``text``를 ``text + custom block``으로 갈랐으므로 내림도 전체를 보고
+        되합쳐야 한다. 인용이 그 예다. 인용 구간의 텍스트는 본문에도 실려 있으므로 블록별로
+        내리면 같은 문장이 두 번 나간다.
 
-        기본 구현은 이 어휘가 도입한 블록을 모두 생략한다. 되쓰기를 원하면 재정의한다.
+        돌려준 리스트에서 :class:`~enhanced_completion.blocks.TextBlock`만 wire에 실린다.
+        아무 어휘도 가져가지 않은 블록은 생략된다. 다른 벤더로 옮길 수 없는 추론 블록이 그
+        경로로 조용히 빠진다.
+
+        ``None``은 "이 리스트에 내 블록이 없다"는 뜻이고 리스트가 그대로 다음 어휘로 넘어간다.
         """
-        _ = block
+        _ = blocks
         return None
 
     def lift_mapper(self) -> StreamMapper[Any, Any] | None:
