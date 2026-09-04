@@ -49,6 +49,10 @@ SHORT = 24
 # 사고 기록이 있다. 여기서는 벤더가 하나라 호출 인자로 넘긴다.
 NO_THINKING: dict[str, object] = {"chat_template_kwargs": {"enable_thinking": False}}
 
+# 추론을 끝내고 본문까지 받으려면 예산이 필요하다. 실측에서 qwen3-8b가 "1+1은?"에도 추론에
+# 900자 남짓을 쓴다. 600 토큰이면 stop_reason이 stop으로 끝난다.
+REASONING_BUDGET = 600
+
 
 def _bridge(client: httpx.AsyncClient) -> Bridge:
     return Bridge(
@@ -99,7 +103,8 @@ class TestLiveStreaming:
         어댑터가 둘 다 보지만 실제로 오는 것은 앞쪽이다.
 
         추론 예산을 짧게 주면 ``content``가 비고 ``stop_reason``이 ``length``가 된다. 그것이
-        정상 동작이므로 본문을 요구하지 않는다.
+        정상 동작이므로 여기서는 본문을 요구하지 않는다. 둘 다 나오는 경우는
+        :meth:`test_reasoning_then_content_in_one_stream`이 본다.
         """
         async with httpx.AsyncClient(timeout=300.0) as client:
             result = await _bridge(client).complete(
@@ -108,9 +113,64 @@ class TestLiveStreaming:
         thinking = [b for b in result.content if isinstance(b, ThinkingBlock)]
         assert thinking, "추론 블록이 없다. 필드 이름이 바뀌었는지 확인하라"
         assert thinking[0].thinking.strip()
+        assert result.stop_reason == "length"
         print(f"\n[live] stop_reason={result.stop_reason}")
         print(f"[live] thinking={thinking[0].thinking[:160]!r}")
         print(f"[live] text={result.text!r}")
+
+    @pytest.mark.slow
+    async def test_reasoning_then_content_in_one_stream(self) -> None:
+        """추론이 끝나고 본문이 이어지는 온전한 스트림.
+
+        예산을 넉넉히 줘야 관측된다. 실측에서 qwen3-8b가 사소한 질문에도 추론에 900자 남짓을
+        쓰고 43초가 걸린다. 그래서 ``slow`` 마커로 갈라둔다.
+
+        확인하려는 것이 셋이다. 두 채널이 섞이지 않고 갈리는지, 227개 델타가 인덱스로 접혀
+        블록 두 개가 되는지, 델타를 이어붙인 것과 병합 결과가 같은지다.
+
+        어댑터가 추론에 ``index=-1``, 본문에 ``index=0``을 준다. 인덱스가 없으면 블록이 델타
+        수만큼 흩어진다.
+        """
+        async with httpx.AsyncClient(timeout=900.0) as client:
+            stream = _bridge(client).stream(
+                ["1+1은? 숫자만 답하세요."], max_tokens=REASONING_BUDGET, temperature=0.0
+            )
+            deltas = [d async for d in stream]
+            result = stream.result
+
+        assert result.stop_reason == "stop", "예산이 부족하면 length가 된다. 늘려라"
+
+        # 최종 블록은 추론 하나와 본문 하나다.
+        assert [b.type for b in result.content] == ["thinking", "text"]
+        thinking, text = result.content[0], result.content[1]
+        assert isinstance(thinking, ThinkingBlock)
+        assert isinstance(text, TextBlock)
+        assert thinking.thinking.strip()
+        assert text.text.strip()
+
+        # 델타를 이어붙인 것과 병합 결과가 같아야 한다. 두 채널 각각에 대해 확인한다.
+        streamed_text = "".join(
+            b.text for d in deltas for b in d.content if isinstance(b, TextBlock)
+        )
+        streamed_thinking = "".join(
+            b.thinking for d in deltas for b in d.content if isinstance(b, ThinkingBlock)
+        )
+        assert streamed_text == text.text
+        assert streamed_thinking == thinking.thinking
+
+        # 추론이 본문보다 먼저 끝난다. 두 채널이 섞이지 않는다.
+        first_text = next(
+            i for i, d in enumerate(deltas) for b in d.content if isinstance(b, TextBlock)
+        )
+        last_thinking = max(
+            i for i, d in enumerate(deltas) for b in d.content if isinstance(b, ThinkingBlock)
+        )
+        assert last_thinking < first_text, "추론과 본문이 섞여서 도착했다"
+
+        print(f"\n[live] deltas={len(deltas)} stop_reason={result.stop_reason}")
+        print(f"[live] blocks={[b.type for b in result.content]}")
+        print(f"[live] thinking {len(thinking.thinking)}자={thinking.thinking[:120]!r}")
+        print(f"[live] text={text.text!r}")
 
     async def test_citation_tag_shape_if_documents_given(self) -> None:
         """인용 태그 문법이 중첩인지 속성인지 확인한다.

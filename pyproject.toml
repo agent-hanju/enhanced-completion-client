@@ -45,6 +45,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "live: requires an explicitly configured live endpoint",
+    "slow: takes tens of seconds against a real model",
 ]
 
 [tool.coverage.run]
