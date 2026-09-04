@@ -15,11 +15,16 @@ import json
 import httpx
 import pytest
 import respx
+from _dense import CITED, dense_history
 
 from enhanced_completion import (
     Bridge,
+    CitationBlock,
+    CiteVocabulary,
     HubMessage,
+    HubResponse,
     MappingError,
+    StreamMerger,
     TextBlock,
     ThinkingBlock,
     ToolDefinition,
@@ -912,3 +917,288 @@ class TestHubConvergence:
         for adapter, key in ((messages, "messages"), (responses, "input")):
             body = make(adapter).build_request([message])
             assert body[key][0]["content"] == "답"
+
+
+class TestNativeCitations:
+    """Anthropic의 네이티브 인용 채널.
+
+    beta 헤더가 필요 없다. 예전 ``citations-2025-01-31``은 GA가 되어 사라졌다.
+
+    이 벤더는 인용을 본문 태그가 아니라 구조 채널로 준다. 그래서 어휘의 태그 올림을 거치지
+    않고 어댑터가 바로 허브 블록을 만든다. 도착지는 태그 경로와 같다.
+    """
+
+    def test_document_goes_out_on_the_native_channel(self) -> None:
+        from enhanced_completion import DocumentBlock
+
+        message = HubMessage(
+            role="user",
+            content=[
+                DocumentBlock(id="d1", title="지리", text="서울은 수도다."),
+                TextBlock(text="수도는?"),
+            ],
+        )
+        body = make(messages).build_request([message])
+        blocks = body["messages"][0]["content"]
+        assert blocks[0] == {
+            "type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": "서울은 수도다."},
+            "citations": {"enabled": True},
+            "title": "지리",
+        }
+        # 문서가 본문보다 앞에 와야 모델이 근거를 먼저 읽는다.
+        assert blocks[1] == {"type": "text", "text": "수도는?"}
+
+    def test_citations_are_all_or_nothing(self) -> None:
+        """한 요청에서 섞으면 거절된다. 하나라도 켜져 있으면 전체를 켠다."""
+        from enhanced_completion import DocumentBlock
+
+        message = HubMessage(
+            role="user",
+            content=[
+                DocumentBlock(id="a", text="A", citations_enabled=False),
+                DocumentBlock(id="b", text="B", citations_enabled=True),
+            ],
+        )
+        blocks = make(messages).build_request([message])["messages"][0]["content"]
+        assert [b["citations"] for b in blocks] == [{"enabled": True}, {"enabled": True}]
+
+    def test_no_beta_header_is_sent(self) -> None:
+        assert messages.request_headers() == {"anthropic-version": "2023-06-01"}
+
+    def test_document_without_native_channel_lowers_to_text(self) -> None:
+        """네이티브 문서 채널이 없는 벤더에서는 본문에 태그로 내린다."""
+        from enhanced_completion import DocumentBlock
+
+        document = DocumentBlock(id="d1", title="지리", text="서울은 수도다.")
+        assert document.to_prompt().splitlines() == [
+            '<document id="d1">',
+            "<title>지리</title>",
+            "<content>서울은 수도다.</content>",
+            "</document>",
+        ]
+
+    @respx.mock
+    async def test_citations_delta_becomes_a_citation_block(self) -> None:
+        from enhanced_completion import CitationBlock
+
+        payload = sse(
+            (
+                "content_block_start",
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "서울이다."},
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "citations_delta",
+                        "citation": {
+                            "type": "char_location",
+                            "cited_text": "서울은 대한민국의 수도다.",
+                            "document_index": 0,
+                            "document_title": "지리",
+                            "start_char_index": 0,
+                            "end_char_index": 13,
+                        },
+                    },
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        )
+        respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=payload))
+        result = await make(messages).complete(["수도?"])
+
+        assert result.text == "서울이다."
+        cite = next(b for b in result.content if isinstance(b, CitationBlock))
+        assert cite.text == "서울은 대한민국의 수도다."
+        assert cite.document_title == "지리"
+        assert cite.document_index == 0
+        assert cite.source_kind == "char_location"
+        assert (cite.source_start, cite.source_end) == (0, 13)
+        # 답변 좌표는 두 축이 달라 어댑터가 채우지 않는다.
+        assert (cite.start_index, cite.end_index) == (0, 0)
+
+    @respx.mock
+    async def test_page_location_maps_to_the_same_fields(self) -> None:
+        from enhanced_completion import CitationBlock
+
+        payload = sse(
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "citations_delta",
+                        "citation": {
+                            "type": "page_location",
+                            "cited_text": "본문",
+                            "document_index": 1,
+                            "start_page_number": 3,
+                            "end_page_number": 4,
+                        },
+                    },
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        )
+        respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=payload))
+        cite = next(
+            b
+            for b in (await make(messages).complete(["x"])).content
+            if isinstance(b, CitationBlock)
+        )
+        assert cite.source_kind == "page_location"
+        assert (cite.source_start, cite.source_end) == (3, 4)
+
+    @respx.mock
+    async def test_both_citation_paths_reach_the_same_block_type(self) -> None:
+        """태그 경로와 네이티브 경로가 같은 허브 블록에 도달한다."""
+        from enhanced_completion import CitationBlock, CiteVocabulary
+
+        native = sse(
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "citations_delta",
+                        "citation": {
+                            "type": "char_location",
+                            "cited_text": "근거",
+                            "document_index": 0,
+                        },
+                    },
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        )
+        tagged = sse(
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": '<cite id="d1">근거</cite>'},
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        )
+
+        respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=native))
+        from_native = await make(messages).complete(["x"])
+
+        respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=tagged))
+        with_vocabulary = Bridge(
+            vendor=messages,
+            base_url=BASE,
+            model="m",
+            vocabularies=[CiteVocabulary()],
+            http_client=httpx.AsyncClient(),
+        )
+        from_tags = await with_vocabulary.complete(["x"])
+
+        for result in (from_native, from_tags):
+            cite = next(b for b in result.content if isinstance(b, CitationBlock))
+            assert cite.type == "citation"
+            assert cite.text == "근거"
+
+
+class TestDenseLowering:
+    """블록 여섯 종류가 각 벤더 wire로 내려가는지. 네트워크를 쓰지 않는다.
+
+    벤더마다 문서와 도구 결과가 실리는 자리가 다르다. 그 차이를 어댑터가 흡수하고 허브 쪽
+    이력은 하나로 유지되는 것이 요점이다.
+    """
+
+    @staticmethod
+    def _bridge(adapter: object) -> Bridge:
+        return Bridge(
+            vendor=adapter,  # type: ignore[arg-type]
+            base_url=BASE,
+            model="m",
+            vocabularies=[CiteVocabulary()],
+        )
+
+    def test_anthropic_uses_native_document_and_tool_channels(self) -> None:
+        body = self._bridge(messages).build_request(dense_history())
+        turns = body["messages"]
+        assert isinstance(turns, list)
+
+        # 문서는 네이티브 채널로, 본문보다 앞에 간다.
+        first = turns[0]["content"]
+        assert isinstance(first, list)
+        assert [b["type"] for b in first] == ["document", "text"]
+        assert first[0]["citations"] == {"enabled": True}
+
+        # 인용은 본문에 태그로 되끼워진다.
+        rendered = " ".join(str(t.get("content", "")) for t in turns)
+        assert f'<cite id="d1">{CITED}</cite>' in rendered
+
+        # 추론은 발급 벤더 표시가 다르므로 생략된다.
+        assert "표를 조회해야 한다" not in rendered
+
+    def test_responses_lowers_document_into_the_text_channel(self) -> None:
+        """이 벤더에는 네이티브 문서 채널이 없다. 본문 태그로 내려간다."""
+        body = self._bridge(responses).build_request(dense_history())
+        turns = body["input"]
+        assert isinstance(turns, list)
+        rendered = " ".join(str(t.get("content", "")) for t in turns)
+        assert '<document id="d1">' in rendered
+        assert f'<cite id="d1">{CITED}</cite>' in rendered
+        assert "표를 조회해야 한다" not in rendered
+
+    def test_gemini_renames_assistant_to_model(self) -> None:
+        body = self._bridge(generate_content.for_model("m")).build_request(dense_history())
+        contents = body["contents"]
+        assert isinstance(contents, list)
+        assert "model" in [c["role"] for c in contents]
+        rendered = " ".join(c["parts"][0]["text"] for c in contents)
+        assert f'<cite id="d1">{CITED}</cite>' in rendered
+        assert '<document id="d1">' in rendered
+
+    def test_citation_indices_survive_the_round_trip(self) -> None:
+        """되쓴 문자열을 다시 올리면 같은 인용이 나온다."""
+        vocabulary = CiteVocabulary()
+        body = self._bridge(messages).build_request(dense_history())
+        turns = body["messages"]
+        assert isinstance(turns, list)
+        answer = next(
+            str(t["content"])
+            for t in turns
+            if isinstance(t.get("content"), str) and "<cite" in t["content"]
+        )
+
+        mapper = vocabulary.lift_mapper()
+        deltas = [
+            *mapper.map(HubResponse(content=[TextBlock(text=answer, index=0)])),
+            *mapper.flush(),
+        ]
+        merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+        for delta in deltas:
+            merger.apply(delta)
+        merged = merger.build()
+        cites = [b for b in merged.content if isinstance(b, CitationBlock)]
+        assert [(c.id, c.text) for c in cites] == [("d1", CITED)]
+        assert merged.text[cites[0].start_index : cites[0].end_index] == CITED
+
+    def test_tool_results_land_in_each_vendor_shape(self) -> None:
+        """도구 결과가 실리는 자리가 벤더마다 다르다."""
+        anthropic = self._bridge(messages).build_request(dense_history())
+        rendered = " ".join(str(t.get("content", "")) for t in anthropic["messages"])
+        assert "1000만" in rendered
+
+        gemini = self._bridge(generate_content.for_model("m")).build_request(dense_history())
+        joined = " ".join(c["parts"][0]["text"] for c in gemini["contents"])
+        assert "1000만" in joined

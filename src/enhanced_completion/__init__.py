@@ -18,7 +18,9 @@ from __future__ import annotations
 
 from .blocks import (
     Block,
+    CitationBlock,
     ContentBlock,
+    DocumentBlock,
     ImageBlock,
     TextBlock,
     ThinkingBlock,
@@ -41,7 +43,7 @@ from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
 from .transport.sse import SseFrame, SseParser
 from .vendors.base import Lowerer, VendorAdapter
-from .vocabularies import CitationBlock, CiteVocabulary, cite_schema
+from .vocabularies import CiteVocabulary, cite_schema
 from .vocabulary import Vocabulary
 
 __version__ = "0.1.0"
@@ -54,6 +56,7 @@ __all__ = [
     "CiteVocabulary",
     "ContentSchema",
     "ContentBlock",
+    "DocumentBlock",
     "Enter",
     "EnhancedCompletionError",
     "Exit",

@@ -19,7 +19,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..blocks import ContentBlock, TextBlock, ThinkingBlock, ToolUseBlock, VendorBlock
+from ..blocks import (
+    CitationBlock,
+    ContentBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    VendorBlock,
+)
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, Usage
 from ..mapper import StreamMapper
@@ -73,6 +80,9 @@ class _ToHub:
                 if block is not None:
                     blocks.append(block)
 
+        blocks.extend(self._citations(head.get("citationMetadata")))
+        blocks.extend(self._candidate_meta(head))
+
         fields: dict[str, Any] = {}
         if isinstance(chunk.get("modelVersion"), str):
             fields["model"] = chunk["modelVersion"]
@@ -95,6 +105,48 @@ class _ToHub:
 
     def flush(self) -> list[HubResponse]:
         return []
+
+    def _citations(self, metadata: Any) -> list[ContentBlock]:
+        """``citationMetadata``를 허브 :class:`CitationBlock`으로.
+
+        이 벤더의 ``citationSources``는 ``startIndex``/``endIndex``가 **답변 문자열 안의
+        위치**다. Anthropic이 원문 좌표를 주는 것과 축이 반대이므로 이쪽은 답변 좌표를 채운다.
+
+        인용이 part가 아니라 candidate 메타데이터에 실린다. part만 훑으면 통째로 놓친다.
+        """
+        if not isinstance(metadata, dict):
+            return []
+        out: list[ContentBlock] = []
+        for source in metadata.get("citationSources") or []:
+            if not isinstance(source, dict):
+                continue
+            fields: dict[str, Any] = {"source": SOURCE, "source_kind": "citation_source"}
+            uri = source.get("uri")
+            if isinstance(uri, str) and uri:
+                fields["id"] = uri
+            for key, dst in (("startIndex", "start_index"), ("endIndex", "end_index")):
+                value = source.get(key)
+                if isinstance(value, int):
+                    fields[dst] = value
+            out.append(CitationBlock(**fields))
+        return out
+
+    def _candidate_meta(self, candidate: dict[str, Any]) -> list[ContentBlock]:
+        """허브에 대응물이 없는 candidate 메타데이터를 보존한다.
+
+        ``groundingMetadata``는 검색 근거, ``safetyRatings``는 안전 등급,
+        ``urlContextMetadata``는 URL 조회 결과다. 셋 다 이 벤더 전용이라 다른 벤더로 옮길 수
+        없지만, 같은 벤더로 되돌릴 때는 무손실이어야 한다.
+        """
+        out: list[ContentBlock] = []
+        for key in ("groundingMetadata", "urlContextMetadata"):
+            value = candidate.get(key)
+            if isinstance(value, dict):
+                out.append(VendorBlock(type=key, raw=value, source=SOURCE))
+        ratings = candidate.get("safetyRatings")
+        if isinstance(ratings, list) and ratings:
+            out.append(VendorBlock(type="safetyRatings", raw={"ratings": ratings}, source=SOURCE))
+        return out
 
     def _part(self, part: dict[str, Any]) -> ContentBlock | None:
         """채워진 필드로 종류를 알아낸다. 판별자가 없어 순서가 계약이다."""

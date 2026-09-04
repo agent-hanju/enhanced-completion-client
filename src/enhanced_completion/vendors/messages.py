@@ -16,7 +16,10 @@ import json
 from typing import Any
 
 from ..blocks import (
+    CitationBlock,
     ContentBlock,
+    DocumentBlock,
+    ImageBlock,
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
@@ -95,8 +98,23 @@ class _ToHub:
         if kind == "thinking":
             thinking = block.get("thinking")
             return ThinkingBlock(**common, **({"thinking": thinking} if thinking else {}))
-        if kind in ("tool_use", "server_tool_use", "mcp_tool_use"):
+        if kind == "image":
+            source = block.get("source") or {}
             fields: dict[str, Any] = {}
+            if source.get("media_type"):
+                fields["media_type"] = source["media_type"]
+            if source.get("data"):
+                fields["data"] = source["data"]
+            if source.get("url"):
+                fields["url"] = source["url"]
+            return ImageBlock(**common, **fields)
+        if kind == "redacted_thinking":
+            # 내용이 암호화되어 온다. 원문 그대로 되돌려야 하므로 보존만 한다.
+            return VendorBlock(
+                type=kind, raw={k: v for k, v in block.items() if k != "type"}, **common
+            )
+        if kind in ("tool_use", "server_tool_use", "mcp_tool_use"):
+            fields = {}
             if block.get("id"):
                 fields["id"] = block["id"]
             if block.get("name"):
@@ -123,12 +141,49 @@ class _ToHub:
             fragment = delta.get("partial_json") or ""
             return self._one(ToolUseBlock(input_json=fragment, **common))
         if kind == "citations_delta":
-            citation = delta.get("citation") or {}
-            block_kind = self._kinds.get(index if isinstance(index, int) else -1, "text")
-            return self._one(
-                VendorBlock(type=f"{block_kind}_citation", raw=citation, source=SOURCE)
-            )
+            return self._citation(delta.get("citation") or {})
         return []
+
+    def _citation(self, citation: dict[str, Any]) -> list[HubResponse]:
+        """네이티브 인용을 허브 :class:`CitationBlock`으로.
+
+        이 벤더는 인용을 본문 태그가 아니라 구조 채널로 준다. beta 헤더도 필요 없다. 그래서
+        어휘의 태그 올림을 거치지 않고 어댑터가 바로 허브 블록을 만든다. 도착지는 같다.
+
+        답변 안의 위치는 채우지 않는다. 이 API가 주는 좌표는 근거 문서 안의 구간이고, 답변
+        쪽에서 인용이 걸리는 범위는 이 인용이 실린 text 블록 전체다. 두 축이 다르므로
+        ``source_*``만 채우고 답변 구간은 소비 앱이 블록 경계로 판단한다.
+        """
+        fields: dict[str, Any] = {"source": SOURCE}
+        cited = citation.get("cited_text")
+        if isinstance(cited, str) and cited:
+            fields["text"] = cited
+
+        index = citation.get("document_index")
+        if isinstance(index, int):
+            fields["document_index"] = index
+            fields["id"] = str(index)
+        title = citation.get("document_title")
+        if isinstance(title, str) and title:
+            fields["document_title"] = title
+            fields["id"] = title
+
+        location = citation.get("type")
+        if isinstance(location, str) and location:
+            fields["source_kind"] = location
+        for src, dst in (
+            ("start_char_index", "source_start"),
+            ("end_char_index", "source_end"),
+            ("start_page_number", "source_start"),
+            ("end_page_number", "source_end"),
+            ("start_block_index", "source_start"),
+            ("end_block_index", "source_end"),
+        ):
+            value = citation.get(src)
+            if isinstance(value, int):
+                fields[dst] = value
+
+        return [HubResponse(content=[CitationBlock(**fields)])]
 
     @staticmethod
     def _one(block: ContentBlock) -> list[HubResponse]:
@@ -180,13 +235,23 @@ class MessagesAdapter:
         system: list[str] = []
         turns: list[dict[str, Any]] = []
         for message in request.messages:
-            text = lowerer.lower_text(message.content)
+            documents = [b for b in message.content if isinstance(b, DocumentBlock)]
+            rest = [b for b in message.content if not isinstance(b, DocumentBlock)]
+            text = lowerer.lower_text(rest)
             if message.role == "system":
                 if text:
                     system.append(text)
                 continue
-            if text:
+            blocks = self._document_blocks(documents)
+            if not blocks and not text:
+                continue
+            if not blocks:
                 turns.append({"role": message.role, "content": text})
+                continue
+            # 문서가 본문보다 앞에 와야 모델이 근거를 먼저 읽는다.
+            if text:
+                blocks.append({"type": "text", "text": text})
+            turns.append({"role": message.role, "content": blocks})
 
         params = dict(request.params)
         body: dict[str, Any] = {
@@ -207,8 +272,44 @@ class MessagesAdapter:
                 body[key] = value
         return body
 
+    @staticmethod
+    def _document_blocks(documents: list[DocumentBlock]) -> list[dict[str, Any]]:
+        """문서를 네이티브 ``document`` content block으로.
+
+        ``citations``를 켜면 응답의 text 블록이 구조화된 인용을 들고 온다. beta 헤더는 필요
+        없다. 예전에는 ``citations-2025-01-31``이 있었지만 지금은 GA다.
+
+        한 요청 안에서 ``citations``는 전부 켜거나 전부 꺼야 한다. 섞으면 거절된다. 그래서
+        문서 하나라도 켜져 있으면 전체를 켠다.
+
+        ``output_config.format``과는 함께 쓸 수 없다. 구조화 출력과 인용을 같이 요구하면
+        400이 온다.
+        """
+        if not documents:
+            return []
+        enabled = any(d.citations_enabled for d in documents)
+        blocks: list[dict[str, Any]] = []
+        for document in documents:
+            block: dict[str, Any] = {
+                "type": "document",
+                "source": {
+                    "type": "text",
+                    "media_type": document.media_type,
+                    "data": document.text,
+                },
+                "citations": {"enabled": enabled},
+            }
+            title = document.title or document.id
+            if title:
+                block["title"] = title
+            blocks.append(block)
+        return blocks
+
     def request_headers(self) -> dict[str, str]:
-        """이 벤더가 요구하는 버전 헤더."""
+        """이 벤더가 요구하는 버전 헤더.
+
+        인용에는 beta 헤더가 필요 없다. 버전 헤더만 요구한다.
+        """
         return {"anthropic-version": self.version}
 
     def is_terminal(self, frame: SseFrame) -> bool:

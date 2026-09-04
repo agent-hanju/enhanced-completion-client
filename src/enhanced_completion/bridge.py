@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .blocks import ContentBlock, TextBlock
+from .blocks import ContentBlock, DocumentBlock, TextBlock
 from .errors import StreamNotFinished
 from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition
 from .mapper import StreamMapper, compose
@@ -39,7 +39,30 @@ class _Lowerer:
             replaced = vocabulary.lower(current)
             if replaced is not None:
                 current = list(replaced)
-        return "".join(b.text for b in current if isinstance(b, TextBlock))
+        body = "".join(b.text for b in current if isinstance(b, TextBlock))
+        documents = self._lower_documents(current)
+        if not documents:
+            return body
+        return f"{documents}\n\n{body}" if body else documents
+
+    @staticmethod
+    def _lower_documents(blocks: list[ContentBlock]) -> str:
+        """네이티브 문서 채널이 없는 벤더에서 문서를 본문에 실는다.
+
+        허브 수준 기본 동작이다. 어휘에 맡기지 않는 이유는 사용자가 준 근거가 조용히 사라지는
+        것이 최악의 결과이기 때문이다. 아무도 가져가지 않은 문서가 버려지면 모델은 근거 없이
+        답하고, 호출자는 문서를 보냈다고 믿는다.
+
+        네이티브 채널이 있는 어댑터는 ``build_body``에서 문서를 먼저 빼내므로 여기까지 오지
+        않는다. 중복되지 않는다.
+
+        문서를 본문보다 앞에 둔다. 네이티브 채널도 그 순서이고, 모델이 근거를 먼저 읽는다.
+        """
+        documents = [b for b in blocks if isinstance(b, DocumentBlock)]
+        if not documents:
+            return ""
+        rendered = "\n".join(d.to_prompt() for d in documents)
+        return f"<documents>\n{rendered}\n</documents>"
 
 
 class _Pipeline:

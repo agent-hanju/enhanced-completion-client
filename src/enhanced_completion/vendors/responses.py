@@ -17,7 +17,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..blocks import ContentBlock, TextBlock, ThinkingBlock, ToolUseBlock, VendorBlock
+from ..blocks import (
+    CitationBlock,
+    ContentBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    VendorBlock,
+)
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, Usage
 from ..mapper import StreamMapper
@@ -69,6 +76,10 @@ class _ToHub:
         ):
             return self._one(ToolUseBlock(input_json=event.get("delta") or "", index=_slot(event)))
 
+        # 인용. 이 벤더는 annotation이라 부른다.
+        if name == "response.output_text.annotation.added":
+            return self._annotation(event)
+
         # item 등장. 도구 호출의 식별자와 이름이 여기 실린다.
         if name == "response.output_item.added":
             return self._item_added(event)
@@ -97,6 +108,41 @@ class _ToHub:
     def _one(block: ContentBlock) -> list[HubResponse]:
         block.source = SOURCE
         return [HubResponse(content=[block])]
+
+    def _annotation(self, event: dict[str, Any]) -> list[HubResponse]:
+        """annotation을 허브 :class:`CitationBlock`으로.
+
+        이 벤더는 인용을 annotation이라 부른다. ``url_citation``은 웹 근거,
+        ``file_citation``은 업로드한 파일 근거, ``file_path``는 코드 실행이 만든 파일 참조다.
+        앞의 둘은 인용이고 마지막은 산출물 경로라 성질이 다르다.
+
+        ``start_index``/``end_index``는 답변 문자열 안의 위치다. Anthropic이 원문 좌표를 주는
+        것과 축이 다르므로 이쪽은 답변 좌표를 채운다.
+
+        ``.added`` 접미를 일괄 무시하면 이 이벤트가 함께 사라진다. 그래서 위에서 먼저 걸러야
+        한다.
+        """
+        annotation = event.get("annotation") or {}
+        kind = annotation.get("type")
+        if kind == "file_path":
+            # 인용이 아니라 산출물 경로다. 원본을 보존한다.
+            return self._one(VendorBlock(type="responses_file_path", raw=dict(annotation)))
+
+        fields: dict[str, Any] = {"source": SOURCE, "source_kind": kind or "annotation"}
+        identifier = annotation.get("url") or annotation.get("file_id")
+        if isinstance(identifier, str) and identifier:
+            fields["id"] = identifier
+        title = annotation.get("title") or annotation.get("filename")
+        if isinstance(title, str) and title:
+            fields["document_title"] = title
+        index = annotation.get("index")
+        if isinstance(index, int):
+            fields["document_index"] = index
+        for key, dst in (("start_index", "start_index"), ("end_index", "end_index")):
+            value = annotation.get(key)
+            if isinstance(value, int):
+                fields[dst] = value
+        return [HubResponse(content=[CitationBlock(**fields)])]
 
     def _item_added(self, event: dict[str, Any]) -> list[HubResponse]:
         item = event.get("item") or {}

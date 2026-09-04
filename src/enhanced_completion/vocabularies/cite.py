@@ -16,9 +16,9 @@ Java 초기 구현의 중첩형(``<cite><id>d1</id>본문</cite>``)보다 파서
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any, Literal
+from typing import Any
 
-from ..blocks import ContentBlock, TextBlock
+from ..blocks import CitationBlock, ContentBlock, TextBlock
 from ..contentstream import ContentSchema, Enter, Exit, ParseEvent, TagParser, TextRun
 from ..hub import HubResponse
 from ..mapper import StreamMapper
@@ -27,20 +27,6 @@ from ..vocabulary import Vocabulary
 __all__ = ["CITE_PATH", "CitationBlock", "CiteVocabulary", "cite_schema"]
 
 CITE_PATH = "/cite"
-
-
-class CitationBlock(ContentBlock):
-    """본문 한 구간의 근거.
-
-    ``index``를 주지 않는다. 인용은 조각으로 도착하지 않고 닫는 태그에서 한 번에 완성되므로
-    병합기가 짝지을 키가 필요 없다. 키가 없는 원소는 도착 순서대로 덧붙는다.
-    """
-
-    type: Literal["citation"] = "citation"
-    id: str = ""
-    text: str = ""
-    start_index: int = 0
-    end_index: int = 0
 
 
 def cite_schema(*, tag: str = "cite", alias: Iterable[str] = ("rag",)) -> ContentSchema:

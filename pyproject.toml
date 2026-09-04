@@ -44,6 +44,9 @@ files = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# 라이브 시험은 기본 제외다. 마커만 달아두면 .env를 채운 순간 오프라인 검증이 외부 서비스의
+# 가용성과 요금에 묶인다. 돌릴 때는 -m live로 명시한다.
+addopts = "-m 'not live'"
 markers = [
     "live: requires an explicitly configured live endpoint",
     "slow: takes tens of seconds against a real model",

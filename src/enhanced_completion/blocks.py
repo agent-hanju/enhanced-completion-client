@@ -19,7 +19,9 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 __all__ = [
     "Block",
+    "CitationBlock",
     "ContentBlock",
+    "DocumentBlock",
     "ImageBlock",
     "TextBlock",
     "ThinkingBlock",
@@ -112,6 +114,65 @@ class ImageBlock(ContentBlock):
     url: str | None = Field(default=None, json_schema_extra=_overwrite())
 
 
+class CitationBlock(ContentBlock):
+    """본문 한 구간의 근거.
+
+    허브 블록이다. 어휘 소속이 아니다. Anthropic Messages가 인용을 네이티브 구조 채널로
+    제공하기 때문이다. 문서 블록에 ``citations``를 켜면 응답의 text 블록이 ``citations``
+    배열을 들고 온다. beta 헤더도 필요 없다.
+
+    그래서 같은 블록에 도달하는 경로가 둘이다. vLLM은 본문 태그를 올려서, Anthropic은
+    네이티브 채널로 온다. 어휘가 태그를 다루고 어댑터가 네이티브를 다루지만 도착지는 같다.
+
+    ``index``를 주지 않는다. 인용은 조각으로 도착하지 않고 한 번에 완성되므로 병합기가 짝지을
+    키가 필요 없다. 키가 없는 원소는 도착 순서대로 덧붙는다.
+
+    답변 안의 위치와 원문 안의 위치가 다른 축이다. ``start_index``/``end_index``는 답변
+    문자열의 구간이고, ``source_*``는 근거 문서 안의 구간이다. 태그 경로는 앞쪽만, 네이티브
+    경로는 뒤쪽만 채울 수 있다.
+    """
+
+    type: Literal["citation"] = "citation"
+    id: str = Field(default="", json_schema_extra=_overwrite())
+    text: str = ""
+    start_index: int = Field(default=0, json_schema_extra=_overwrite())
+    end_index: int = Field(default=0, json_schema_extra=_overwrite())
+
+    document_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    document_title: str | None = Field(default=None, json_schema_extra=_overwrite())
+    source_start: int | None = Field(default=None, json_schema_extra=_overwrite())
+    source_end: int | None = Field(default=None, json_schema_extra=_overwrite())
+    source_kind: str | None = Field(default=None, json_schema_extra=_overwrite())
+
+
+class DocumentBlock(ContentBlock):
+    """요청에 첨부하는 근거 문서.
+
+    벤더마다 실리는 자리가 다르다. Anthropic Messages는 ``document`` content block으로 받고
+    ``citations``를 켤 수 있다. 나머지 벤더는 그 채널이 없으므로 어휘가 본문 text에 태그로
+    내린다. 어느 쪽이든 이 블록 하나로 표현한다.
+    """
+
+    type: Literal["document"] = "document"
+    id: str = Field(default="", json_schema_extra=_overwrite())
+    title: str | None = Field(default=None, json_schema_extra=_overwrite())
+    text: str = ""
+    media_type: str = Field(default="text/plain", json_schema_extra=_overwrite())
+    citations_enabled: bool = Field(default=True, json_schema_extra=_overwrite())
+
+    def to_prompt(self) -> str:
+        """네이티브 문서 채널이 없는 벤더에서 본문에 실을 형태.
+
+        Java ``IDocument.toSerializedPrompt()``와 같은 모양을 유지한다.
+        """
+        parts = [f'<document id="{self.id}">']
+        if self.title:
+            parts.append(f"<title>{self.title}</title>")
+        parts.append(f"<content>{self.text}</content>")
+        parts.append("</document>")
+        return "\n".join(parts)
+
+
 class VendorBlock(ContentBlock):
     """등록되지 않은 벤더 고유 블록.
 
@@ -181,5 +242,13 @@ Block = Annotated[ContentBlock, BeforeValidator(resolve_block)]
 """허브 모델에서 content block 필드에 쓰는 타입."""
 
 
-for _cls in (TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock, ImageBlock):
+for _cls in (
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    ToolResultBlock,
+    ImageBlock,
+    CitationBlock,
+    DocumentBlock,
+):
     register_block(_cls)
