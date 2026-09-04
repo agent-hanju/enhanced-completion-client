@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .blocks import Block, ContentBlock, TextBlock
+from .parameters import Hyperparameters
 
 __all__ = ["HubMessage", "HubRequest", "HubResponse", "ToolDefinition", "Usage"]
 
@@ -90,7 +91,8 @@ class ToolDefinition(BaseModel):
     """모델에 노출할 도구.
 
     공통 함수 도구는 ``name``/``description``/``input_schema``로 표현한다. 서버 내장 도구처럼
-    벤더 간 공통 구조가 없는 정의는 :meth:`native`로 원본 wire 객체를 등록한다.
+    벤더 간 공통 구조가 없는 정의는 :meth:`native`로 원본 wire 객체를 등록한다. native 정의는
+    지정한 어댑터에서만 직렬화하며 다른 벤더에서 generic function으로 바꾸지 않는다.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -103,7 +105,7 @@ class ToolDefinition(BaseModel):
 
     @classmethod
     def native(cls, vendor: str, wire: dict[str, Any]) -> ToolDefinition:
-        """특정 벤더에서만 유효한 내장 도구 정의를 만든다."""
+        """특정 벤더에서만 명시적으로 활성화할 내장 도구 정의를 만든다."""
         name = wire.get("name") or wire.get("type") or next(iter(wire), "native")
         return cls(name=str(name), vendor=vendor, wire=dict(wire))
 
@@ -125,4 +127,11 @@ class HubRequest(BaseModel):
     model: str | None = None
     messages: list[HubMessage] = Field(default_factory=list)
     tools: list[ToolDefinition] = Field(default_factory=list)
+    hyperparameters: Hyperparameters = Field(default_factory=Hyperparameters)
     params: dict[str, Any] = Field(default_factory=dict)
+
+    def parameters_for(self, family: str, *, vendor_name: str | None = None) -> dict[str, Any]:
+        """공통 옵션을 대상 API에 투영한 뒤 레거시 호출별 확장으로 덮는다."""
+        rendered = self.hyperparameters.for_vendor(family, name=vendor_name)
+        rendered.update(self.params)
+        return rendered

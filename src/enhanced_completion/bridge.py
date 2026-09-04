@@ -4,14 +4,25 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
-from .blocks import ContentBlock, DocumentBlock, TextBlock
-from .errors import StreamNotFinished
+from .blocks import (
+    AudioBlock,
+    ContentBlock,
+    DocumentBlock,
+    ImageBlock,
+    ServerToolBlock,
+    TextBlock,
+    ToolResultBlock,
+    VendorBlock,
+)
+from .errors import MappingError, StreamNotFinished
 from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition
 from .mapper import StreamMapper, compose
 from .merge import StreamMerger
+from .parameters import Hyperparameters
 from .transport.http import astream_sse, stream_sse
 from .transport.sse import SseFrame
 from .vendors.base import VendorAdapter
@@ -34,16 +45,27 @@ class _Lowerer:
         self._vendor = vendor_name
 
     def lower_text(self, blocks: Any) -> str:
+        return "".join(self.lower_text_parts(blocks))
+
+    def lower_text_parts(self, blocks: Any) -> list[str]:
+        """어휘 적용 뒤에도 서로 다른 text block의 경계를 유지한다.
+
+        어휘 자체가 여러 블록을 하나로 치환하는 경우만 그 어휘의 명시적 정책에 따라 합쳐진다.
+        예를 들어 ``CiteVocabulary``는 인용 좌표를 전체 본문에 적용하므로 하나의 text를 만든다.
+        """
         current: list[ContentBlock] = list(blocks)
         for vocabulary in self._vocabularies:
             replaced = vocabulary.lower(current)
             if replaced is not None:
                 current = list(replaced)
-        body = "".join(b.text for b in current if isinstance(b, TextBlock))
+        parts = [b.text for b in current if isinstance(b, TextBlock) and b.text]
         documents = self._lower_documents(current)
         if not documents:
-            return body
-        return f"{documents}\n\n{body}" if body else documents
+            return parts
+        if parts:
+            parts[0] = f"{documents}\n\n{parts[0]}"
+            return parts
+        return [documents]
 
     @staticmethod
     def _lower_documents(blocks: list[ContentBlock]) -> str:
@@ -235,6 +257,7 @@ class _BridgeBase:
         base_url: str,
         model: str | None = None,
         api_key: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
         headers: Mapping[str, str] | None = None,
         timeout: float = 120.0,
@@ -243,6 +266,7 @@ class _BridgeBase:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
+        self._hyperparameters = Hyperparameters.coerce(hyperparameters)
         self._vocabularies = tuple(vocabularies)
         self._headers = dict(headers or {})
         self._timeout = timeout
@@ -262,13 +286,17 @@ class _BridgeBase:
         *,
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         **params: Any,
     ) -> dict[str, Any]:
         """전송할 wire body를 만들어 돌려준다. 진단과 통과 경로에 쓴다."""
+        normalized_messages = [_coerce_message(m) for m in messages]
+        _reject_remote_content_references(normalized_messages, self._vendor.name)
         request = HubRequest(
             model=model or self._model,
-            messages=[_coerce_message(m) for m in messages],
+            messages=normalized_messages,
             tools=list(tools),
+            hyperparameters=self._hyperparameters.merged(hyperparameters),
             params=dict(params),
         )
         return self._vendor.build_body(request, self._lowerer)
@@ -315,6 +343,7 @@ class Bridge(_BridgeBase):
         base_url: str,
         model: str | None = None,
         api_key: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
         headers: Mapping[str, str] | None = None,
         http_client: httpx.AsyncClient | None = None,
@@ -325,6 +354,7 @@ class Bridge(_BridgeBase):
             base_url=base_url,
             model=model,
             api_key=api_key,
+            hyperparameters=hyperparameters,
             vocabularies=vocabularies,
             headers=headers,
             timeout=timeout,
@@ -343,10 +373,17 @@ class Bridge(_BridgeBase):
         *,
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         **params: Any,
     ) -> AsyncStream:
         """스트리밍 요청을 시작한다. 반환값을 ``async for``로 돌린다."""
-        body = self.build_request(messages, tools=tools, model=model, **params)
+        body = self.build_request(
+            messages,
+            tools=tools,
+            model=model,
+            hyperparameters=hyperparameters,
+            **params,
+        )
         frames = astream_sse(
             self._get_client(), self.url, json=body, headers=self._request_headers()
         )
@@ -358,10 +395,17 @@ class Bridge(_BridgeBase):
         *,
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         **params: Any,
     ) -> HubResponse:
         """스트림을 끝까지 돌려 병합 결과만 돌려준다."""
-        stream = self.stream(messages, tools=tools, model=model, **params)
+        stream = self.stream(
+            messages,
+            tools=tools,
+            model=model,
+            hyperparameters=hyperparameters,
+            **params,
+        )
         async for _ in stream:
             pass
         return stream.result
@@ -392,6 +436,7 @@ class SyncBridge(_BridgeBase):
         base_url: str,
         model: str | None = None,
         api_key: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
         headers: Mapping[str, str] | None = None,
         http_client: httpx.Client | None = None,
@@ -402,6 +447,7 @@ class SyncBridge(_BridgeBase):
             base_url=base_url,
             model=model,
             api_key=api_key,
+            hyperparameters=hyperparameters,
             vocabularies=vocabularies,
             headers=headers,
             timeout=timeout,
@@ -420,9 +466,16 @@ class SyncBridge(_BridgeBase):
         *,
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         **params: Any,
     ) -> SyncStream:
-        body = self.build_request(messages, tools=tools, model=model, **params)
+        body = self.build_request(
+            messages,
+            tools=tools,
+            model=model,
+            hyperparameters=hyperparameters,
+            **params,
+        )
         frames = stream_sse(
             self._get_client(), self.url, json=body, headers=self._request_headers()
         )
@@ -434,9 +487,16 @@ class SyncBridge(_BridgeBase):
         *,
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         **params: Any,
     ) -> HubResponse:
-        stream = self.stream(messages, tools=tools, model=model, **params)
+        stream = self.stream(
+            messages,
+            tools=tools,
+            model=model,
+            hyperparameters=hyperparameters,
+            **params,
+        )
         for _ in stream:
             pass
         return stream.result
@@ -463,3 +523,64 @@ def _coerce_message(value: MessageInput) -> HubMessage:
     if isinstance(value, str):
         return HubMessage.user(value)
     return HubMessage.model_validate(dict(value))
+
+
+def _reject_remote_content_references(messages: Sequence[HubMessage], target: str) -> None:
+    """공통 요청에서 벤더가 발급한 원격 파일/container 참조를 거부한다.
+
+    참조의 발급 서버, 권한, 목적, 처리 상태와 만료를 이 패키지는 검증할 수 없다. 지원되는
+    첨부는 inline data 또는 URL뿐이다. 응답 객체에는 진단을 위해 참조를 보존할 수 있지만,
+    그것을 다음 요청으로 만드는 순간 명시적으로 실패시킨다.
+    """
+
+    def has_remote_key(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                if key in {"file_id", "container_id"} and nested:
+                    return True
+                if has_remote_key(nested):
+                    return True
+        elif isinstance(value, list | tuple):
+            return any(has_remote_key(item) for item in value)
+        return False
+
+    def check(block: ContentBlock) -> None:
+        same_or_unscoped = block.source is None or block.source == target
+        if (
+            same_or_unscoped
+            and isinstance(block, ImageBlock | AudioBlock | DocumentBlock)
+            and block.file_id
+        ):
+            raise MappingError(
+                "file_id based content is not supported; use a URL or inline base64 data"
+            )
+        reference = None
+        if isinstance(block, ImageBlock):
+            reference = block.url
+        elif isinstance(block, AudioBlock | DocumentBlock):
+            reference = block.uri
+        if (
+            same_or_unscoped
+            and reference
+            and urlsplit(reference).scheme.lower() not in {"http", "https", "data"}
+        ):
+            raise MappingError(
+                "vendor file URIs are not supported; use an HTTP(S) URL or inline base64 data"
+            )
+        if isinstance(block, ToolResultBlock):
+            for nested in block.blocks:
+                if isinstance(nested, ContentBlock):
+                    check(nested)
+        if (
+            isinstance(block, ServerToolBlock | VendorBlock)
+            and block.source == target
+            and (has_remote_key(block.raw) or has_remote_key(block.native))
+        ):
+            raise MappingError(
+                "remote file/container references cannot be replayed; materialize them as URL "
+                "or inline data"
+            )
+
+    for message in messages:
+        for block in message.content:
+            check(block)

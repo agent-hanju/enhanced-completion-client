@@ -22,7 +22,6 @@ from _dense import DENSE_TOOL, dense_history
 
 from enhanced_completion import (
     Bridge,
-    CitationBlock,
     CiteVocabulary,
     DocumentBlock,
     HubMessage,
@@ -145,7 +144,7 @@ class TestAnthropicMessages:
         필요 없다. 예전 ``citations-2025-01-31``은 GA가 되어 사라졌다.
 
         어휘를 등록하지 않는다. 태그 올림을 거치지 않고 어댑터가 바로 허브 블록을 만드는
-        경로를 확인하는 것이 요점이다. 도착지는 태그 경로와 같은 :class:`CitationBlock`이다.
+        경로를 확인하는 것이 요점이다. 도착지는 인용이 붙은 :class:`TextBlock`이다.
         """
         assert ANTHROPIC is not None
         base, model, key = ANTHROPIC
@@ -181,22 +180,27 @@ class TestAnthropicMessages:
         assert blocks[0]["title"] == "한국 지리"
         assert blocks[1]["type"] == "text"
 
-        cites = [b for b in result.content if isinstance(b, CitationBlock)]
+        cited = [
+            b for b in result.content if isinstance(b, TextBlock) and b.citations
+        ]
         print(f"\n[messages] text={result.text!r}")
         print(f"[messages] blocks={[b.type for b in result.content]}")
-        for cite in cites:
-            print(
-                f"[messages] cite id={cite.id!r} kind={cite.source_kind!r} "
-                f"src=[{cite.source_start}:{cite.source_end}] text={cite.text!r}"
-            )
+        for block in cited:
+            for citation in block.citations:
+                print(
+                    f"[messages] cite source={citation.source!r} "
+                    f"src=[{citation.source_start}:{citation.source_end}] "
+                    f"cited_text={citation.cited_text!r} answer={block.text!r}"
+                )
 
         assert result.text.strip()
-        assert cites, "네이티브 인용이 오지 않았다"
-        for cite in cites:
+        assert cited, "네이티브 인용이 오지 않았다"
+        for block in cited:
             # 원문 좌표를 채운다. 답변 좌표는 두 축이 달라 어댑터가 채우지 않는다.
-            assert cite.source_kind
-            assert cite.source_start is not None
-            assert cite.text, "cited_text가 비었다"
+            for citation in block.citations:
+                assert citation.source == "messages"
+                assert citation.source_start is not None
+                assert citation.cited_text, "cited_text가 비었다"
 
     @skip_anthropic
     async def test_citation_vocabulary(self) -> None:
@@ -215,13 +219,19 @@ class TestAnthropicMessages:
             result = await bridge.complete(
                 [vocabulary.prompt_hint() + "\n\n" + CITE_PROMPT_DOCS], max_tokens=256
             )
-        cites = [b for b in result.content if isinstance(b, CitationBlock)]
+        cited = [
+            b for b in result.content if isinstance(b, TextBlock) and b.citations
+        ]
         print(f"\n[messages] text={result.text!r}")
-        print(f"[messages] cites={[(c.id, c.text) for c in cites]}")
-        if not cites:
+        print(
+            "[messages] cites="
+            f"{[(c.id, b.text) for b in cited for c in b.citations]}"
+        )
+        if not cited:
             pytest.skip("모델이 인용 태그를 쓰지 않았다. 프롬프트 준수 문제다")
-        for cite in cites:
-            assert result.text[cite.start_index : cite.end_index] == cite.text
+        for block in cited:
+            assert block.text in result.text
+            assert all(c.source == "cite" for c in block.citations)
 
     @skip_anthropic
     @pytest.mark.slow

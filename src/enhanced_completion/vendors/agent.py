@@ -105,8 +105,8 @@ TERMINAL_EVENTS = frozenset({"done"})
 class AgentSourcesBlock(ContentBlock):
     """agent가 붙인 근거 목록.
 
-    인용 어휘의 :class:`~enhanced_completion.vocabularies.cite.CitationBlock`과 합칠 수
-    있는지는 실제 페이로드를 보고 정한다. 지금은 원본을 보존한다.
+    :class:`~enhanced_completion.blocks.Citation`과 합칠 수 있는지는 실제 페이로드가 근거와
+    답변 구간의 관계를 제공하는지 확인한 뒤 정해야 한다. 지금은 원본을 보존한다.
     """
 
     type: Literal["agent_sources"] = "agent_sources"
@@ -301,6 +301,8 @@ class AgentAdapter:
     읽어 헤더로 옮기는 값이고, 이 라이브러리는 쿠키를 다루지 않는다.
     """
 
+    parameter_family = "agent"
+
     def __init__(
         self,
         *,
@@ -344,7 +346,7 @@ class AgentAdapter:
                 message = lowerer.lower_text(turn.content)
                 break
 
-        params = dict(request.params)
+        params = request.parameters_for(self.parameter_family, vendor_name=self.name)
         body: dict[str, Any] = {
             "message": message,
             "sessionId": params.pop("sessionId", None) or self.session_id,

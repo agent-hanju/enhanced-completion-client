@@ -18,9 +18,12 @@ import json
 from typing import Any
 
 from ..blocks import (
+    AnnotationBlock,
     AudioBlock,
     CitationBlock,
     ContentBlock,
+    DocumentBlock,
+    ImageBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -34,7 +37,8 @@ from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_responses
-from .parts import as_responses_part
+from .parts import as_responses_part, has_opaque_media_reference
+from .tool_policy import can_replay_client_tool
 
 __all__ = ["ResponsesAdapter", "responses"]
 
@@ -46,6 +50,10 @@ TERMINAL_EVENTS = frozenset(
 # 한 item 안의 여러 content part를 구분하려면 두 축이 필요하다.
 _CONTENT_STRIDE = 1 << 32
 _REASONING_TEXT_OFFSET = 1 << 31
+# 현재 audio stream event에는 output/content index가 없다. 첫 message part(0)와 합쳐지지 않도록
+# 독립 슬롯을 쓴다. 구형/호환 서버가 index를 주면 그 좌표를 우선한다.
+_GLOBAL_AUDIO_INDEX = -1
+_ANNOTATION_STRIDE = 1 << 16
 
 _CLIENT_TOOL_ITEMS = frozenset(
     {
@@ -87,6 +95,19 @@ def _slot(event: dict[str, Any]) -> int:
     return base + (content if isinstance(content, int) else 0)
 
 
+def _item_slot(event: dict[str, Any]) -> int:
+    output = event.get("output_index")
+    return output * _CONTENT_STRIDE if isinstance(output, int) else 0
+
+
+def _summary_slot(event: dict[str, Any]) -> int:
+    """Reasoning summary has ``summary_index`` rather than ``content_index``."""
+    output = event.get("output_index")
+    summary = event.get("summary_index")
+    base = output * _CONTENT_STRIDE if isinstance(output, int) else 0
+    return base + (summary if isinstance(summary, int) else 0)
+
+
 class _ToHub:
     """Responses 이벤트를 허브 델타로 바꾼다."""
 
@@ -99,6 +120,7 @@ class _ToHub:
         self._arguments_streamed: set[int] = set()
         self._audio_streamed: set[int] = set()
         self._audio_transcript_streamed: set[int] = set()
+        self._annotations_seen: set[tuple[int, int]] = set()
         self._done_items: set[int] = set()
 
     def map(self, event: dict[str, Any]) -> list[HubResponse]:
@@ -120,23 +142,23 @@ class _ToHub:
 
         # 추론 요약. 원문 추론은 암호화되어 오므로 요약만 텍스트로 쓸 수 있다.
         if name == "response.reasoning_summary_text.delta":
-            index = _slot(event)
+            index = _summary_slot(event)
             self._reasoning_streamed.add(index)
-            self._reasoning_item_slots[index] = index
+            self._reasoning_item_slots.setdefault(_item_slot(event), index)
             return self._one(ThinkingBlock(thinking=event.get("delta") or "", index=index))
         if name == "response.reasoning_text.delta":
             item_index = _slot(event)
             index = item_index + _REASONING_TEXT_OFFSET
             self._reasoning_streamed.add(index)
-            self._reasoning_item_slots.setdefault(item_index, index)
+            self._reasoning_item_slots.setdefault(_item_slot(event), index)
             return self._one(ThinkingBlock(thinking=event.get("delta") or "", index=index))
 
         if name == "response.audio.delta":
-            index = _slot(event)
+            index = self._audio_slot(event)
             self._audio_streamed.add(index)
             return self._one(AudioBlock(data=event.get("delta") or "", index=index))
-        if name == "response.audio_transcript.delta":
-            index = _slot(event)
+        if name in ("response.audio.transcript.delta", "response.audio_transcript.delta"):
+            index = self._audio_slot(event)
             self._audio_transcript_streamed.add(index)
             return self._one(AudioBlock(transcript=event.get("delta") or "", index=index))
 
@@ -206,15 +228,23 @@ class _ToHub:
         block.source = SOURCE
         return [HubResponse(content=[block])]
 
+    @staticmethod
+    def _audio_slot(event: dict[str, Any]) -> int:
+        if isinstance(event.get("output_index"), int) or isinstance(
+            event.get("content_index"), int
+        ):
+            return _slot(event)
+        return _GLOBAL_AUDIO_INDEX
+
     def _annotation(self, event: dict[str, Any]) -> list[HubResponse]:
-        """annotation을 허브 :class:`CitationBlock`으로.
+        """output text annotation을 독립 허브 블록으로.
 
         이 벤더는 인용을 annotation이라 부른다. ``url_citation``은 웹 근거,
         ``file_citation``은 업로드한 파일 근거, ``file_path``는 코드 실행이 만든 파일 참조다.
         앞의 둘은 인용이고 마지막은 산출물 경로라 성질이 다르다.
 
-        ``start_index``/``end_index``는 답변 문자열 안의 위치다. Anthropic이 원문 좌표를 주는
-        것과 축이 다르므로 이쪽은 답변 좌표를 채운다.
+        ``start_index``/``end_index``는 답변 문자열 안의 위치다. text보다 늦게 올 수 있으므로
+        이미 전달한 text block을 소급 분할하지 않는다.
 
         ``.added`` 접미를 일괄 무시하면 이 이벤트가 함께 사라진다. 그래서 위에서 먼저 걸러야
         한다.
@@ -223,11 +253,28 @@ class _ToHub:
         kind = annotation.get("type")
         if kind == "file_path":
             # 인용이 아니라 산출물 경로다. 원본을 보존한다.
-            return self._one(VendorBlock(type="responses_file_path", raw=dict(annotation)))
+            return self._one(
+                VendorBlock(
+                    type="responses_file_path",
+                    raw=dict(annotation),
+                    native={"level": "annotation"},
+                )
+            )
 
+        target_index = _slot(event)
+        raw_annotation_index = event.get("annotation_index")
+        annotation_index = (
+            raw_annotation_index if isinstance(raw_annotation_index, int) else 0
+        )
+        seen_key = (target_index, annotation_index)
+        if seen_key in self._annotations_seen:
+            return []
+        self._annotations_seen.add(seen_key)
         fields: dict[str, Any] = {
             "source": SOURCE,
-            "source_kind": kind or "annotation",
+            "annotation_index": target_index * _ANNOTATION_STRIDE + annotation_index,
+            "target_index": target_index,
+            "kind": kind or "annotation",
             "native": dict(annotation),
         }
         identifier = annotation.get("url") or annotation.get("file_id")
@@ -235,15 +282,18 @@ class _ToHub:
             fields["id"] = identifier
         title = annotation.get("title") or annotation.get("filename")
         if isinstance(title, str) and title:
-            fields["document_title"] = title
-        index = annotation.get("index")
-        if isinstance(index, int):
-            fields["document_index"] = index
+            fields["title"] = title
+        url = annotation.get("url")
+        if isinstance(url, str) and url:
+            fields["uri"] = url
+        file_id = annotation.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            fields["file_id"] = file_id
         for key, dst in (("start_index", "start_index"), ("end_index", "end_index")):
             value = annotation.get(key)
             if isinstance(value, int):
                 fields[dst] = value
-        return [HubResponse(content=[CitationBlock(**fields)])]
+        return [HubResponse(content=[AnnotationBlock(**fields)])]
 
     def _item_added(self, event: dict[str, Any]) -> list[HubResponse]:
         item = event.get("item") or {}
@@ -339,7 +389,14 @@ class _ToHub:
                 )
             )
         if isinstance(kind, str) and kind:
-            return self._one(VendorBlock(type=f"responses_{kind}", raw=dict(item), index=index))
+            return self._one(
+                VendorBlock(
+                    type=f"responses_{kind}",
+                    raw=dict(item),
+                    native={"level": "item"},
+                    index=index,
+                )
+            )
         return []
 
     def _message_item(
@@ -366,6 +423,18 @@ class _ToHub:
                     fields["text"] = part["text"]
                     self._text_streamed.add(index)
                 blocks.append(TextBlock(source=SOURCE, **fields))
+                for annotation_index, annotation in enumerate(part.get("annotations") or []):
+                    if not isinstance(annotation, dict):
+                        continue
+                    annotation_event = dict(part_event)
+                    annotation_event.update(
+                        {
+                            "annotation_index": annotation_index,
+                            "annotation": annotation,
+                        }
+                    )
+                    for delta in self._annotation(annotation_event):
+                        blocks.extend(delta.content)
             elif kind == "refusal":
                 fields = {"index": index, "native": native}
                 if index not in self._refusal_streamed and isinstance(part.get("refusal"), str):
@@ -406,21 +475,45 @@ class _ToHub:
         return [HubResponse(content=blocks)] if blocks else []
 
     def _reasoning_item(self, item: dict[str, Any], index: int) -> list[HubResponse]:
-        summaries = item.get("summary") or []
-        summary = "\n".join(
-            str(entry.get("text"))
-            for entry in summaries
-            if isinstance(entry, dict) and isinstance(entry.get("text"), str)
-        )
-        target_index = self._reasoning_item_slots.get(index, index)
-        fields: dict[str, Any] = {"index": target_index, "native": dict(item)}
-        if target_index not in self._reasoning_streamed and summary:
-            fields["thinking"] = summary
-            self._reasoning_streamed.add(target_index)
+        blocks: list[ContentBlock] = []
+        native_pending = True
         encrypted = item.get("encrypted_content")
-        if isinstance(encrypted, str) and encrypted:
-            fields["encrypted_content"] = encrypted
-        return self._one(ThinkingBlock(**fields))
+
+        def append_parts(entries: Any, *, offset: int) -> None:
+            nonlocal native_pending
+            if not isinstance(entries, list):
+                return
+            for part_index, entry in enumerate(entries):
+                if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
+                    continue
+                target_index = index + offset + part_index
+                fields: dict[str, Any] = {
+                    "index": target_index,
+                    "source": SOURCE,
+                }
+                if target_index not in self._reasoning_streamed:
+                    fields["thinking"] = entry["text"]
+                    self._reasoning_streamed.add(target_index)
+                if native_pending:
+                    fields["native"] = dict(item)
+                    if isinstance(encrypted, str) and encrypted:
+                        fields["encrypted_content"] = encrypted
+                    native_pending = False
+                blocks.append(ThinkingBlock(**fields))
+
+        append_parts(item.get("summary"), offset=0)
+        append_parts(item.get("content"), offset=_REASONING_TEXT_OFFSET)
+        if not blocks:
+            target_index = self._reasoning_item_slots.get(index, index)
+            fields: dict[str, Any] = {
+                "index": target_index,
+                "source": SOURCE,
+                "native": dict(item),
+            }
+            if isinstance(encrypted, str) and encrypted:
+                fields["encrypted_content"] = encrypted
+            blocks.append(ThinkingBlock(**fields))
+        return [HubResponse(content=blocks)]
 
     def _response_meta(self, event: dict[str, Any]) -> list[HubResponse]:
         response = event.get("response") or {}
@@ -443,14 +536,16 @@ class _ToHub:
             if output_index in self._done_items or not isinstance(item, dict):
                 continue
             out.extend(self._item_done({"output_index": output_index, "item": item}))
-        for citation in response.get("citations") or []:
+        for citation_index, citation in enumerate(response.get("citations") or []):
             if isinstance(citation, str):
                 out.append(
                     HubResponse(
                         content=[
-                            CitationBlock(
+                            AnnotationBlock(
+                                annotation_index=-(citation_index + 1),
                                 id=citation,
-                                source_kind="response_citation",
+                                uri=citation,
+                                kind="response_citation",
                                 source=SOURCE,
                                 native={"citation": citation},
                             )
@@ -462,10 +557,12 @@ class _ToHub:
                 out.append(
                     HubResponse(
                         content=[
-                            CitationBlock(
+                            AnnotationBlock(
+                                annotation_index=-(citation_index + 1),
                                 id=str(identifier),
-                                document_title=citation.get("title"),
-                                source_kind=str(citation.get("type") or "response_citation"),
+                                uri=citation.get("url"),
+                                title=citation.get("title"),
+                                kind=str(citation.get("type") or "response_citation"),
                                 source=SOURCE,
                                 native=dict(citation),
                             )
@@ -513,6 +610,7 @@ class ResponsesAdapter:
 
     name = SOURCE
     path = "/v1/responses"
+    parameter_family = "responses"
 
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
         """허브 요청을 Responses body로.
@@ -534,9 +632,10 @@ class ResponsesAdapter:
                 if text:
                     instructions.append(text)
                 continue
-            turns.extend(self._items(message.role, message.content, lowerer))
+            phase = getattr(message, "phase", None)
+            turns.extend(self._items(message.role, message.content, lowerer, phase=phase))
 
-        params = dict(request.params)
+        params = request.parameters_for(self.parameter_family, vendor_name=self.name)
         body: dict[str, Any] = {
             "model": request.model,
             "input": turns,
@@ -544,8 +643,13 @@ class ResponsesAdapter:
         }
         if instructions:
             body["instructions"] = "\n\n".join(instructions)
-        if request.tools:
-            body["tools"] = [self._tool_definition(tool) for tool in request.tools]
+        tools = [
+            definition
+            for tool in request.tools
+            if (definition := self._tool_definition(tool)) is not None
+        ]
+        if tools:
+            body["tools"] = tools
         for key, value in params.items():
             if key not in ("model", "input", "stream", "tools", "instructions"):
                 body[key] = value
@@ -556,6 +660,8 @@ class ResponsesAdapter:
         role: str,
         blocks: list[ContentBlock],
         lowerer: Lowerer,
+        *,
+        phase: str | None = None,
     ) -> list[dict[str, Any]]:
         """한 허브 메시지를 Responses Item 0..N개로 펼친다.
 
@@ -569,7 +675,7 @@ class ResponsesAdapter:
             nonlocal pending
             if not pending:
                 return
-            item = self._message_item(role, pending, lowerer)
+            item = self._message_item(role, pending, lowerer, phase=phase)
             pending = []
             if item is not None:
                 items.append(item)
@@ -577,14 +683,24 @@ class ResponsesAdapter:
         for block in blocks:
             item: dict[str, Any] | None = None
             if isinstance(block, ToolResultBlock):
+                if not can_replay_client_tool(block, self.name):
+                    continue
                 item = self._tool_result_item(block, lowerer)
             elif isinstance(block, ToolUseBlock):
+                if not can_replay_client_tool(block, self.name):
+                    continue
                 item = self._tool_use_item(block)
             elif isinstance(block, ThinkingBlock) and block.source == SOURCE:
                 item = self._reasoning_input(block)
             elif isinstance(block, ServerToolBlock) and block.source == SOURCE:
-                item = dict(block.raw or block.native)
-            elif isinstance(block, VendorBlock) and block.source == SOURCE:
+                candidate = dict(block.raw or block.native)
+                if not str(candidate.get("type") or "").startswith("response."):
+                    item = candidate
+            elif (
+                isinstance(block, VendorBlock)
+                and block.source == SOURCE
+                and block.native.get("level") == "item"
+            ):
                 item = dict(block.raw)
 
             if item is None:
@@ -600,56 +716,116 @@ class ResponsesAdapter:
         role: str,
         blocks: list[ContentBlock],
         lowerer: Lowerer,
+        *,
+        phase: str | None = None,
     ) -> dict[str, Any] | None:
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
         item_meta: dict[str, Any] = {}
-        annotations = [
-            dict(block.native)
-            for block in blocks
-            if isinstance(block, CitationBlock) and block.source == SOURCE and block.native
-        ]
+        for block in blocks:
+            if block.source != SOURCE:
+                continue
+            native_item = block.native.get("item")
+            if isinstance(native_item, dict):
+                item_meta = dict(native_item)
+                break
+        replaying_output = (
+            role == "assistant"
+            and item_meta.get("role") == "assistant"
+            and isinstance(item_meta.get("id"), str)
+            and isinstance(item_meta.get("status"), str)
+        )
+        if role == "assistant" and not replaying_output:
+            # EasyInputMessageParam permits prior assistant turns without server-issued
+            # id/status. The live Responses endpoint accepts those as string content; its
+            # role-sensitive part union rejects input_text/input_image/input_file here.
+            portable = [
+                block
+                for block in blocks
+                if not isinstance(block, ImageBlock | AudioBlock)
+                and not (
+                    isinstance(block, DocumentBlock)
+                    and bool(block.data)
+                    and not block.text
+                    and not block.uri
+                )
+            ]
+            text = lowerer.lower_text(portable)
+            if not text:
+                return None
+            item: dict[str, Any] = {
+                "type": "message",
+                "role": "assistant",
+                "content": text,
+            }
+            if phase in ("commentary", "final_answer"):
+                item["phase"] = phase
+            return item
+        annotations_by_target: dict[int, list[dict[str, Any]]] = {}
+        legacy_annotations: list[dict[str, Any]] = []
+        for candidate in blocks:
+            if isinstance(candidate, AnnotationBlock) and candidate.source == SOURCE:
+                if isinstance(candidate.target_index, int) and candidate.native:
+                    annotations_by_target.setdefault(candidate.target_index, []).append(
+                        dict(candidate.native)
+                    )
+            elif (
+                isinstance(candidate, CitationBlock)
+                and candidate.source == SOURCE
+                and candidate.native
+            ):
+                legacy_annotations.append(dict(candidate.native))
 
         def flush_plain() -> None:
-            text = lowerer.lower_text(plain)
+            text_parts = lowerer.lower_text_parts(plain)
             plain.clear()
-            if text:
-                kind = "output_text" if role == "assistant" else "input_text"
+            for text in text_parts:
+                kind = "output_text" if replaying_output else "input_text"
                 parts.append({"type": kind, "text": text})
 
         for block in blocks:
+            if has_opaque_media_reference(block):
+                continue
+            if isinstance(block, AnnotationBlock) and block.source == SOURCE:
+                continue
             if isinstance(block, CitationBlock) and block.source == SOURCE and block.native:
                 continue
+            if isinstance(block, VendorBlock) and block.source == SOURCE:
+                native_part = block.native.get("part")
+                if isinstance(native_part, dict):
+                    flush_plain()
+                    parts.append(dict(native_part))
+                    continue
             if isinstance(block, TextBlock) and block.source == SOURCE and block.native:
                 native = block.native
-                native_item = native.get("item")
                 native_part = native.get("part")
                 if isinstance(native_part, dict):
                     flush_plain()
                     part = dict(native_part)
                     if part.get("type") == "output_text":
                         part["text"] = block.text
+                        target_index = block.index
+                        annotations = (
+                            annotations_by_target.get(target_index, [])
+                            if isinstance(target_index, int)
+                            else []
+                        )
+                        if not annotations:
+                            annotations = legacy_annotations
                         if annotations and not part.get("annotations"):
                             part["annotations"] = annotations
+                    elif part.get("type") == "refusal":
+                        part["refusal"] = block.text.removeprefix(REFUSAL_PREFIX)
                     parts.append(part)
-                    if isinstance(native_item, dict) and not item_meta:
-                        item_meta = dict(native_item)
                     continue
-            if isinstance(block, AudioBlock) and block.source == SOURCE and block.native:
-                native = block.native
-                native_item = native.get("item")
-                native_part = native.get("part")
-                if isinstance(native_part, dict):
-                    flush_plain()
-                    part = dict(native_part)
-                    if block.data is not None:
-                        part["data"] = block.data
-                    if block.transcript is not None:
-                        part["transcript"] = block.transcript
-                    parts.append(part)
-                    if isinstance(native_item, dict) and not item_meta:
-                        item_meta = dict(native_item)
-                    continue
+            # Responses의 assistant output message는 output_text/refusal만 허용한다. 출력 오디오
+            # stream이나 다른 벤더의 assistant media를 input part로 위조하지 않는다. 문서는
+            # lowerer가 읽을 수 있는 텍스트로 내릴 수 있으므로 plain 경로에 둔다.
+            if replaying_output and isinstance(block, AudioBlock | ImageBlock):
+                continue
+            if replaying_output and isinstance(block, DocumentBlock):
+                plain.append(block)
+                continue
             rendered = as_responses_part(block)
             if rendered is None:
                 plain.append(block)
@@ -710,6 +886,8 @@ class ResponsesAdapter:
         if block.content:
             rendered_parts.append({"type": "input_text", "text": block.content})
         for nested in block.blocks:
+            if isinstance(nested, ContentBlock) and has_opaque_media_reference(nested):
+                continue
             if isinstance(nested, TextBlock):
                 rendered_parts.append({"type": "input_text", "text": nested.text})
                 continue
@@ -748,10 +926,12 @@ class ResponsesAdapter:
             }
         return None
 
-    def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any]:
+    def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any] | None:
         native = tool.native_for(self.name)
         if native is not None:
             return native
+        if tool.vendor is not None:
+            return None
         return {
             "type": "function",
             "name": tool.name,

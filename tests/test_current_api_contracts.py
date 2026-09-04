@@ -14,14 +14,17 @@ from enhanced_completion import (
     DocumentBlock,
     HubMessage,
     ImageBlock,
+    MappingError,
     ServerToolBlock,
     SyncBridge,
+    TextBlock,
     ToolDefinition,
     ToolResultBlock,
     ToolUseBlock,
     VendorBlock,
 )
 from enhanced_completion.vendors import (
+    ChatCompletionsAdapter,
     MessagesAdapter,
     chat_completions,
     generate_content,
@@ -76,6 +79,43 @@ class TestToolCallResultBridge:
                 ],
             },
             {"role": "tool", "tool_call_id": "call-1", "content": "42"},
+        ]
+
+    def test_chat_stream_index_is_not_replayed_as_request_field(self) -> None:
+        adapter = ChatCompletionsAdapter(reasoning_input_field="reasoning_content")
+        mapper = adapter.to_hub()
+        deltas = mapper.map(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": '{"key":"x"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+        history = [HubMessage.of_response(deltas[0])]
+
+        body = build(adapter, history)
+
+        assert body["messages"][0]["tool_calls"] == [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"key":"x"}'},
+            }
         ]
 
     def test_messages_uses_tool_use_and_user_tool_result(self) -> None:
@@ -143,21 +183,18 @@ class TestResponsesReplay:
                 content=sse(
                     {
                         "type": "response.audio.delta",
-                        "output_index": 0,
-                        "content_index": 0,
                         "delta": "AA",
+                        "sequence_number": 0,
                     },
                     {
                         "type": "response.audio.delta",
-                        "output_index": 0,
-                        "content_index": 0,
                         "delta": "BB",
+                        "sequence_number": 1,
                     },
                     {
-                        "type": "response.audio_transcript.delta",
-                        "output_index": 0,
-                        "content_index": 0,
+                        "type": "response.audio.transcript.delta",
                         "delta": "서울",
+                        "sequence_number": 2,
                     },
                     {"type": "response.completed", "response": {"status": "completed"}},
                 ),
@@ -174,6 +211,90 @@ class TestResponsesReplay:
         assert audio.data == "AABB"
         assert audio.transcript == "서울"
         await bridge.aclose()
+
+    @respx.mock
+    async def test_global_audio_stream_does_not_merge_into_first_text_part(self) -> None:
+        respx.post(f"{BASE}/v1/responses").mock(
+            return_value=httpx.Response(
+                200,
+                content=sse(
+                    {
+                        "type": "response.audio.delta",
+                        "delta": "WAV",
+                        "sequence_number": 0,
+                    },
+                    {
+                        "type": "response.output_text.delta",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": "답",
+                    },
+                    {"type": "response.completed", "response": {"status": "completed"}},
+                ),
+            )
+        )
+        bridge = Bridge(
+            vendor=responses,
+            base_url=BASE,
+            model="test-model",
+            http_client=httpx.AsyncClient(),
+        )
+        result = await bridge.complete(["질문"])
+        assert [block.type for block in result.content] == ["audio", "text"]
+        assert result.content[0].data == "WAV"
+        assert result.content[1].text == "답"
+        await bridge.aclose()
+
+    def test_foreign_assistant_uses_easy_input_text_and_omits_input_only_media(self) -> None:
+        message = HubMessage(
+            role="assistant",
+            content=[
+                TextBlock(text="답"),
+                ImageBlock(url="https://example.test/image.png"),
+                AudioBlock(data="WAV", format="wav"),
+                DocumentBlock(id="doc", data="PDF", media_type="application/pdf"),
+            ],
+            phase="final_answer",
+        )
+
+        assert build(responses, [message])["input"] == [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "답",
+                "phase": "final_answer",
+            }
+        ]
+
+    def test_native_output_message_keeps_output_union_and_metadata(self) -> None:
+        native_item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "final_answer",
+        }
+        message = HubMessage(
+            role="assistant",
+            content=[
+                TextBlock(
+                    text="답",
+                    source="responses",
+                    native={
+                        "item": native_item,
+                        "part": {"type": "output_text", "text": "답", "annotations": []},
+                    },
+                ),
+                AudioBlock(source="responses", data="WAV"),
+            ],
+        )
+
+        assert build(responses, [message])["input"] == [
+            {
+                **native_item,
+                "content": [{"type": "output_text", "text": "답", "annotations": []}],
+            }
+        ]
 
     @respx.mock
     async def test_top_level_citations_and_server_usage_are_preserved(self) -> None:
@@ -336,6 +457,58 @@ class TestResponsesReplay:
         assert build(responses, [HubMessage.of_response(result)])["input"] == [item]
         await bridge.aclose()
 
+    @respx.mock
+    async def test_unknown_content_part_stays_inside_its_message(self) -> None:
+        item = {
+            "type": "message",
+            "id": "msg_future",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "future_output", "payload": {"value": 1}}],
+        }
+        respx.post(f"{BASE}/v1/responses").mock(
+            return_value=httpx.Response(
+                200,
+                content=sse(
+                    {"type": "response.output_item.done", "output_index": 0, "item": item},
+                    {"type": "response.completed", "response": {"status": "completed"}},
+                ),
+            )
+        )
+        bridge = Bridge(
+            vendor=responses,
+            base_url=BASE,
+            model="test-model",
+            http_client=httpx.AsyncClient(),
+        )
+        result = await bridge.complete(["질문"])
+        assert isinstance(result.content[0], VendorBlock)
+        assert build(responses, [HubMessage.of_response(result)])["input"] == [item]
+        await bridge.aclose()
+
+    def test_progress_event_is_not_replayed_as_an_input_item(self) -> None:
+        message = HubMessage(
+            role="assistant",
+            content=[
+                ServerToolBlock(
+                    source="responses",
+                    name="web_search_call",
+                    raw={
+                        "type": "response.web_search_call.in_progress",
+                        "output_index": 0,
+                    },
+                ),
+                TextBlock(text="진행 중"),
+            ],
+        )
+        assert build(responses, [message])["input"] == [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "진행 중",
+            }
+        ]
+
 
 class TestGeminiReplay:
     @respx.mock
@@ -380,6 +553,62 @@ class TestGeminiReplay:
 
 
 class TestAnthropicReplay:
+    @respx.mock
+    async def test_new_server_results_are_preserved_but_file_replay_is_rejected(self) -> None:
+        blocks = [
+            {
+                "type": "code_execution_tool_result",
+                "tool_use_id": "srv-code-1",
+                "content": {
+                    "type": "code_execution_result",
+                    "content": [{"type": "code_execution_output", "file_id": "file_1"}],
+                    "return_code": 0,
+                    "stderr": "",
+                    "stdout": "25\n",
+                },
+            },
+            {
+                "type": "tool_search_tool_result",
+                "tool_use_id": "srv-search-1",
+                "content": {
+                    "type": "tool_search_tool_search_result",
+                    "tool_references": [],
+                },
+            },
+            {"type": "container_upload", "file_id": "file_1"},
+        ]
+        respx.post(f"{BASE}/v1/messages").mock(
+            return_value=httpx.Response(
+                200,
+                content=sse(
+                    *[
+                        {
+                            "type": "content_block_start",
+                            "index": index,
+                            "content_block": block,
+                        }
+                        for index, block in enumerate(blocks)
+                    ],
+                    {"type": "message_stop"},
+                ),
+            )
+        )
+        bridge = Bridge(
+            vendor=messages,
+            base_url=BASE,
+            model="test-model",
+            http_client=httpx.AsyncClient(),
+        )
+        result = await bridge.complete(["질문"])
+        assert [type(block) for block in result.content] == [
+            ServerToolBlock,
+            ServerToolBlock,
+            VendorBlock,
+        ]
+        with pytest.raises(MappingError, match="remote file/container references"):
+            build(messages, [HubMessage.of_response(result)])
+        await bridge.aclose()
+
     @respx.mock
     async def test_native_citation_is_attached_to_its_text_block_on_replay(self) -> None:
         citation = {
@@ -508,6 +737,61 @@ class TestGeminiMediaReplay:
         assert replay["contents"][0]["parts"] == [part]
         await bridge.aclose()
 
+    @respx.mock
+    async def test_audio_transcription_deltas_merge_and_replay(self) -> None:
+        chunks = (
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [
+                                {
+                                    "audioTranscription": {
+                                        "text": "안녕 ",
+                                        "finished": False,
+                                        "languageCode": "ko-KR",
+                                    }
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [
+                                {"audioTranscription": {"text": "하세요", "finished": True}}
+                            ],
+                        },
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+        )
+        respx.post(f"{BASE}{GEMINI.path}").mock(
+            return_value=httpx.Response(200, content=sse(*chunks))
+        )
+        bridge = Bridge(
+            vendor=GEMINI,
+            base_url=BASE,
+            model="gemini-test",
+            http_client=httpx.AsyncClient(),
+        )
+        result = await bridge.complete(["질문"])
+        assert len(result.content) == 1
+        assert isinstance(result.content[0], AudioBlock)
+        assert result.content[0].transcript == "안녕 하세요"
+
+        replay = build(GEMINI, [HubMessage.of_response(result)])
+        assert replay["contents"][0]["parts"] == [
+            {"audioTranscription": {"text": "안녕 하세요", "finished": True}}
+        ]
+        await bridge.aclose()
+
 
 class TestVendorNativeToolsAndUnknownParts:
     @pytest.mark.parametrize(
@@ -528,6 +812,21 @@ class TestVendorNativeToolsAndUnknownParts:
         tool = ToolDefinition.native(vendor, wire)
         assert wire in build(adapter, [HubMessage.user("x")], tools=[tool])[container]
 
+    @pytest.mark.parametrize(
+        "adapter",
+        [chat_completions, messages, responses, GEMINI],
+    )
+    def test_tools_are_absent_unless_explicitly_supplied(self, adapter: object) -> None:
+        assert "tools" not in build(adapter, [HubMessage.user("x")])
+
+    @pytest.mark.parametrize(
+        "adapter",
+        [chat_completions, messages, GEMINI],
+    )
+    def test_native_tool_is_not_exposed_to_a_different_vendor(self, adapter: object) -> None:
+        web_search = ToolDefinition.native("responses", {"type": "web_search_preview"})
+        assert "tools" not in build(adapter, [HubMessage.user("x")], tools=[web_search])
+
     def test_unknown_gemini_part_can_round_trip_same_vendor(self) -> None:
         part = {"futureMedia": {"id": "f1"}}
         message = HubMessage(
@@ -545,7 +844,7 @@ class TestVendorNativeToolsAndUnknownParts:
 
 
 class TestChatCurrentFields:
-    def test_assistant_audio_replays_by_id_not_as_input_audio(self) -> None:
+    def test_assistant_audio_id_is_not_accepted_as_request_content(self) -> None:
         message = HubMessage(
             role="assistant",
             content=[
@@ -556,8 +855,119 @@ class TestChatCurrentFields:
                 )
             ],
         )
+        with pytest.raises(MappingError, match="file_id based content is not supported"):
+            build(chat_completions, [message])
+
+
+class TestRemoteContentReferences:
+    @pytest.mark.parametrize(
+        "block",
+        [
+            ImageBlock(file_id="file-image"),
+            AudioBlock(file_id="file-audio"),
+            DocumentBlock(file_id="file-document"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "adapter",
+        [chat_completions, messages, responses, GEMINI],
+    )
+    def test_file_id_is_rejected_for_every_request_adapter(
+        self,
+        block: ImageBlock | AudioBlock | DocumentBlock,
+        adapter: object,
+    ) -> None:
+        with pytest.raises(MappingError, match="use a URL or inline base64 data"):
+            build(adapter, [HubMessage(role="user", content=[block])])
+
+    def test_same_vendor_server_file_reference_is_not_replayed(self) -> None:
+        block = ServerToolBlock(
+            source="responses",
+            raw={
+                "type": "code_interpreter_call",
+                "id": "item-1",
+                "container_id": "container-1",
+                "outputs": [{"type": "file", "file_id": "file-1"}],
+            },
+        )
+        history = [HubMessage(role="assistant", content=[block])]
+
+        with pytest.raises(MappingError, match="remote file/container references"):
+            build(responses, history)
+        assert build(messages, history)["messages"] == []
+
+    def test_vendor_file_uri_is_rejected(self) -> None:
+        message = HubMessage(
+            role="user",
+            content=[DocumentBlock(uri="gs://bucket/report.pdf")],
+        )
+        with pytest.raises(MappingError, match="vendor file URIs are not supported"):
+            build(GEMINI, [message])
+
+    def test_responses_document_url_uses_file_url(self) -> None:
+        message = HubMessage(
+            role="user",
+            content=[
+                DocumentBlock(
+                    id="report",
+                    title="report.pdf",
+                    uri="https://example.test/report.pdf",
+                    media_type="application/pdf",
+                )
+            ],
+        )
+        assert build(responses, [message])["input"][0]["content"] == [
+            {
+                "type": "input_file",
+                "file_url": "https://example.test/report.pdf",
+                "filename": "report.pdf",
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            ImageBlock(url="https://example.test/image.png"),
+            ImageBlock(data="PNG", media_type="image/png"),
+            AudioBlock(data="WAV", format="wav", media_type="audio/wav"),
+            DocumentBlock(data="PDF", media_type="application/pdf"),
+        ],
+    )
+    def test_url_and_inline_data_remain_request_inputs(
+        self,
+        block: ImageBlock | AudioBlock | DocumentBlock,
+    ) -> None:
+        body = build(chat_completions, [HubMessage(role="user", content=[block])])
+        assert body["messages"]
+
+    def test_foreign_assistant_input_only_media_is_not_emitted_as_chat_parts(self) -> None:
+        message = HubMessage(
+            role="assistant",
+            content=[
+                ImageBlock(
+                    source="generate_content",
+                    media_type="image/png",
+                    data="PNG",
+                ),
+                AudioBlock(source="responses", data="WAV", format="wav"),
+                DocumentBlock(
+                    source="generate_content",
+                    id="result",
+                    uri="https://example.test/result.pdf",
+                    media_type="application/pdf",
+                ),
+            ],
+        )
+
         assert build(chat_completions, [message])["messages"] == [
-            {"role": "assistant", "content": None, "audio": {"id": "audio-1"}}
+            {
+                "role": "assistant",
+                "content": (
+                    '<documents>\n<document id="result">\n'
+                    '<content media-type="application/pdf">https://example.test/result.pdf</content>\n'
+                    "</document>\n</documents>"
+                ),
+            }
         ]
 
     @respx.mock
@@ -596,8 +1006,8 @@ class TestChatCurrentFields:
             model="test-model",
             http_client=httpx.AsyncClient(),
         )
-        citation = (await bridge.complete(["질문"])).content[0]
-        assert citation.id == "https://example.test/source"
-        assert citation.document_title == "Source"
-        assert (citation.start_index, citation.end_index) == (1, 4)
+        annotation = (await bridge.complete(["질문"])).content[0]
+        assert annotation.id == "https://example.test/source"
+        assert annotation.title == "Source"
+        assert (annotation.start_index, annotation.end_index) == (1, 4)
         await bridge.aclose()

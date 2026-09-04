@@ -1,4 +1,4 @@
-"""확립된 변환 규칙. ``docs/Conversion-Rules.md``의 표를 그대로 고정한다.
+"""확립된 변환 규칙. ``docs/Support-Matrix.md``의 표를 회귀 테스트로 고정한다.
 
 세 매퍼가 값의 어휘까지 Anthropic으로 모은다. 타입만 맞추고 값을 벤더별로 흘려보내면 소비 앱이
 ``stop_reason``을 읽으려고 어느 벤더에서 왔는지 알아야 한다. 그러면 허브가 아니다.
@@ -13,9 +13,11 @@ import pytest
 import respx
 
 from enhanced_completion import (
+    AnnotationBlock,
     AudioBlock,
     Bridge,
     DocumentBlock,
+    GroundingBlock,
     HubMessage,
     ImageBlock,
     TextBlock,
@@ -298,7 +300,7 @@ class TestGeminiPartRules:
 
 class TestResponsesReasoning:
     @respx.mock
-    async def test_summary_lines_are_joined(self) -> None:
+    async def test_summary_parts_remain_distinct(self) -> None:
         payload = sse(
             (
                 None,
@@ -314,9 +316,9 @@ class TestResponsesReasoning:
             (None, {"type": "response.completed", "response": {"status": "completed"}}),
         )
         respx.post(f"{BASE}/v1/responses").mock(return_value=httpx.Response(200, content=payload))
-        block = (await make(responses).complete(["x"])).content[0]
-        assert isinstance(block, ThinkingBlock)
-        assert block.thinking == "첫 줄\n둘째 줄"
+        blocks = (await make(responses).complete(["x"])).content
+        assert all(isinstance(block, ThinkingBlock) for block in blocks)
+        assert [block.thinking for block in blocks] == ["첫 줄", "둘째 줄"]
 
     @respx.mock
     async def test_encrypted_content_is_kept_when_no_summary(self) -> None:
@@ -337,6 +339,154 @@ class TestResponsesReasoning:
         assert isinstance(block, ThinkingBlock)
         assert block.thinking == ""
         assert block.encrypted_content == "ENC"
+
+
+class TestEvidenceFamilies:
+    """비슷해 보이는 근거 구조를 추측 변환하지 않고 원형별로 보존한다."""
+
+    @respx.mock
+    async def test_responses_final_item_keeps_annotation_and_replays_it_only_there(self) -> None:
+        annotation = {
+            "type": "url_citation",
+            "start_index": 0,
+            "end_index": 2,
+            "url": "https://example.test/source",
+            "title": "근거",
+        }
+        item = {
+            "type": "message",
+            "id": "m1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {"type": "output_text", "text": "서울", "annotations": [annotation]}
+            ],
+        }
+        payload = sse(
+            (
+                None,
+                {"type": "response.output_item.done", "output_index": 0, "item": item},
+            ),
+            (None, {"type": "response.completed", "response": {"status": "completed"}}),
+        )
+        respx.post(f"{BASE}/v1/responses").mock(return_value=httpx.Response(200, content=payload))
+        result = await make(responses).complete(["x"])
+
+        text = next(block for block in result.content if isinstance(block, TextBlock))
+        evidence = next(
+            block for block in result.content if isinstance(block, AnnotationBlock)
+        )
+        assert text.text == "서울"
+        assert evidence.source == "responses"
+        assert evidence.target_index == text.index
+        assert evidence.native == annotation
+
+        replay = make(responses).build_request([HubMessage.of_response(result)])
+        assert replay["input"][0]["content"][0]["annotations"] == [annotation]
+        foreign = make(chat_completions).build_request([HubMessage.of_response(result)])
+        assert foreign["messages"] == [{"role": "assistant", "content": "서울"}]
+
+    @respx.mock
+    async def test_streamed_annotation_is_not_duplicated_by_final_item(self) -> None:
+        annotation = {
+            "type": "url_citation",
+            "start_index": 0,
+            "end_index": 2,
+            "url": "https://example.test/source",
+        }
+        item = {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "서울", "annotations": [annotation]}
+            ],
+        }
+        payload = sse(
+            (
+                None,
+                {
+                    "type": "response.output_text.annotation.added",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": annotation,
+                },
+            ),
+            (
+                None,
+                {"type": "response.output_item.done", "output_index": 0, "item": item},
+            ),
+            (None, {"type": "response.completed", "response": {"status": "completed"}}),
+        )
+        respx.post(f"{BASE}/v1/responses").mock(return_value=httpx.Response(200, content=payload))
+        result = await make(responses).complete(["x"])
+        assert len(result.blocks_of(AnnotationBlock)) == 1
+
+    @respx.mock
+    async def test_gemini_keeps_citation_metadata_and_grounding_graph_separate(self) -> None:
+        payload = sse(
+            (
+                None,
+                {
+                    "candidates": [
+                        {
+                            "content": {"role": "model", "parts": [{"text": "서울"}]},
+                            "citationMetadata": {
+                                "citationSources": [
+                                    {
+                                        "startIndex": 0,
+                                        "endIndex": 2,
+                                        "uri": "https://simple.test",
+                                        "license": "CC",
+                                    }
+                                ]
+                            },
+                            "groundingMetadata": {
+                                "webSearchQueries": ["서울"],
+                                "groundingChunks": [
+                                    {
+                                        "web": {
+                                            "uri": "https://ground.test",
+                                            "title": "검색 결과",
+                                        }
+                                    }
+                                ],
+                                "groundingSupports": [
+                                    {
+                                        "segment": {
+                                            "startIndex": 0,
+                                            "endIndex": 2,
+                                            "text": "서울",
+                                        },
+                                        "groundingChunkIndices": [0],
+                                        "confidenceScores": [0.9],
+                                    }
+                                ],
+                                "searchEntryPoint": {"renderedContent": "<div>검색</div>"},
+                            },
+                        }
+                    ]
+                },
+            ),
+        )
+        respx.post(f"{BASE}{GEMINI.path}").mock(return_value=httpx.Response(200, content=payload))
+        result = await make(GEMINI).complete(["x"])
+
+        annotation = next(
+            block for block in result.content if isinstance(block, AnnotationBlock)
+        )
+        grounding = next(
+            block for block in result.content if isinstance(block, GroundingBlock)
+        )
+        assert annotation.source == "generate_content"
+        assert annotation.native["license"] == "CC"
+        assert grounding.sources[0].uri == "https://ground.test"
+        assert grounding.supports[0].source_indices == [0]
+        assert grounding.supports[0].text == "서울"
+        assert grounding.search_queries == ["서울"]
+
+        foreign = make(chat_completions).build_request([HubMessage.of_response(result)])
+        assert foreign["messages"] == [{"role": "assistant", "content": "서울"}]
 
 
 class TestMultimodalRequest:
@@ -361,16 +511,15 @@ class TestMultimodalRequest:
         assert parts[1]["input_audio"] == {"data": "BBBB", "format": "wav"}
         assert parts[2]["file"]["filename"] == "보고서"
 
-    def test_responses_uses_input_prefixed_parts(self) -> None:
+    def test_responses_uses_current_input_content_union(self) -> None:
         body = make(responses).build_request([self._message()])
         parts = body["input"][0]["content"]
         assert [p["type"] for p in parts] == [
             "input_image",
-            "input_audio",
             "input_file",
             "input_text",
         ]
-        assert parts[2]["filename"] == "보고서"
+        assert parts[1]["filename"] == "보고서"
 
     def test_gemini_uses_inline_data(self) -> None:
         body = make(GEMINI).build_request([self._message()])

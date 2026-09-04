@@ -10,6 +10,7 @@ import respx
 
 from enhanced_completion import (
     Bridge,
+    Citation,
     CitationBlock,
     CiteVocabulary,
     HubMessage,
@@ -50,9 +51,28 @@ def merge(*deltas: HubResponse) -> HubResponse:
     return merger.build()
 
 
+def cited_blocks(response: HubResponse) -> list[TextBlock]:
+    return [
+        block
+        for block in response.content
+        if isinstance(block, TextBlock) and block.citations
+    ]
+
+
+def chat_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    assert isinstance(content, list)
+    return "".join(
+        str(part["text"])
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    )
+
+
 class TestLifting:
     @respx.mock
-    async def test_citation_becomes_a_block(self) -> None:
+    async def test_citation_becomes_a_cited_text_block(self) -> None:
         respx.post(URL).mock(
             return_value=httpx.Response(
                 200,
@@ -62,22 +82,25 @@ class TestLifting:
         result = await bridge().complete(["수도?"])
 
         assert result.text == "서울은 대한민국의 수도입니다."
-        cites = [b for b in result.content if isinstance(b, CitationBlock)]
-        assert len(cites) == 1
-        assert cites[0].id == "d1"
-        assert cites[0].text == "수도"
+        blocks = cited_blocks(result)
+        assert len(blocks) == 1
+        assert blocks[0].text == "수도"
+        assert [(c.source, c.id, c.cited_text) for c in blocks[0].citations] == [
+            ("cite", "d1", None)
+        ]
 
     @respx.mock
-    async def test_indices_point_into_the_visible_text(self) -> None:
-        """인용 구간의 텍스트는 본문에도 실린다. 인덱스가 그 위치를 가리킨다."""
+    async def test_cited_answer_span_is_its_own_text_block(self) -> None:
+        """XML이 감싼 문구는 근거 원문이 아니라 인용 표시가 붙은 답변 구간이다."""
         respx.post(URL).mock(
             return_value=httpx.Response(
                 200, content=sse('서울은 대한민국의 <cite id="d1">수도</cite>입니다.')
             )
         )
         result = await bridge().complete(["수도?"])
-        cite = next(b for b in result.content if isinstance(b, CitationBlock))
-        assert result.text[cite.start_index : cite.end_index] == "수도"
+        cited = cited_blocks(result)[0]
+        assert cited.text == "수도"
+        assert cited.citations[0].cited_text is None
 
     @respx.mock
     async def test_tag_split_across_deltas(self) -> None:
@@ -89,9 +112,9 @@ class TestLifting:
         )
         result = await bridge().complete(["수도?"])
         assert result.text == "서울은 수도입니다."
-        cite = next(b for b in result.content if isinstance(b, CitationBlock))
-        assert cite.id == "d1"
-        assert result.text[cite.start_index : cite.end_index] == "수도"
+        cited = cited_blocks(result)[0]
+        assert cited.text == "수도"
+        assert cited.citations[0].id == "d1"
 
     @respx.mock
     async def test_multiple_citations_keep_order_and_indices(self) -> None:
@@ -102,11 +125,10 @@ class TestLifting:
             )
         )
         result = await bridge().complete(["도시?"])
-        cites = [b for b in result.content if isinstance(b, CitationBlock)]
-        assert [c.id for c in cites] == ["a", "b"]
+        cited = cited_blocks(result)
+        assert [b.citations[0].id for b in cited] == ["a", "b"]
         assert result.text == "서울과 부산이다."
-        assert result.text[cites[0].start_index : cites[0].end_index] == "서울"
-        assert result.text[cites[1].start_index : cites[1].end_index] == "부산"
+        assert [b.text for b in cited] == ["서울", "부산"]
 
     @respx.mock
     async def test_rag_alias_works(self) -> None:
@@ -115,7 +137,7 @@ class TestLifting:
         )
         result = await bridge().complete(["x"])
         assert result.text == "본문"
-        assert [b.id for b in result.content if isinstance(b, CitationBlock)] == ["d1"]
+        assert [b.citations[0].id for b in cited_blocks(result)] == ["d1"]
 
     @respx.mock
     async def test_text_without_citations_is_untouched(self) -> None:
@@ -130,9 +152,9 @@ class TestLifting:
         respx.post(URL).mock(return_value=httpx.Response(200, content=sse('앞 <cite id="d1">잘린')))
         result = await bridge().complete(["x"])
         assert result.text == "앞 잘린"
-        cite = next(b for b in result.content if isinstance(b, CitationBlock))
-        assert cite.id == "d1"
-        assert result.text[cite.start_index : cite.end_index] == "잘린"
+        cited = cited_blocks(result)[0]
+        assert cited.text == "잘린"
+        assert cited.citations[0].id == "d1"
 
     @respx.mock
     async def test_thinking_blocks_pass_through(self) -> None:
@@ -143,7 +165,8 @@ class TestLifting:
         ).encode()
         respx.post(URL).mock(return_value=httpx.Response(200, content=payload))
         result = await bridge().complete(["x"])
-        assert [b.type for b in result.content] == ["thinking", "text", "citation"]
+        assert [b.type for b in result.content] == ["thinking", "text"]
+        assert cited_blocks(result)[0].citations[0].id == "d1"
 
     @respx.mock
     async def test_streamed_text_matches_merged_text(self) -> None:
@@ -159,6 +182,37 @@ class TestLifting:
 
 
 class TestLowering:
+    def test_nested_citation_is_wrapped_in_place(self) -> None:
+        message = HubMessage(
+            role="assistant",
+            content=[
+                TextBlock(text="서울은 "),
+                TextBlock(text="수도", citations=[Citation(source="cite", id="d1")]),
+                TextBlock(text="입니다."),
+            ],
+        )
+        content = self._request(message)["messages"][0]["content"]
+        assert chat_text(content) == '서울은 <cite id="d1">수도</cite>입니다.'
+
+    def test_native_anthropic_citation_is_not_guessed_as_xml(self) -> None:
+        message = HubMessage(
+            role="assistant",
+            content=[
+                TextBlock(
+                    text="답",
+                    citations=[
+                        Citation(
+                            source="messages",
+                            type="char_location",
+                            cited_text="근거 원문",
+                            native={"type": "char_location", "cited_text": "근거 원문"},
+                        )
+                    ],
+                )
+            ],
+        )
+        assert self._request(message)["messages"][0]["content"] == "답"
+
     def test_citation_is_spliced_back_into_the_text(self) -> None:
         """인용 텍스트가 본문에도 있으므로 따로 이어붙이면 문장이 두 번 나간다."""
         message = HubMessage(
@@ -261,7 +315,7 @@ class TestRoundTrip:
         result = await client.complete(["질문"])
 
         body = client.build_request([HubMessage.of_response(result)])
-        assert body["messages"][0]["content"] == answer
+        assert chat_text(body["messages"][0]["content"]) == answer
 
     @respx.mock
     async def test_round_trip_survives_token_level_splitting(self) -> None:
@@ -270,7 +324,7 @@ class TestRoundTrip:
         client = bridge()
         result = await client.complete(["질문"])
         body = client.build_request([HubMessage.of_response(result)])
-        assert body["messages"][0]["content"] == answer
+        assert chat_text(body["messages"][0]["content"]) == answer
 
 
 class TestVocabularyContract:
@@ -304,7 +358,7 @@ class TestVocabularyContract:
         result = await client.complete(["x"])
         assert result.text == "본문"
         body = client.build_request([HubMessage.of_response(result)])
-        assert body["messages"][0]["content"] == '<ref id="d1">본문</ref>'
+        assert chat_text(body["messages"][0]["content"]) == '<ref id="d1">본문</ref>'
 
     def test_mapper_is_a_fresh_instance_each_time(self) -> None:
         """상태 기계라 재사용하면 앞 스트림의 상태가 남는다."""
@@ -318,3 +372,20 @@ class TestVocabularyContract:
             HubResponse(content=[CitationBlock(id="b", start_index=1, end_index=2)]),
         )
         assert [b.id for b in result.content if isinstance(b, CitationBlock)] == ["a", "b"]
+
+    def test_merger_attaches_nested_citation_delta_to_text_slot(self) -> None:
+        result = merge(
+            HubResponse(content=[TextBlock(text="답", index=0)]),
+            HubResponse(
+                content=[
+                    TextBlock(
+                        index=0,
+                        citations=[Citation(source="messages", id="d1")],
+                    )
+                ]
+            ),
+        )
+        text = result.content[0]
+        assert isinstance(text, TextBlock)
+        assert text.text == "답"
+        assert [(c.source, c.id) for c in text.citations] == [("messages", "d1")]

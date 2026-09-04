@@ -352,7 +352,7 @@ Reactor가 없으므로 이디엄을 바꿔야 한다.
 stream = client.stream(request)
 async for delta in stream:
     print(delta.choices[0].delta.content, end="")
-result = stream.result          # 병합된 최종 응답
+result = stream.result  # 병합된 최종 응답
 ```
 
 `FluxListener`의 네 콜백은 각각 이렇게 대응된다. onNext는 이터레이션, onError는 예외 전파,
@@ -410,12 +410,12 @@ retry를 모두 노출하므로 후보로 적합하다. 다만 의존을 늘리�
 client = EnhancedCompletionClient(
     base_url="...",
     api_key=None,
-    model="...",                        # 기본 모델
+    model="...",  # 기본 모델
     completions_path="/v1/chat/completions",
     timeout=120.0,
-    headers={},                         # 사내 게이트웨이용 추가 헤더
-    citation_schema=CITE_SCHEMA,        # 태그 스키마 교체 가능
-    sse=SseOptions(...),                # 사내 SSE 방언
+    headers={},  # 사내 게이트웨이용 추가 헤더
+    citation_schema=CITE_SCHEMA,  # 태그 스키마 교체 가능
+    sse=SseOptions(...),  # 사내 SSE 방언
 )
 ```
 

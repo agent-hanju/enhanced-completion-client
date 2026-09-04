@@ -19,11 +19,16 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SerializeAsAny, model_validator
 
 __all__ = [
+    "AnnotationBlock",
     "AudioBlock",
     "Block",
+    "Citation",
     "CitationBlock",
     "ContentBlock",
     "DocumentBlock",
+    "GroundingBlock",
+    "GroundingSource",
+    "GroundingSupport",
     "ImageBlock",
     "ServerToolBlock",
     "TextBlock",
@@ -43,6 +48,10 @@ OVERWRITE = "overwrite"
 
 def _overwrite() -> dict[str, Any]:
     return {STREAM_META_KEY: OVERWRITE}
+
+
+def _index() -> dict[str, Any]:
+    return {STREAM_META_KEY: "index"}
 
 
 class ContentBlock(BaseModel):
@@ -74,12 +83,41 @@ class ContentBlock(BaseModel):
     """
 
 
+class Citation(BaseModel):
+    """한 text block에 붙는 Anthropic형 인용 정보.
+
+    ``cited_text``는 답변에서 인용 표시가 붙은 문구가 아니라 근거 원문이다. XML-like
+    ``<cite>``는 근거 원문을 알 수 없으므로 이 필드를 채우지 않고, 태그가 감싼 답변 문구를
+    부모 :class:`TextBlock`의 ``text``로 둔다.
+
+    위치 종류는 벤더마다 다르다. char/page/content-block 위치를 공통 ``source_start``와
+    ``source_end``로 정규화하고 원본은 ``native``에 보존한다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = Field(default="citation", json_schema_extra=_overwrite())
+    source: str | None = Field(default=None, json_schema_extra=_overwrite())
+    """인용 규약의 소유자. ``messages``는 Anthropic native, ``cite``는 XML 어휘다."""
+    id: str = Field(default="", json_schema_extra=_overwrite())
+    cited_text: str | None = Field(default=None, json_schema_extra=_overwrite())
+    document_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    document_title: str | None = Field(default=None, json_schema_extra=_overwrite())
+    source_start: int | None = Field(default=None, json_schema_extra=_overwrite())
+    source_end: int | None = Field(default=None, json_schema_extra=_overwrite())
+    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
+    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    encrypted_index: str | None = Field(default=None, json_schema_extra=_overwrite())
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+
+
 class TextBlock(ContentBlock):
-    """사용자에게 보이는 본문."""
+    """사용자에게 보이는 본문과 그 본문 블록에 붙는 인용."""
 
     type: Literal["text"] = "text"
     text: str = ""
     signature: str | None = Field(default=None, json_schema_extra=_overwrite())
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class ThinkingBlock(ContentBlock):
@@ -149,8 +187,7 @@ class ImageBlock(ContentBlock):
       Gemini ``inlineData``, Chat Completions는 data URL로 감싼다
     - ``url``: Anthropic ``source.url``, Chat Completions ``image_url.url``,
       Responses ``input_image.image_url``
-    - ``file_id``: 이미 올려둔 파일. Anthropic ``source.file``,
-      Chat Completions ``image_url`` 대신 ``file``
+    - ``file_id``: 응답에서 관찰한 원격 참조를 진단용으로 보존한다. 공통 요청에는 사용할 수 없다
     """
 
     type: Literal["image"] = "image"
@@ -158,15 +195,17 @@ class ImageBlock(ContentBlock):
     data: str | None = Field(default=None, json_schema_extra=_overwrite())
     url: str | None = Field(default=None, json_schema_extra=_overwrite())
     file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
     detail: str | None = Field(default=None, json_schema_extra=_overwrite())
     """Chat Completions ``image_url.detail``. ``auto``/``low``/``high``."""
 
 
 class AudioBlock(ContentBlock):
-    """음성 입력. 요청 방향 블록이다.
+    """음성 입력 또는 출력 stream.
 
-    Chat Completions ``input_audio{data, format}``와 Responses ``input_audio``가 같은 모양을
-    쓴다. Gemini는 ``inlineData``에 오디오 MIME을 실어 같은 일을 한다.
+    입력은 Chat Completions ``input_audio{data, format}``와 Gemini ``inlineData``를 지원한다.
+    Responses에서는 전역 audio/transcript stream을 이 블록으로 수집하지만 현재 요청 content
+    유니온에는 오디오가 없어 재생하지 않는다.
 
     ``format``이 ``media_type``과 따로 있는 이유는 두 API가 ``wav``/``mp3`` 같은 짧은 이름을
     요구하고 Gemini는 ``audio/wav`` 형태의 MIME을 요구하기 때문이다.
@@ -178,26 +217,17 @@ class AudioBlock(ContentBlock):
     format: str | None = Field(default=None, json_schema_extra=_overwrite())
     media_type: str | None = Field(default=None, json_schema_extra=_overwrite())
     file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
     transcript: str | None = None
     expires_at: int | None = Field(default=None, json_schema_extra=_overwrite())
 
 
 class CitationBlock(ContentBlock):
-    """본문 한 구간의 근거.
+    """구 버전 저장 데이터와 API 호환을 위한 독립 인용 블록.
 
-    허브 블록이다. 어휘 소속이 아니다. Anthropic Messages가 인용을 네이티브 구조 채널로
-    제공하기 때문이다. 문서 블록에 ``citations``를 켜면 응답의 text 블록이 ``citations``
-    배열을 들고 온다. beta 헤더도 필요 없다.
-
-    그래서 같은 블록에 도달하는 경로가 둘이다. vLLM은 본문 태그를 올려서, Anthropic은
-    네이티브 채널로 온다. 어휘가 태그를 다루고 어댑터가 네이티브를 다루지만 도착지는 같다.
-
-    ``index``를 주지 않는다. 인용은 조각으로 도착하지 않고 한 번에 완성되므로 병합기가 짝지을
-    키가 필요 없다. 키가 없는 원소는 도착 순서대로 덧붙는다.
-
-    답변 안의 위치와 원문 안의 위치가 다른 축이다. ``start_index``/``end_index``는 답변
-    문자열의 구간이고, ``source_*``는 근거 문서 안의 구간이다. 태그 경로는 앞쪽만, 네이티브
-    경로는 뒤쪽만 채울 수 있다.
+    새 응답 매퍼는 이 타입을 만들지 않는다. XML/Anthropic 인용은 ``TextBlock.citations``로,
+    범위 annotation은 :class:`AnnotationBlock`으로 저장한다. 기존 JSON과 호출자 코드를 한
+    릴리스에서 깨뜨리지 않기 위해 읽기와 요청 내림만 유지한다.
     """
 
     type: Literal["citation"] = "citation"
@@ -213,6 +243,72 @@ class CitationBlock(ContentBlock):
     source_kind: str | None = Field(default=None, json_schema_extra=_overwrite())
 
 
+class AnnotationBlock(ContentBlock):
+    """출력 text의 문자 범위를 가리키는 annotation.
+
+    OpenAI Chat/Responses의 ``annotations``와 Gemini ``citationMetadata``가 이 계열이다.
+    text보다 늦게 도착할 수 있으므로 text block을 소급 분할하지 않고 독립 블록으로 둔다.
+    """
+
+    type: Literal["annotation"] = "annotation"
+    annotation_index: int | None = Field(default=None, json_schema_extra=_index())
+    target_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    kind: str = Field(default="annotation", json_schema_extra=_overwrite())
+    id: str = Field(default="", json_schema_extra=_overwrite())
+    text: str | None = Field(default=None, json_schema_extra=_overwrite())
+    start_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    end_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    title: str | None = Field(default=None, json_schema_extra=_overwrite())
+    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
+    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+
+
+class GroundingSource(BaseModel):
+    """Gemini grounding chunk의 정규화된 출처."""
+
+    model_config = ConfigDict(extra="allow")
+
+    index: int = Field(json_schema_extra=_index())
+    kind: str = Field(default="unknown", json_schema_extra=_overwrite())
+    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
+    title: str | None = Field(default=None, json_schema_extra=_overwrite())
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+
+
+class GroundingSupport(BaseModel):
+    """생성 답변 구간과 하나 이상의 grounding source를 잇는 관계."""
+
+    model_config = ConfigDict(extra="allow")
+
+    index: int = Field(json_schema_extra=_index())
+    text: str | None = Field(default=None, json_schema_extra=_overwrite())
+    start_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    end_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    source_indices: list[int] = Field(default_factory=list, json_schema_extra=_overwrite())
+    confidence_scores: list[float] = Field(default_factory=list, json_schema_extra=_overwrite())
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+
+
+class GroundingBlock(ContentBlock):
+    """Gemini candidate의 grounding graph.
+
+    ``groundingSupports``는 한 답변 구간을 여러 ``groundingChunks``에 연결하므로 단일 인용
+    목록으로 평탄화하지 않는다. 검색 UI와 질의도 같은 응답 메타데이터로 보존한다.
+    """
+
+    type: Literal["grounding"] = "grounding"
+    candidate_index: int = Field(default=0, json_schema_extra=_index())
+    sources: list[GroundingSource] = Field(default_factory=list)
+    supports: list[GroundingSupport] = Field(default_factory=list)
+    search_queries: list[str] = Field(default_factory=list, json_schema_extra=_overwrite())
+    search_entry_point: dict[str, Any] | None = Field(
+        default=None, json_schema_extra=_overwrite()
+    )
+    retrieval_metadata: dict[str, Any] | None = Field(
+        default=None, json_schema_extra=_overwrite()
+    )
+
+
 class DocumentBlock(ContentBlock):
     """요청에 첨부하는 근거 문서 또는 파일.
 
@@ -221,8 +317,8 @@ class DocumentBlock(ContentBlock):
     - ``text``: 평문. Anthropic ``source.type=text``, 나머지는 본문 태그
     - ``data`` + ``media_type``: base64. Anthropic ``base64``, Gemini ``inlineData``,
       Responses ``file_data``
-    - ``uri`` 또는 ``file_id``: 이미 올려둔 파일. Gemini ``fileData.fileUri``,
-      Responses ``file_id``, Anthropic ``source.type=file``
+    - ``uri``: 대상 API가 받는 URL
+    - ``file_id``: 응답에서 관찰한 원격 참조를 진단용으로 보존하며 요청에는 쓰지 않는다
 
     네이티브 문서 채널은 네 주요 API에 있다. 최신 Chat Completions도 ``file`` part를 받는다.
     다만 평문 문서 source를 직접 받지 않는 대상에서는 본문 태그로 내린다.
@@ -235,6 +331,7 @@ class DocumentBlock(ContentBlock):
     data: str | None = Field(default=None, json_schema_extra=_overwrite())
     uri: str | None = Field(default=None, json_schema_extra=_overwrite())
     file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
     media_type: str = Field(default="text/plain", json_schema_extra=_overwrite())
     citations_enabled: bool = Field(default=True, json_schema_extra=_overwrite())
 
@@ -274,12 +371,14 @@ class ServerToolBlock(ContentBlock):
     Responses, Anthropic, Gemini와 agent SSE가 이 개념을 갖는다.
 
     - Anthropic: ``server_tool_use``, ``web_search_tool_result``, ``web_fetch_tool_result``,
-      ``mcp_tool_use``, ``mcp_tool_result``, ``bash_code_execution_tool_result``,
-      ``text_editor_code_execution_tool_result``
+      ``mcp_tool_use``, ``mcp_tool_result``, ``code_execution_tool_result``,
+      ``bash_code_execution_tool_result``, ``text_editor_code_execution_tool_result``,
+      ``tool_search_tool_result``
     - Responses: ``web_search_call``, ``code_interpreter_call``, ``image_generation_call``,
       ``mcp_call``, ``mcp_list_tools``. ``mcp_approval_request``는 클라이언트 응답이 필요하므로
       ``ToolUseBlock``이다
-    - Gemini: ``executableCode``, ``codeExecutionResult``, ``groundingMetadata``
+    - Gemini: ``executableCode``, ``codeExecutionResult``. ``groundingMetadata``는 관계형
+      :class:`GroundingBlock`으로 분리한다
     - agent-studio: ``bash``, ``edit``, ``read``, ``write``, ``web_search``, ``skill_run`` 등
     - chat completions: 없음
     """
@@ -346,14 +445,18 @@ def resolve_block(value: Any) -> Any:
     cls = _REGISTRY.get(tag)
     if cls is None:
         # 알 수 없는 타입은 버리지 않고 원본째로 보존한다.
-        known = {"type", "index", "source", "raw"}
+        known = {"type", "index", "source", "native", "raw"}
         raw = value.get("raw")
         if not isinstance(raw, dict):
             raw = {k: v for k, v in value.items() if k not in known}
+        native = value.get("native")
+        if not isinstance(native, dict):
+            native = {}
         return VendorBlock(
             type=tag,
             index=value.get("index"),
             source=value.get("source"),
+            native=native,
             raw=raw,
         )
     return cls.model_validate(value)
@@ -371,6 +474,8 @@ for _cls in (
     ImageBlock,
     AudioBlock,
     CitationBlock,
+    AnnotationBlock,
+    GroundingBlock,
     DocumentBlock,
     ServerToolBlock,
 ):

@@ -1,4 +1,4 @@
-"""인용 어휘. ``<cite id="d1">본문</cite>``을 구조화된 블록으로 들어올린다.
+"""인용 어휘. ``<cite id="d1">본문</cite>``을 인용이 붙은 text block으로 올린다.
 
 속성형을 쓴다. 실측에서 확인한 것이 근거다. 모델은 인용 문법을 스스로 정하지 않는다.
 프롬프트가 지시하지 않으면 입력 문서의 태그를 흉내낸다. 즉 이 문법은 우리가 고르는 것이고,
@@ -8,23 +8,23 @@ Java 초기 구현의 중첩형(``<cite><id>d1</id>본문</cite>``)보다 파서
 ``common-hitl-chat``의 ``CitationAwareLlmProvider``도 속성형을 쓰므로 두 구현이 같은 어휘를
 공유한다.
 
-인용 구간의 텍스트는 **본문에도 그대로 실린다.** 인용은 그 텍스트가 어디서 왔는지를 가리키는
-곁정보이므로 본문에서 빼면 답변이 끊긴다. ``start_index``와 ``end_index``가 본문 문자열 안의
-위치를 가리킨다.
+인용 구간은 Anthropic Messages처럼 독립된 ``TextBlock``이 되고 ``citations`` 목록에 근거가
+붙는다. 태그가 감싼 문구는 생성 답변이지 근거 원문의 ``cited_text``가 아니므로 둘을 섞지 않는다.
 """
 
 from __future__ import annotations
 
+import html
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from ..blocks import CitationBlock, ContentBlock, TextBlock
+from ..blocks import Citation, CitationBlock, ContentBlock, TextBlock
 from ..contentstream import ContentSchema, Enter, Exit, ParseEvent, TagParser, TextRun
 from ..hub import HubResponse
 from ..mapper import StreamMapper
 from ..vocabulary import Vocabulary
 
-__all__ = ["CITE_PATH", "CitationBlock", "CiteVocabulary", "cite_schema"]
+__all__ = ["CITE_PATH", "Citation", "CitationBlock", "CiteVocabulary", "cite_schema"]
 
 CITE_PATH = "/cite"
 
@@ -39,36 +39,37 @@ class _CiteMapper:
 
     본문이 아닌 블록은 손대지 않고 통과시킨다. 추론과 도구 호출이 그렇다.
 
-    상태 넷을 든다. 본문 커서, 열린 인용의 식별자, 그 인용의 시작 위치, 모인 인용 텍스트다.
-    Java ``EnhancedCompletionDeltaMapper``와 같은 구성이되 ``id``를 태그 속성에서 받으므로
-    식별자 버퍼가 없다.
+    인용 내부 text는 고유한 block index로 흘리고 닫는 태그에서 같은 index에 citation delta를
+    보낸다. 따라서 이미 전달한 text를 취소하거나 최종 응답까지 버퍼링하지 않아도 병합 결과는
+    Anthropic형 ``TextBlock.citations``가 된다.
     """
 
     def __init__(self, schema: ContentSchema) -> None:
         self._parser = TagParser(schema)
-        self._cursor = 0
+        self._next_segment = -(1 << 60)
+        self._active_key: tuple[str | None, int | None] | None = None
+        self._active_segment: int | None = None
+        self._segments: dict[tuple[str | None, int | None], list[int]] = {}
+        self._pending: dict[tuple[str | None, int | None], dict[str, Any]] = {}
+        self._last_key: tuple[str | None, int | None] = (None, None)
+        self._last_source: str | None = None
+        self._last_index: int | None = None
         self._open_id: str | None = None
-        self._open_start = 0
-        self._open_text: list[str] = []
+        self._open_key: tuple[str | None, int | None] | None = None
+        self._open_source: str | None = None
+        self._open_index: int | None = None
 
     def map(self, delta: HubResponse) -> list[HubResponse]:
         blocks: list[ContentBlock] = []
         for block in delta.content:
             if isinstance(block, TextBlock):
-                # item.done이 본문을 반복하지 않고 원본 metadata만 갱신하는 API가 있다.
-                # 그 델타를 파서에 넣으면 빈 문자열로 사라져 같은 벤더 왕복 정보가 유실된다.
-                if block.native or block.signature:
-                    metadata: dict[str, Any] = {
-                        "index": block.index,
-                        "source": block.source,
-                    }
-                    if block.native:
-                        metadata["native"] = block.native
-                    if block.signature:
-                        metadata["signature"] = block.signature
-                    blocks.append(TextBlock(**metadata))
+                key = (block.source, block.index)
+                self._last_key = key
+                self._last_source = block.source
+                self._last_index = block.index
+                blocks.extend(self._metadata(block, key))
                 if "text" in block.model_fields_set:
-                    blocks.extend(self._lift(block.text, block.index, block.source))
+                    blocks.extend(self._lift(block.text, key, block.index, block.source))
             else:
                 blocks.append(block)
         return [delta.model_copy(update={"content": blocks})]
@@ -81,9 +82,21 @@ class _CiteMapper:
         """
         blocks: list[ContentBlock] = []
         for event in self._parser.flush():
-            blocks.extend(self._apply(event, TextBlock.model_fields["index"].default))
+            blocks.extend(
+                self._apply(
+                    event,
+                    self._last_key,
+                    self._last_index,
+                    self._last_source,
+                )
+            )
         if self._open_id is not None:
             blocks.append(self._close())
+        for key, metadata in list(self._pending.items()):
+            index, fields = self._new_segment(key, key[1], key[0])
+            fields.update(metadata)
+            blocks.append(TextBlock(index=index, source=key[0], **fields))
+            self._pending.pop(key, None)
         if not blocks:
             return []
         return [HubResponse(content=blocks)]
@@ -93,17 +106,19 @@ class _CiteMapper:
     def _lift(
         self,
         text: str,
+        key: tuple[str | None, int | None],
         index: int | None,
         source: str | None,
     ) -> list[ContentBlock]:
         blocks: list[ContentBlock] = []
         for event in self._parser.feed(text):
-            blocks.extend(self._apply(event, index, source))
+            blocks.extend(self._apply(event, key, index, source))
         return blocks
 
     def _apply(
         self,
         event: ParseEvent,
+        key: tuple[str | None, int | None],
         index: int | None,
         source: str | None = None,
     ) -> list[ContentBlock]:
@@ -113,43 +128,122 @@ class _CiteMapper:
         아니라 이름 바인딩이 되어 모든 경로에 걸린다.
         """
         if isinstance(event, TextRun):
-            # 인용 안이든 밖이든 본문에는 그대로 실린다. 빼면 답변이 끊긴다.
-            self._cursor += len(event.content)
-            if self._open_id is not None:
-                self._open_text.append(event.content)
-            return [TextBlock(text=event.content, index=index, source=source)]
+            if self._active_key != key or self._active_segment is None:
+                self._active_segment, fields = self._new_segment(key, index, source)
+                self._active_key = key
+            else:
+                fields = {}
+            return [
+                TextBlock(
+                    text=event.content,
+                    index=self._active_segment,
+                    source=source,
+                    **fields,
+                )
+            ]
 
         if isinstance(event, Enter) and event.path == CITE_PATH:
+            closed: list[ContentBlock] = []
             if self._open_id is not None:
-                # 중첩 인용은 규격에 없다. 앞선 것을 여기서 닫아 상태를 잃지 않는다.
-                closed = self._close()
-                self._open(event.attributes)
-                return [closed]
-            self._open(event.attributes)
-            return []
+                closed.append(self._close())
+            self._active_segment = None
+            self._active_key = key
+            self._open(event.attributes, key, index, source)
+            return closed
 
         if isinstance(event, Exit) and event.path == CITE_PATH:
             if self._open_id is None:
                 return []
-            return [self._close()]
+            closed_block = self._close()
+            self._active_segment = None
+            return [closed_block]
 
         return []
 
-    def _open(self, attrs: dict[str, str]) -> None:
+    def _open(
+        self,
+        attrs: dict[str, str],
+        key: tuple[str | None, int | None],
+        index: int | None,
+        source: str | None,
+    ) -> None:
         self._open_id = attrs.get("id", "")
-        self._open_start = self._cursor
-        self._open_text = []
+        self._open_key = key
+        self._open_index = index
+        self._open_source = source
 
-    def _close(self) -> CitationBlock:
-        block = CitationBlock(
-            id=self._open_id or "",
-            text="".join(self._open_text),
-            start_index=self._open_start,
-            end_index=self._cursor,
+    def _close(self) -> TextBlock:
+        key = self._open_key or self._last_key
+        if self._active_segment is None:
+            self._active_segment, fields = self._new_segment(
+                key,
+                self._open_index,
+                self._open_source,
+            )
+        else:
+            fields = {}
+        block = TextBlock(
+            index=self._active_segment,
+            source=self._open_source,
+            citations=[Citation(type="document", source="cite", id=self._open_id or "")],
+            **fields,
         )
         self._open_id = None
-        self._open_text = []
+        self._open_key = None
+        self._open_index = None
+        self._open_source = None
         return block
+
+    def _metadata(
+        self,
+        block: TextBlock,
+        key: tuple[str | None, int | None],
+    ) -> list[ContentBlock]:
+        fields: dict[str, Any] = {}
+        if block.native:
+            fields["native"] = block.native
+        if block.signature:
+            fields["signature"] = block.signature
+        if "citations" in block.model_fields_set and block.citations:
+            fields["citations"] = block.citations
+        if not fields:
+            return []
+
+        segments = self._segments.get(key) or []
+        if not segments:
+            pending = self._pending.setdefault(key, {})
+            for name, value in fields.items():
+                if name == "citations":
+                    pending.setdefault(name, []).extend(value)
+                else:
+                    pending[name] = value
+            return []
+
+        out: list[ContentBlock] = []
+        metadata = {name: value for name, value in fields.items() if name != "citations"}
+        for segment in segments:
+            if metadata:
+                out.append(TextBlock(index=segment, source=block.source, **metadata))
+        if block.citations:
+            out.append(
+                TextBlock(index=segments[-1], source=block.source, citations=block.citations)
+            )
+        return out
+
+    def _new_segment(
+        self,
+        key: tuple[str | None, int | None],
+        original_index: int | None,
+        source: str | None,
+    ) -> tuple[int, dict[str, Any]]:
+        existing = self._segments.setdefault(key, [])
+        if not existing and original_index is not None:
+            segment = original_index
+        else:
+            segment = self._next_segment
+            self._next_segment -= 1
+        existing.append(segment)
+        return segment, self._pending.pop(key, {})
 
 
 class CiteVocabulary(Vocabulary):
@@ -162,6 +256,8 @@ class CiteVocabulary(Vocabulary):
     문장을 따로 관리하다 파서와 어긋난다. Java 구현이 어긋날 수 있었던 자리다.
     """
 
+    # CitationBlock은 구 버전 저장 JSON을 읽고 내리기 위해서만 등록한다. 새 citation은
+    # TextBlock의 중첩 모델이라 content-block 레지스트리에 넣지 않는다.
     blocks = (CitationBlock,)
     name = "cite"
 
@@ -190,16 +286,33 @@ class CiteVocabulary(Vocabulary):
         대화를 이어가면 이전 답변이 요청에 되실리므로 왕복이 실제로 일어난다. 여기가 내놓는
         태그와 :attr:`schema`가 읽는 태그가 같아야 하고, 둘이 한 객체에 있으므로 어긋날 수 없다.
         """
-        cites = [b for b in blocks if isinstance(b, CitationBlock)]
-        if not cites:
+        legacy = [b for b in blocks if isinstance(b, CitationBlock)]
+        nested = any(isinstance(b, TextBlock) and b.citations for b in blocks)
+        if not legacy and not nested:
             return None
 
-        full = "".join(b.text for b in blocks if isinstance(b, TextBlock))
-        merged = TextBlock(text=self._splice(full, cites))
+        lowered: list[ContentBlock] = []
+        for block in blocks:
+            if not isinstance(block, TextBlock) or not block.citations:
+                lowered.append(block)
+                continue
+            portable = [
+                citation
+                for citation in block.citations
+                if citation.id and citation.source in (None, "cite") and not citation.native
+            ]
+            text = self._wrap(portable[0].id, block.text) if portable else block.text
+            lowered.append(block.model_copy(update={"text": text, "citations": []}))
+
+        if not legacy:
+            return lowered
+
+        full = "".join(b.text for b in lowered if isinstance(b, TextBlock))
+        merged = TextBlock(text=self._splice(full, legacy))
 
         out: list[ContentBlock] = []
         placed = False
-        for block in blocks:
+        for block in lowered:
             if isinstance(block, TextBlock):
                 if not placed:
                     out.append(merged)
@@ -236,7 +349,8 @@ class CiteVocabulary(Vocabulary):
         return "".join(parts)
 
     def _wrap(self, cite_id: str, body: str) -> str:
-        return f'<{self._tag} id="{cite_id}">{body}</{self._tag}>'
+        safe_id = html.escape(cite_id, quote=True)
+        return f'<{self._tag} id="{safe_id}">{body}</{self._tag}>'
 
     def lift_mapper(self) -> StreamMapper[Any, Any]:
         return _CiteMapper(self._schema)

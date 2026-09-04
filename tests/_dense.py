@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enhanced_completion import (
-    CitationBlock,
+    Citation,
     DocumentBlock,
     HubMessage,
     TextBlock,
@@ -33,10 +33,6 @@ DENSE_TOOL = ToolDefinition(
 ANSWER = "서울은 1000만이다."
 CITED = "1000만"
 # 인덱스를 손으로 세지 않는다. 문자열에서 찾아 쓰면 문구를 고쳐도 어긋나지 않는다.
-CITE_START = ANSWER.index(CITED)
-CITE_END = CITE_START + len(CITED)
-
-
 def dense_history() -> list[HubMessage]:
     """블록 여섯 종류를 실은 대화 이력.
 
@@ -45,7 +41,7 @@ def dense_history() -> list[HubMessage]:
     - :class:`ThinkingBlock` 이전 턴의 추론. 다른 벤더로는 생략되어야 한다
     - :class:`ToolUseBlock` 이전 턴의 도구 호출
     - :class:`ToolResultBlock` 그 결과. 벤더마다 실리는 자리가 다르다
-    - :class:`CitationBlock` 이전 답변의 인용. 어휘가 본문에 태그로 되끼운다
+    - :class:`Citation` 이전 답변 구간의 인용. 어휘가 본문에 태그로 되끼운다
     """
     return [
         HubMessage(
@@ -66,8 +62,9 @@ def dense_history() -> list[HubMessage]:
         HubMessage(
             role="assistant",
             content=[
-                TextBlock(text=ANSWER),
-                CitationBlock(id="d1", text=CITED, start_index=CITE_START, end_index=CITE_END),
+                TextBlock(text="서울은 "),
+                TextBlock(text=CITED, citations=[Citation(source="cite", id="d1")]),
+                TextBlock(text="이다."),
             ],
         ),
         HubMessage(role="user", content=[TextBlock(text="부산은? 숫자만.")]),

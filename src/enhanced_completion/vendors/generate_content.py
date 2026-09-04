@@ -20,10 +20,13 @@ import json
 from typing import Any
 
 from ..blocks import (
+    AnnotationBlock,
     AudioBlock,
-    CitationBlock,
     ContentBlock,
     DocumentBlock,
+    GroundingBlock,
+    GroundingSource,
+    GroundingSupport,
     ImageBlock,
     ServerToolBlock,
     TextBlock,
@@ -38,7 +41,8 @@ from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
 from .normalize import normalize_role, stop_reason_from_gemini
-from .parts import as_gemini_part
+from .parts import as_gemini_part, has_opaque_media_reference
+from .tool_policy import can_replay_client_tool
 
 __all__ = ["GenerateContentAdapter", "generate_content"]
 
@@ -69,6 +73,7 @@ _PART_FIELDS = frozenset(
         "codeExecutionResult",
         "toolCall",
         "toolResponse",
+        "audioTranscription",
     }
 )
 
@@ -108,7 +113,16 @@ class _ToHub:
                 if block is not None:
                     blocks.append(block)
 
-        blocks.extend(self._citations(head.get("citationMetadata")))
+        text_indices = [
+            block.index
+            for block in blocks
+            if isinstance(block, TextBlock) and isinstance(block.index, int)
+        ]
+        target_index = text_indices[0] if len(set(text_indices)) == 1 else None
+        blocks.extend(self._citations(head.get("citationMetadata"), target_index))
+        grounding = self._grounding(head.get("groundingMetadata"))
+        if grounding is not None:
+            blocks.append(grounding)
         blocks.extend(self._candidate_meta(head))
 
         fields: dict[str, Any] = {}
@@ -133,8 +147,8 @@ class _ToHub:
     def flush(self) -> list[HubResponse]:
         return []
 
-    def _citations(self, metadata: Any) -> list[ContentBlock]:
-        """``citationMetadata``를 허브 :class:`CitationBlock`으로.
+    def _citations(self, metadata: Any, target_index: int | None) -> list[ContentBlock]:
+        """``citationMetadata``의 출력 범위를 annotation으로 보존한다.
 
         이 벤더의 ``citationSources``는 ``startIndex``/``endIndex``가 **답변 문자열 안의
         위치**다. Anthropic이 원문 좌표를 주는 것과 축이 반대이므로 이쪽은 답변 좌표를 채운다.
@@ -144,29 +158,116 @@ class _ToHub:
         if not isinstance(metadata, dict):
             return []
         out: list[ContentBlock] = []
-        for source in metadata.get("citationSources") or []:
+        for annotation_index, source in enumerate(metadata.get("citationSources") or []):
             if not isinstance(source, dict):
                 continue
-            fields: dict[str, Any] = {"source": SOURCE, "source_kind": "citation_source"}
+            fields: dict[str, Any] = {
+                "source": SOURCE,
+                "annotation_index": annotation_index,
+                "target_index": target_index,
+                "kind": "citation_source",
+                "native": dict(source),
+            }
             uri = source.get("uri")
             if isinstance(uri, str) and uri:
                 fields["id"] = uri
+                fields["uri"] = uri
+            title = source.get("title")
+            if isinstance(title, str) and title:
+                fields["title"] = title
             for key, dst in (("startIndex", "start_index"), ("endIndex", "end_index")):
                 value = source.get(key)
                 if isinstance(value, int):
                     fields[dst] = value
-            out.append(CitationBlock(**fields))
+            out.append(AnnotationBlock(**fields))
         return out
+
+    @staticmethod
+    def _grounding(metadata: Any) -> GroundingBlock | None:
+        """검색 source와 답변 support의 관계를 평탄화하지 않고 보존한다."""
+        if not isinstance(metadata, dict):
+            return None
+
+        sources: list[GroundingSource] = []
+        for index, chunk in enumerate(metadata.get("groundingChunks") or []):
+            if not isinstance(chunk, dict):
+                continue
+            kind = next(
+                (name for name, value in chunk.items() if isinstance(value, dict)),
+                "unknown",
+            )
+            detail = chunk.get(kind)
+            detail = detail if isinstance(detail, dict) else {}
+            sources.append(
+                GroundingSource(
+                    index=index,
+                    kind=kind,
+                    uri=detail.get("uri") if isinstance(detail.get("uri"), str) else None,
+                    title=detail.get("title") if isinstance(detail.get("title"), str) else None,
+                    native=dict(chunk),
+                )
+            )
+
+        supports: list[GroundingSupport] = []
+        for index, support in enumerate(metadata.get("groundingSupports") or []):
+            if not isinstance(support, dict):
+                continue
+            segment = support.get("segment")
+            segment = segment if isinstance(segment, dict) else {}
+            source_indices = [
+                value
+                for value in support.get("groundingChunkIndices") or []
+                if isinstance(value, int)
+            ]
+            confidence_scores = [
+                float(value)
+                for value in support.get("confidenceScores") or []
+                if isinstance(value, int | float) and not isinstance(value, bool)
+            ]
+            supports.append(
+                GroundingSupport(
+                    index=index,
+                    text=segment.get("text") if isinstance(segment.get("text"), str) else None,
+                    start_index=(
+                        segment.get("startIndex")
+                        if isinstance(segment.get("startIndex"), int)
+                        else None
+                    ),
+                    end_index=(
+                        segment.get("endIndex")
+                        if isinstance(segment.get("endIndex"), int)
+                        else None
+                    ),
+                    source_indices=source_indices,
+                    confidence_scores=confidence_scores,
+                    native=dict(support),
+                )
+            )
+
+        queries = [
+            query for query in metadata.get("webSearchQueries") or [] if isinstance(query, str)
+        ]
+        search_entry = metadata.get("searchEntryPoint")
+        retrieval = metadata.get("retrievalMetadata")
+        return GroundingBlock(
+            source=SOURCE,
+            candidate_index=0,
+            sources=sources,
+            supports=supports,
+            search_queries=queries,
+            search_entry_point=dict(search_entry) if isinstance(search_entry, dict) else None,
+            retrieval_metadata=dict(retrieval) if isinstance(retrieval, dict) else None,
+            native=dict(metadata),
+        )
 
     def _candidate_meta(self, candidate: dict[str, Any]) -> list[ContentBlock]:
         """허브에 대응물이 없는 candidate 메타데이터를 보존한다.
 
-        ``groundingMetadata``는 검색 근거, ``safetyRatings``는 안전 등급,
-        ``urlContextMetadata``는 URL 조회 결과다. 셋 다 이 벤더 전용이라 다른 벤더로 옮길 수
-        없지만, 같은 벤더로 되돌릴 때는 무손실이어야 한다.
+        grounding은 별도 공통 블록으로 처리한다. 여기에는 URL 조회 결과와 안전 등급처럼
+        정규화하지 않는 candidate 메타데이터만 남긴다.
         """
         out: list[ContentBlock] = []
-        for key in ("groundingMetadata", "urlContextMetadata"):
+        for key in ("urlContextMetadata",):
             value = candidate.get(key)
             if isinstance(value, dict):
                 # 서버가 검색을 돌린 결과다. 다른 벤더의 서버 도구와 같은 자리다.
@@ -180,6 +281,14 @@ class _ToHub:
         """명시적 part index가 없는 스트림에서 연속 텍스트 조각만 같은 슬롯에 모은다."""
         if isinstance(part.get("text"), str):
             key = "thinking" if part.get("thought") else "text"
+            if (
+                position == 0
+                and key == self._last_stream_key
+                and self._last_stream_index is not None
+            ):
+                return self._last_stream_index
+        elif isinstance(part.get("audioTranscription"), dict):
+            key = "audioTranscription"
             if (
                 position == 0
                 and key == self._last_stream_key
@@ -239,6 +348,16 @@ class _ToHub:
                 ),
                 structured_content=payload,
                 blocks=nested,
+                native=dict(part),
+                index=index,
+                source=SOURCE,
+            )
+
+        transcription = part.get("audioTranscription")
+        if isinstance(transcription, dict):
+            text = transcription.get("text")
+            return AudioBlock(
+                transcript=text if isinstance(text, str) else None,
                 native=dict(part),
                 index=index,
                 source=SOURCE,
@@ -389,6 +508,7 @@ class GenerateContentAdapter:
     """
 
     name = SOURCE
+    parameter_family = "generate_content"
 
     def __init__(self, *, model: str = "", api_key: str = "", version: str = "v1beta") -> None:
         self.model = model
@@ -427,12 +547,13 @@ class GenerateContentAdapter:
                 continue
             contents.extend(self._contents(message.role, message.content, lowerer, call_names))
 
-        params = dict(request.params)
+        params = request.parameters_for(self.parameter_family, vendor_name=self.name)
         body: dict[str, Any] = {"contents": contents}
         if system:
             body["systemInstruction"] = {"parts": [{"text": "\n\n".join(system)}]}
-        if request.tools:
-            body["tools"] = self._tools(request.tools)
+        tools = self._tools(request.tools)
+        if tools:
+            body["tools"] = tools
 
         # 생성 파라미터가 generationConfig 안에 들어간다. 다른 셋은 최상위다.
         config = dict(params.pop("generationConfig", {}) or {})
@@ -475,6 +596,10 @@ class GenerateContentAdapter:
 
         default_role = "model" if role == "assistant" else "user"
         for block in blocks:
+            if isinstance(block, ToolUseBlock | ToolResultBlock) and not can_replay_client_tool(
+                block, self.name
+            ):
+                continue
             if isinstance(block, ToolUseBlock):
                 block_role = "model"
                 if block.id and block.name:
@@ -500,12 +625,14 @@ class GenerateContentAdapter:
         plain: list[ContentBlock] = []
 
         def flush_plain() -> None:
-            text = lowerer.lower_text(plain)
+            text_parts = lowerer.lower_text_parts(plain)
             plain.clear()
-            if text:
+            for text in text_parts:
                 parts.append({"text": text})
 
         for block in blocks:
+            if has_opaque_media_reference(block):
+                continue
             if isinstance(block, ToolResultBlock):
                 flush_plain()
                 parts.append(self._function_response(block, call_names))
@@ -544,7 +671,11 @@ class GenerateContentAdapter:
         function_response: dict[str, Any] = {"name": name, "response": response}
         if block.tool_use_id:
             function_response["id"] = block.tool_use_id
-        nested = [as_gemini_part(part) for part in block.blocks if isinstance(part, ContentBlock)]
+        nested = [
+            as_gemini_part(part)
+            for part in block.blocks
+            if isinstance(part, ContentBlock) and not has_opaque_media_reference(part)
+        ]
         rendered = [part for part in nested if part is not None]
         if rendered:
             function_response["parts"] = rendered
@@ -557,6 +688,8 @@ class GenerateContentAdapter:
             wire = tool.native_for(self.name)
             if wire is not None:
                 native.append(wire)
+                continue
+            if tool.vendor is not None:
                 continue
             declarations.append(
                 {

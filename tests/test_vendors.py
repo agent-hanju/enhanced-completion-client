@@ -19,7 +19,6 @@ from _dense import CITED, dense_history
 
 from enhanced_completion import (
     Bridge,
-    CitationBlock,
     CiteVocabulary,
     HubMessage,
     HubResponse,
@@ -876,7 +875,7 @@ class TestHubConvergence:
     @respx.mock
     async def test_cite_vocabulary_works_on_every_vendor(self) -> None:
         """어휘 축과 벤더 축이 직교한다. 어휘 코드를 고치지 않는다."""
-        from enhanced_completion import CitationBlock, CiteVocabulary
+        from enhanced_completion import CiteVocabulary
 
         tagged = '서울은 <cite id="d1">수도</cite>다.'
         respx.post(MSG_URL).mock(
@@ -914,9 +913,11 @@ class TestHubConvergence:
             )
             result = await client.complete(["수도?"])
             assert result.text == "서울은 수도다."
-            cite = next(b for b in result.content if isinstance(b, CitationBlock))
-            assert cite.id == "d1"
-            assert result.text[cite.start_index : cite.end_index] == "수도"
+            cited = next(
+                b for b in result.content if isinstance(b, TextBlock) and b.citations
+            )
+            assert cited.text == "수도"
+            assert [(c.source, c.id) for c in cited.citations] == [("cite", "d1")]
 
     @respx.mock
     async def test_one_response_lowers_into_every_vendor_request(self) -> None:
@@ -1017,9 +1018,7 @@ class TestNativeCitations:
         ]
 
     @respx.mock
-    async def test_citations_delta_becomes_a_citation_block(self) -> None:
-        from enhanced_completion import CitationBlock
-
+    async def test_citations_delta_is_nested_in_its_text_block(self) -> None:
         payload = sse(
             (
                 "content_block_start",
@@ -1057,19 +1056,17 @@ class TestNativeCitations:
         result = await make(messages).complete(["수도?"])
 
         assert result.text == "서울이다."
-        cite = next(b for b in result.content if isinstance(b, CitationBlock))
-        assert cite.text == "서울은 대한민국의 수도다."
+        text = next(b for b in result.content if isinstance(b, TextBlock))
+        cite = text.citations[0]
+        assert cite.source == "messages"
+        assert cite.cited_text == "서울은 대한민국의 수도다."
         assert cite.document_title == "지리"
         assert cite.document_index == 0
-        assert cite.source_kind == "char_location"
+        assert cite.type == "char_location"
         assert (cite.source_start, cite.source_end) == (0, 13)
-        # 답변 좌표는 두 축이 달라 어댑터가 채우지 않는다.
-        assert (cite.start_index, cite.end_index) == (0, 0)
 
     @respx.mock
     async def test_page_location_maps_to_the_same_fields(self) -> None:
-        from enhanced_completion import CitationBlock
-
         payload = sse(
             (
                 "content_block_delta",
@@ -1091,18 +1088,17 @@ class TestNativeCitations:
             ("message_stop", {"type": "message_stop"}),
         )
         respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=payload))
-        cite = next(
-            b
-            for b in (await make(messages).complete(["x"])).content
-            if isinstance(b, CitationBlock)
-        )
-        assert cite.source_kind == "page_location"
+        response = await make(messages).complete(["x"])
+        text = next(b for b in response.content if isinstance(b, TextBlock))
+        cite = text.citations[0]
+        assert cite.source == "messages"
+        assert cite.type == "page_location"
         assert (cite.source_start, cite.source_end) == (3, 4)
 
     @respx.mock
-    async def test_both_citation_paths_reach_the_same_block_type(self) -> None:
-        """태그 경로와 네이티브 경로가 같은 허브 블록에 도달한다."""
-        from enhanced_completion import CitationBlock, CiteVocabulary
+    async def test_native_and_xml_share_container_but_keep_source_semantics(self) -> None:
+        """둘 다 TextBlock.citations이지만 원문 인용과 답변 태그를 혼동하지 않는다."""
+        from enhanced_completion import CiteVocabulary
 
         native = sse(
             (
@@ -1147,10 +1143,16 @@ class TestNativeCitations:
         )
         from_tags = await with_vocabulary.complete(["x"])
 
-        for result in (from_native, from_tags):
-            cite = next(b for b in result.content if isinstance(b, CitationBlock))
-            assert cite.type == "citation"
-            assert cite.text == "근거"
+        native_text = next(b for b in from_native.content if isinstance(b, TextBlock))
+        tagged_text = next(
+            b for b in from_tags.content if isinstance(b, TextBlock) and b.citations
+        )
+        assert native_text.text == ""
+        assert native_text.citations[0].source == "messages"
+        assert native_text.citations[0].cited_text == "근거"
+        assert tagged_text.text == "근거"
+        assert tagged_text.citations[0].source == "cite"
+        assert tagged_text.citations[0].cited_text is None
 
 
 class TestDenseLowering:
@@ -1205,17 +1207,14 @@ class TestDenseLowering:
         # 문서는 평문이라 본문 태그로 내려간다. base64나 URI면 inlineData/fileData로 간다.
         assert '<document id="d1">' in rendered
 
-    def test_citation_indices_survive_the_round_trip(self) -> None:
-        """되쓴 문자열을 다시 올리면 같은 인용이 나온다."""
+    def test_cited_text_block_survives_the_round_trip(self) -> None:
+        """되쓴 문자열을 다시 올리면 같은 cited TextBlock이 나온다."""
         vocabulary = CiteVocabulary()
         body = self._bridge(messages).build_request(dense_history())
         turns = body["messages"]
         assert isinstance(turns, list)
-        answer = next(
-            str(t["content"])
-            for t in turns
-            if isinstance(t.get("content"), str) and "<cite" in t["content"]
-        )
+        turn = next(t for t in turns if "<cite" in text_of(t))
+        answer = text_of(turn)
 
         mapper = vocabulary.lift_mapper()
         deltas = [
@@ -1226,9 +1225,8 @@ class TestDenseLowering:
         for delta in deltas:
             merger.apply(delta)
         merged = merger.build()
-        cites = [b for b in merged.content if isinstance(b, CitationBlock)]
-        assert [(c.id, c.text) for c in cites] == [("d1", CITED)]
-        assert merged.text[cites[0].start_index : cites[0].end_index] == CITED
+        cited = [b for b in merged.content if isinstance(b, TextBlock) and b.citations]
+        assert [(b.citations[0].id, b.text) for b in cited] == [("d1", CITED)]
 
     def test_tool_results_land_in_each_vendor_shape(self) -> None:
         """도구 결과가 실리는 자리가 벤더마다 다르다.

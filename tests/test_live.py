@@ -25,7 +25,6 @@ import pytest
 
 from enhanced_completion import (
     Bridge,
-    CitationBlock,
     CiteVocabulary,
     HubMessage,
     HubResponse,
@@ -64,8 +63,8 @@ NO_THINKING: dict[str, object] = {"chat_template_kwargs": {"enable_thinking": Fa
 REASONING_BUDGET = 600
 
 
-def _relift(vocabulary: CiteVocabulary, text: str) -> list[CitationBlock]:
-    """되쓴 문자열을 다시 올려서 인용 블록을 꺼낸다.
+def _relift(vocabulary: CiteVocabulary, text: str) -> list[TextBlock]:
+    """되쓴 문자열을 다시 올려서 인용이 붙은 본문 블록을 꺼낸다.
 
     태그 문자열이 들어 있는지만 보면 태그는 맞는데 위치가 틀린 경우를 놓친다. 다시 올려
     같은 블록이 나오는 것이 "제대로 직렬화됐다"의 가장 강한 형태다.
@@ -75,7 +74,11 @@ def _relift(vocabulary: CiteVocabulary, text: str) -> list[CitationBlock]:
     merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
     for delta in deltas:
         merger.apply(delta)
-    return [b for b in merger.build().content if isinstance(b, CitationBlock)]
+    return [
+        b
+        for b in merger.build().content
+        if isinstance(b, TextBlock) and b.citations
+    ]
 
 
 def _bridge(client: httpx.AsyncClient) -> Bridge:
@@ -236,7 +239,9 @@ class TestLiveStreaming:
                 history, max_tokens=SHORT, temperature=0.0, **NO_THINKING
             )
 
-        cites = [b for b in first.content if isinstance(b, CitationBlock)]
+        cited = [
+            b for b in first.content if isinstance(b, TextBlock) and b.citations
+        ]
         assistant = body["messages"][1]
         assert isinstance(assistant, dict)
         lowered = assistant["content"]
@@ -244,30 +249,31 @@ class TestLiveStreaming:
 
         print(f"\n[live] first={first.text!r}")
         print(f"[live] blocks={[b.type for b in first.content]}")
-        for cite in cites:
-            print(f"[live] cite id={cite.id!r} [{cite.start_index}:{cite.end_index}]")
+        for block in cited:
+            for citation in block.citations:
+                print(f"[live] cite id={citation.id!r} text={block.text!r}")
         print(f"[live] lowered={lowered!r}")
         print(f"[live] second={second.text!r}")
 
         assert second.text.strip(), "되쓴 이력을 실은 두 번째 턴이 빈 답을 냈다"
         assert assistant["role"] == "assistant"
 
-        if not cites:
+        if not cited:
             pytest.skip("모델이 인용 태그를 쓰지 않았다. 프롬프트 준수 문제이며 파서 문제가 아니다")
 
-        # 1. 인덱스가 본문 위치를 가리킨다. 두 경로가 같은 커서를 공유한다는 증거다.
-        for cite in cites:
-            assert first.text[cite.start_index : cite.end_index] == cite.text
-
-        # 2, 3.
-        for cite in cites:
-            assert cite.text in first.text
-            assert f'<cite id="{cite.id}">{cite.text}</cite>' in lowered
+        # 1, 2, 3. 태그가 감싼 답변 구간은 부모 TextBlock에 남는다.
+        for block in cited:
+            assert block.text in first.text
+            for citation in block.citations:
+                assert citation.source == "cite"
+                assert f'<cite id="{citation.id}">{block.text}</cite>' in lowered
 
         # 4. 되쓴 문자열을 다시 올리면 같은 블록이 나온다.
         relifted = _relift(vocabulary, lowered)
-        assert [(c.id, c.text) for c in relifted] == [(c.id, c.text) for c in cites]
-        print(f"[live] relifted={[(c.id, c.text) for c in relifted]}")
+        expected = [(b.text, [c.id for c in b.citations]) for b in cited]
+        actual = [(b.text, [c.id for c in b.citations]) for b in relifted]
+        assert actual == expected
+        print(f"[live] relifted={actual}")
 
     async def test_tool_call_shape(self) -> None:
         from enhanced_completion import ToolDefinition, ToolUseBlock

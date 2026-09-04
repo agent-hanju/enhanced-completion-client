@@ -17,11 +17,16 @@
 from __future__ import annotations
 
 from .blocks import (
+    AnnotationBlock,
     AudioBlock,
     Block,
+    Citation,
     CitationBlock,
     ContentBlock,
     DocumentBlock,
+    GroundingBlock,
+    GroundingSource,
+    GroundingSupport,
     ImageBlock,
     ServerToolBlock,
     TextBlock,
@@ -43,6 +48,16 @@ from .errors import (
 from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition, Usage
 from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
+from .parameters import (
+    AgentParameters,
+    ChatCompletionsParameters,
+    GenerateContentParameters,
+    Hyperparameters,
+    MessagesParameters,
+    OutputFormat,
+    ResponsesParameters,
+    ToolChoice,
+)
 from .transport.sse import SseFrame, SseParser
 from .vendors.base import Lowerer, VendorAdapter
 from .vocabularies import CiteVocabulary, cite_schema
@@ -51,10 +66,13 @@ from .vocabulary import Vocabulary
 __version__ = "0.1.0"
 
 __all__ = [
+    "AgentParameters",
+    "AnnotationBlock",
     "AsyncStream",
     "AudioBlock",
     "Block",
     "Bridge",
+    "Citation",
     "CitationBlock",
     "CiteVocabulary",
     "ContentSchema",
@@ -66,6 +84,9 @@ __all__ = [
     "HubMessage",
     "HubRequest",
     "HubResponse",
+    "GroundingBlock",
+    "GroundingSource",
+    "GroundingSupport",
     "ImageBlock",
     "Lowerer",
     "MappingError",
@@ -96,4 +117,11 @@ __all__ = [
     "identity_mapper",
     "register_block",
     "registered_blocks",
+    "ChatCompletionsParameters",
+    "GenerateContentParameters",
+    "Hyperparameters",
+    "MessagesParameters",
+    "OutputFormat",
+    "ResponsesParameters",
+    "ToolChoice",
 ]

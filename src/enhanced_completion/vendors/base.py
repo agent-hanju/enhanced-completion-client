@@ -27,6 +27,10 @@ class Lowerer(Protocol):
         """블록 리스트를 하나의 text로 만든다."""
         ...
 
+    def lower_text_parts(self, blocks: Any) -> list[str]:
+        """블록 경계를 유지한 요청 text part 목록을 만든다."""
+        ...
+
 
 @runtime_checkable
 class VendorAdapter(Protocol):
@@ -35,15 +39,17 @@ class VendorAdapter(Protocol):
     name: str
     """진단과 블록 ``source`` 태그에 쓰는 이름."""
 
+    parameter_family: str
+    """공통 Hyperparameters를 투영할 표준 API 계열 이름."""
+
     path: str
     """base_url에 붙일 경로."""
 
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
         """허브 요청을 이 벤더의 wire body로 만든다.
 
-        ``request.params``의 알 수 없는 이름은 버리지 않고 그대로 싣는다. 서버가 새 필드를
-        추가해도 라이브러리를 다시 배포하지 않기 위해서다. 다만 한쪽 벤더의 확장을 다른 쪽에
-        보내면 요청이 통째로 거절되므로, 확장을 넣는 판단은 어댑터가 한다.
+        ``request.hyperparameters``의 공통 필드는 이 어댑터 계열에 맞게 투영되고, 벤더별
+        섹션만 선택된다. ``request.params``는 구 버전 호출 호환을 위한 마지막 덮어쓰기다.
         """
         ...
 

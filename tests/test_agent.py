@@ -359,7 +359,7 @@ class TestVocabularyInterop:
     @respx.mock
     async def test_cite_vocabulary_works_over_agent_stream(self) -> None:
         """어휘 축과 벤더 축이 직교한다. 어휘를 고치지 않고 벤더만 갈아끼운다."""
-        from enhanced_completion import CitationBlock, CiteVocabulary
+        from enhanced_completion import CiteVocabulary
 
         payload = frames(
             event("answer", {"content": '서울은 <cite id="d1">'}),
@@ -374,9 +374,11 @@ class TestVocabularyInterop:
         )
         result = await client.complete(["수도?"])
         assert result.text == "서울은 수도다."
-        cite = next(b for b in result.content if isinstance(b, CitationBlock))
-        assert cite.id == "d1"
-        assert result.text[cite.start_index : cite.end_index] == "수도"
+        cited = next(
+            b for b in result.content if isinstance(b, TextBlock) and b.citations
+        )
+        assert cited.text == "수도"
+        assert [(c.source, c.id) for c in cited.citations] == [("cite", "d1")]
 
     @respx.mock
     async def test_text_block_index_is_stable_across_aliases(self) -> None:

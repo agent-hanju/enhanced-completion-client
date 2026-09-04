@@ -13,9 +13,11 @@ import json
 from typing import Any
 
 from ..blocks import (
+    AnnotationBlock,
     AudioBlock,
-    CitationBlock,
     ContentBlock,
+    DocumentBlock,
+    ImageBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -29,7 +31,8 @@ from ..mapper import StreamMapper
 from ..transport.sse import SseFrame
 from .base import Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_chat
-from .parts import as_chat_completions_part
+from .parts import as_chat_completions_part, has_opaque_media_reference
+from .tool_policy import can_replay_client_tool
 
 __all__ = ["ChatCompletionsAdapter", "chat_completions"]
 
@@ -56,6 +59,7 @@ class _ToHub:
     def __init__(self, source: str) -> None:
         self._source = source
         self._refusal_started = False
+        self._next_annotation = 0
 
     def map(self, chunk: dict[str, Any]) -> list[HubResponse]:
         choices = chunk.get("choices") or []
@@ -103,7 +107,7 @@ class _ToHub:
 
         for annotation in delta.get("annotations") or []:
             if isinstance(annotation, dict):
-                blocks.append(self._citation(annotation))
+                blocks.append(self._annotation(annotation))
 
         for call in delta.get("tool_calls") or []:
             if not isinstance(call, dict):
@@ -152,25 +156,34 @@ class _ToHub:
             fields["input_json"] = arguments
         return ToolUseBlock(**fields)
 
-    def _citation(self, annotation: dict[str, Any]) -> CitationBlock:
+    def _annotation(self, annotation: dict[str, Any]) -> AnnotationBlock:
         detail = annotation.get("url_citation")
         if not isinstance(detail, dict):
             detail = annotation
+        annotation_index = self._next_annotation
+        self._next_annotation += 1
         fields: dict[str, Any] = {
             "source": self._source,
-            "source_kind": str(annotation.get("type") or "annotation"),
+            "annotation_index": annotation_index,
+            "target_index": self.TEXT_INDEX,
+            "kind": str(annotation.get("type") or "annotation"),
             "native": dict(annotation),
         }
         url = detail.get("url")
         title = detail.get("title")
         if isinstance(url, str):
             fields["id"] = url
+            fields["uri"] = url
         if isinstance(title, str):
-            fields["document_title"] = title
+            fields["title"] = title
+        file_id = detail.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            fields["file_id"] = file_id
+            fields.setdefault("id", file_id)
         for key in ("start_index", "end_index"):
             if isinstance(detail.get(key), int):
                 fields[key] = detail[key]
-        return CitationBlock(**fields)
+        return AnnotationBlock(**fields)
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
@@ -186,6 +199,7 @@ class ChatCompletionsAdapter:
     """``POST {base_url}/v1/chat/completions``."""
 
     path = "/v1/chat/completions"
+    parameter_family = "chat_completions"
 
     def __init__(
         self,
@@ -202,9 +216,15 @@ class ChatCompletionsAdapter:
             "messages": self._messages(request.messages, lowerer),
             "stream": True,
         }
-        if request.tools:
-            body["tools"] = [self._tool_definition(t) for t in request.tools]
-        for key, value in request.params.items():
+        tools = [
+            definition
+            for tool in request.tools
+            if (definition := self._tool_definition(tool)) is not None
+        ]
+        if tools:
+            body["tools"] = tools
+        params = request.parameters_for(self.parameter_family, vendor_name=self.name)
+        for key, value in params.items():
             if key in _RESERVED:
                 continue
             body[key] = value
@@ -244,6 +264,8 @@ class ChatCompletionsAdapter:
                 if not isinstance(block, ToolResultBlock):
                     pending.append(block)
                     continue
+                if not can_replay_client_tool(block, self.name):
+                    continue
                 wire = self._message(message.role, pending, lowerer)
                 if wire is not None:
                     out.append(wire)
@@ -263,28 +285,28 @@ class ChatCompletionsAdapter:
     def _message(
         self, role: str, blocks: list[ContentBlock], lowerer: Lowerer
     ) -> dict[str, Any] | None:
-        tool_calls = [b for b in blocks if isinstance(b, ToolUseBlock)]
+        tool_calls = [
+            b
+            for b in blocks
+            if isinstance(b, ToolUseBlock) and can_replay_client_tool(b, self.name)
+        ]
         reasoning = [
             b.thinking
             for b in blocks
             if isinstance(b, ThinkingBlock) and b.source == self.name and self.reasoning_input_field
         ]
-        audio_refs = [
-            block.file_id
-            for block in blocks
-            if isinstance(block, AudioBlock) and block.source == self.name and block.file_id
-        ]
-
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
 
         def flush_plain() -> None:
-            text = lowerer.lower_text(plain)
+            text_parts = lowerer.lower_text_parts(plain)
             plain.clear()
-            if text:
+            for text in text_parts:
                 parts.append({"type": "text", "text": text})
 
         for block in blocks:
+            if has_opaque_media_reference(block):
+                continue
             if isinstance(block, ToolUseBlock):
                 continue
             if isinstance(block, ThinkingBlock):
@@ -294,6 +316,13 @@ class ChatCompletionsAdapter:
                 continue
             if isinstance(block, AudioBlock) and role == "assistant":
                 # Chat의 이전 assistant audio는 입력 Part가 아니라 audio ID 참조다.
+                continue
+            if isinstance(block, ImageBlock) and role == "assistant":
+                # assistant content는 text/refusal만 허용한다. image_url은 user 입력 전용이다.
+                continue
+            if isinstance(block, DocumentBlock) and role == "assistant":
+                # file Part도 user 입력 전용이다. 남길 수 있는 설명만 text fallback으로 보낸다.
+                plain.append(block)
                 continue
             if (
                 isinstance(block, ServerToolBlock | VendorBlock)
@@ -311,7 +340,7 @@ class ChatCompletionsAdapter:
             parts.append(part)
         flush_plain()
 
-        if not parts and not tool_calls and not reasoning and not audio_refs:
+        if not parts and not tool_calls and not reasoning:
             return None
         wire: dict[str, Any] = {"role": role}
         if parts:
@@ -319,19 +348,20 @@ class ChatCompletionsAdapter:
                 wire["content"] = parts[0]["text"]
             else:
                 wire["content"] = parts
-        elif tool_calls or audio_refs:
+        elif tool_calls:
             wire["content"] = None
         if tool_calls:
             wire["tool_calls"] = [self._tool_call(block) for block in tool_calls]
         if reasoning and self.reasoning_input_field:
             wire[self.reasoning_input_field] = "".join(reasoning)
-        if audio_refs:
-            wire["audio"] = {"id": audio_refs[-1]}
         return wire
 
     def _tool_call(self, block: ToolUseBlock) -> dict[str, Any]:
         if block.source == self.name and block.native:
             call = dict(block.native)
+            # ``index`` identifies a tool-call delta inside a streamed response.
+            # It is not part of an assistant tool call accepted in request history.
+            call.pop("index", None)
         else:
             call = {"id": block.id, "type": block.kind}
         if block.kind == "custom":
@@ -343,17 +373,23 @@ class ChatCompletionsAdapter:
 
     @staticmethod
     def _tool_result_text(block: ToolResultBlock, lowerer: Lowerer) -> str:
-        nested = lowerer.lower_text(block.blocks)
+        nested = lowerer.lower_text(
+            b
+            for b in block.blocks
+            if not isinstance(b, ContentBlock) or not has_opaque_media_reference(b)
+        )
         if block.content and nested:
             return f"{block.content}\n{nested}"
         if block.structured_content is not None:
             return json.dumps(block.structured_content, ensure_ascii=False)
         return block.content or nested
 
-    def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any]:
+    def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any] | None:
         native = tool.native_for(self.name)
         if native is not None:
             return native
+        if tool.vendor is not None:
+            return None
         return {
             "type": "function",
             "function": {

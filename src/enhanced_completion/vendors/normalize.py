@@ -1,6 +1,6 @@
 """허브 정규형. 값의 어휘를 Anthropic Messages로 모은다.
 
-``streambind-base``의 세 매퍼가 확립한 규칙이다. 자세한 표는 ``docs/Conversion-Rules.md``에
+``streambind-base``의 세 매퍼가 확립한 규칙이다. 자세한 표는 ``docs/Support-Matrix.md``에
 있다.
 
 **타입만 맞추고 값을 벤더별로 흘려보내면 허브가 아니다.** 소비 앱이 ``stop_reason``을 읽으려고
