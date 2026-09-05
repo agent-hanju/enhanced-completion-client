@@ -1,36 +1,13 @@
-# Gradle
-.gradle/
-build/
-
-# IDE - IntelliJ IDEA
+# IDE - JetBrains
 .idea/
-*.iml
-*.ipr
-*.iws
-out/
-
-# IDE - Eclipse
-.classpath
-.project
-.settings/
-.factorypath
-bin/
 
 # IDE - VS Code
 .vscode/
 
-# Compiled class files
-*.class
-
 # Log files
 *.log
 
-# Package files
-*.jar
-!gradle/wrapper/gradle-wrapper.jar
-*.war
-*.nar
-*.ear
+# Archives
 *.zip
 *.tar.gz
 *.rar
@@ -44,23 +21,18 @@ bin/
 ehthumbs.db
 Thumbs.db
 
-# Lombok
-.lombok/
-
 # Local configuration
 local.properties
 *.local
 .env
 !.env.example
 
-# Test output
-test-output/
-
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+build/
 dist/
 *.egg-info/
 .pytest_cache/
