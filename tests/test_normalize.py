@@ -18,6 +18,7 @@ from completion_bridge import (
     Bridge,
     Citation,
     DocumentBlock,
+    ExtractionError,
     GroundingBlock,
     HubMessage,
     ImageBlock,
@@ -697,6 +698,22 @@ class TestSerializationFallback:
         )
         assert '<content media-type="application/pdf">1장. 서울의 기후</content>' in content
         assert "unavailable" not in content
+
+    def test_extractor_failure_is_a_distinct_state(self) -> None:
+        """전처리기 실패는 전달 불가와 다르다. degrade하지 않고 명시적으로 올린다.
+
+        없는 것은 사전에 알 수 있는 설정 상태이고, 실패는 특정 콘텐츠의 런타임 오류다.
+        같은 태그로 접으면 호출자 코드의 결함이 그 뒤에 숨는다.
+        """
+
+        def boom(block: object) -> str:
+            raise RuntimeError("PDF 헤더가 깨짐")
+
+        forced = self.PDF.model_copy(update={"serialize": True})
+        with pytest.raises(ExtractionError) as info:
+            self._content(forced, extractors={"application/pdf": boom})
+        assert info.value.media_type == "application/pdf"
+        assert isinstance(info.value.__cause__, RuntimeError)
 
     def test_unsupported_audio_leaves_a_notice(self) -> None:
         """오디오 입력 채널이 없는 대상에서 조용히 버리지 않는다."""

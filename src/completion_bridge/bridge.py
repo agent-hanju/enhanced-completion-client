@@ -22,7 +22,7 @@ from .blocks import (
     ToolResultBlock,
     VendorBlock,
 )
-from .errors import MappingError, StreamNotFinished
+from .errors import ExtractionError, MappingError, StreamNotFinished
 from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition
 from .mapper import StreamMapper, compose
 from .merge import StreamMerger
@@ -183,11 +183,22 @@ class _Lowerer:
         return f"<attachments>\n{body}\n</attachments>"
 
     def _extract(self, media_type: str | None, block: ContentBlock) -> str | None:
-        """등록된 전처리기로 내용을 텍스트로 뽑는다. 없으면 ``None``."""
+        """등록된 전처리기로 내용을 텍스트로 뽑는다. 없으면 ``None``.
+
+        전처리기가 던진 예외는 :class:`ExtractionError`로 감싸 올린다. 전달 불가 표시로
+        degrade하지 않는다 — 그것은 전처리기가 없다는 설정 상태의 뜻이고, 실패를 같은 태그로
+        접으면 호출자 코드의 결함이 그 뒤에 숨는다.
+        """
         extractor = self._extractors.get(media_type or "")
         if extractor is None:
             return None
-        return extractor(block)
+        try:
+            return extractor(block)
+        except Exception as exc:
+            raise ExtractionError(
+                f"extractor for {media_type or 'unknown media type'} failed",
+                media_type=media_type,
+            ) from exc
 
     def _lower_documents(self, blocks: list[ContentBlock]) -> str:
         """네이티브 문서 채널이 없는 벤더에서 문서를 본문에 실는다.

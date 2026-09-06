@@ -8,6 +8,7 @@ from __future__ import annotations
 
 __all__ = [
     "CompletionBridgeError",
+    "ExtractionError",
     "MappingError",
     "StreamNotFinished",
     "TransportError",
@@ -33,3 +34,19 @@ class MappingError(CompletionBridgeError):
 
 class StreamNotFinished(CompletionBridgeError):
     """스트림이 끝나기 전에 최종 결과를 읽으려 했다."""
+
+
+class ExtractionError(CompletionBridgeError):
+    """등록된 전처리기가 콘텐츠를 텍스트로 뽑다가 실패했다.
+
+    전처리기가 **없는** 것과 다르다. 없는 것은 사전에 알 수 있는 설정 상태이므로 전달 불가
+    표시로 degrade한다. 실패는 특정 콘텐츠에서 난 런타임 오류이고 호출자가 고칠 수 있는
+    일이다(재인코딩, 다른 파서, 의도적 제외). 둘을 같은 태그로 뭉개면 호출자 코드의 결함이
+    전달 불가 표시 뒤에 숨는다.
+
+    대화 로직에서 잡아 해소하도록 명시적으로 올린다.
+    """
+
+    def __init__(self, message: str, *, media_type: str | None = None) -> None:
+        super().__init__(message)
+        self.media_type = media_type

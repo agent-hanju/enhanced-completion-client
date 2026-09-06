@@ -479,11 +479,27 @@ bridge = SyncBridge(
 )
 ```
 
-| 상황 | 직렬화 결과 |
+| 상황 | 결과 |
 |---|---|
 | 전처리기 등록됨 | `<document id="d1" media-type="application/pdf"><content>추출 텍스트</content></document>` |
 | 전처리기 없음 | `<document id="d1" media-type="application/pdf"><content unavailable="true">이 형식은 이 요청에 전달할 수 없다</content></document>` |
 | 평문 문서 | `<document id="d1"><content>본문</content></document>` |
+| **전처리기 실패** | `ExtractionError` |
+
+**전처리기가 없는 것과 실패한 것은 다르다.** 없는 것은 사전에 알 수 있는 설정 상태이므로 전달
+불가 표시로 degrade한다. 실패는 특정 콘텐츠에서 난 런타임 오류이고 호출자가 고칠 수 있는
+일이므로(재인코딩, 다른 파서, 의도적 제외) `ExtractionError`로 올린다. 둘을 같은 태그로 접으면
+호출자 전처리기의 결함이 전달 불가 표시 뒤에 숨는다.
+
+```python
+from completion_bridge import ExtractionError
+
+try:
+    body = bridge.build_request(messages)
+except ExtractionError as error:
+    # error.media_type으로 유형을, __cause__로 원인을 본다
+    ...
+```
 
 ### 응답 멀티모달
 

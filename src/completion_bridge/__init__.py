@@ -41,6 +41,7 @@ from .bridge import AsyncStream, Bridge, SyncBridge, SyncStream
 from .contentstream import ContentSchema, Enter, Exit, ParseEvent, TagParser, TextRun
 from .errors import (
     CompletionBridgeError,
+    ExtractionError,
     MappingError,
     StreamNotFinished,
     TransportError,
@@ -83,6 +84,7 @@ __all__ = [
     "GroundingSupport",
     "ImageBlock",
     "Lowerer",
+    "ExtractionError",
     "MappingError",
     "ParseEvent",
     "ServerToolBlock",
