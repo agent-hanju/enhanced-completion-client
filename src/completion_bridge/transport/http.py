@@ -1,5 +1,4 @@
-"""httpx 위의 SSE 전송.
-"""
+"""httpx 위의 SSE 전송."""
 
 from __future__ import annotations
 
@@ -11,7 +10,13 @@ import httpx
 from ..errors import TransportError
 from .sse import SseEvent, SseParser
 
-__all__ = ["stream_sse", "astream_sse"]
+__all__ = ["astream_sse", "stream_sse"]
+
+
+def _detail(body: bytes) -> str:
+    """본문에 프롬프트나 인증정보가 실려 올 수 있으므로 앞부분만 남긴다."""
+    return body.decode("utf-8", "replace").strip()[:500]
+
 
 def stream_sse(
     client: httpx.Client,
@@ -26,9 +31,10 @@ def stream_sse(
     with client.stream(method, url, json=json, headers=dict(headers or {})) as response:
         if not response.is_success:
             raise TransportError(
-                f"{response.request.method} {response.request.url} failed with {response.status_code}",
+                f"{response.request.method} {response.request.url} "
+                f"failed with {response.status_code}",
                 status_code=response.status_code,
-                detail=response.read().decode("utf-8", "replace")
+                detail=_detail(response.read()),
             )
         for chunk in response.iter_text():
             for event in parser.feed(chunk):
@@ -50,9 +56,10 @@ async def astream_sse(
     async with client.stream(method, url, json=json, headers=dict(headers or {})) as response:
         if not response.is_success:
             raise TransportError(
-                f"{response.request.method} {response.request.url} failed with {response.status_code}",
+                f"{response.request.method} {response.request.url} "
+                f"failed with {response.status_code}",
                 status_code=response.status_code,
-                detail=(await response.aread()).decode("utf-8", "replace")
+                detail=_detail(await response.aread()),
             )
         async for chunk in response.aiter_text():
             for event in parser.feed(chunk):

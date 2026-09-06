@@ -14,11 +14,14 @@ __all__ = ["Lowerer", "VendorAdapter"]
 @runtime_checkable
 class Lowerer(Protocol):
     """블록을 요청 text로 되쓰는 경계. :class:`Bridge`가 어휘들을 모아 구현한다."""
-    # // TODO: lower_text가 굳이 필요한 이유가 있나? chat_completions는 text part 목록 형태의 입력을 지원하는데?
 
-    # def lower_text(self, blocks: Any) -> str:
-    #     """블록 리스트를 하나의 text로 만든다."""
-    #     ...
+    def lower_text(self, blocks: Any) -> str:
+        """블록 리스트를 하나의 text로 만든다.
+
+        part 목록을 받지 못하는 자리가 쓴다. system 지시문, Responses의
+        ``EasyInputMessageParam``과 ``function_call_output.output``이 그렇다.
+        """
+        ...
 
     def lower_text_parts(self, blocks: Any) -> list[str]:
         """블록 경계를 유지한 요청 text part 목록을 만든다."""
@@ -56,6 +59,9 @@ class VendorAdapter(Protocol):
         ...
 
     def to_hub(self) -> StreamMapper[Any, Any]:
-        """벤더 chunk를 허브 델타로 바꾸는 매퍼"""
-        # // TODO: Mapper이긴 한데 혹시 iterator 인터페이스로 제공할 수 있는 방법이 따로 있나? 그 쪽이 훨씬 더 사용자에게 직관적일텐데.
+        """벤더 chunk를 허브 델타로 바꾸는 매퍼. 상태를 가지므로 매번 새 인스턴스.
+
+        ``map`` 외에 ``flush``가 필요해서 iterator가 아니다. 태그 파서가 청크 경계에 걸린
+        잔여를 배출하는 시점을 ``compose``가 순서대로 제어해야 한다.
+        """
         ...
