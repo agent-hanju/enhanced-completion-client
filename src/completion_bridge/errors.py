@@ -7,18 +7,18 @@
 from __future__ import annotations
 
 __all__ = [
-    "EnhancedCompletionError",
+    "CompletionBridgeError",
     "MappingError",
     "StreamNotFinished",
     "TransportError",
 ]
 
 
-class EnhancedCompletionError(Exception):
+class CompletionBridgeError(Exception):
     """이 라이브러리가 던지는 모든 예외의 뿌리."""
 
 
-class TransportError(EnhancedCompletionError):
+class TransportError(CompletionBridgeError):
     """HTTP 요청이 실패했다."""
 
     def __init__(self, message: str, *, status_code: int | None = None, detail: str = "") -> None:
@@ -27,9 +27,9 @@ class TransportError(EnhancedCompletionError):
         self.detail = detail
 
 
-class MappingError(EnhancedCompletionError):
+class MappingError(CompletionBridgeError):
     """벤더 프레임을 허브 델타로 바꾸는 데 실패했다."""
 
 
-class StreamNotFinished(EnhancedCompletionError):
+class StreamNotFinished(CompletionBridgeError):
     """스트림이 끝나기 전에 최종 결과를 읽으려 했다."""

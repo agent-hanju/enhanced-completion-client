@@ -51,7 +51,7 @@ class Vocabulary:
         되합쳐야 한다. 인용이 그 예다. 인용 구간의 텍스트는 본문에도 실려 있으므로 블록별로
         내리면 같은 문장이 두 번 나간다.
 
-        돌려준 리스트에서 :class:`~enhanced_completion.blocks.TextBlock`만 wire에 실린다.
+        돌려준 리스트에서 :class:`~completion_bridge.blocks.TextBlock`만 wire에 실린다.
         아무 어휘도 가져가지 않은 블록은 생략된다. 다른 벤더로 옮길 수 없는 추론 블록이 그
         경로로 조용히 빠진다.
 
