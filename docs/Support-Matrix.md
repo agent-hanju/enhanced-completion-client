@@ -33,7 +33,7 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 | 사용자 정의 block/vocabulary 확장 | 지원 | 런타임 등록, stream lifting, request lowering 왕복 테스트 |
 | generic function call/result 교차 변환 | 4/4 | 여러 ReAct 턴 포함 |
 | stateless web search native 정의 | 3/3 | Messages, Responses, GenerateContent에 명시적으로 전달 |
-| 환경 의존 client tool 교차 변환 | 0/4 | 응답은 파싱하지만 공통 기능으로 제공하지 않음 |
+| 환경 의존 client tool 교차 변환 | 4/4 | 실행 가능한 도구가 아니라 이력 기록으로 옮긴다. [변환표](../README.md#벤더-api-내장-도구-변환표) 참조 |
 | image 입력 | 4/4 | inline base64 또는 URL; `file_id`는 거부 |
 | document 입력 | 4/4 | native file/document 또는 평문 fallback |
 | audio 입력 | 2/4 | Chat Completions/Gemini 지원; Anthropic/Responses 현재 입력 union에는 없음 |
@@ -132,6 +132,82 @@ wire 이름은 같지만 값 계약이 다른 필드는 섹션 대신 평평한 
 request에만 마지막 덮어쓰기로 적용된다. 후보 수(`n`, `candidateCount`)는 현재 Hub가 후보 하나만
 표현하므로 선언하지 않는다. `extensions`로 wire에 넣을 수는 있지만 다중 후보 응답 처리는
 별도로 구현해야 한다.
+
+### 모델별 요청 제약
+
+**브리지는 모델을 보지 않는다.** 알려진 필드를 대상 API가 소유하면 그대로 싣고, 그 값이 그
+모델에서 유효한지는 판정하지 않는다. 전파 없이 투명하게 전달하는 전략의 귀결이며, 모델 능력
+매트릭스를 코드에 넣으면 모델이 나올 때마다 조용히 낡기 때문이다. 아래는 호출자가 참고할
+레퍼런스이고, 어긋나면 벤더가 400으로 알려준다.
+
+#### Anthropic Messages
+
+| 모델 | `temperature`/`top_p`/`top_k` | `thinking.budget_tokens` | `output_config.effort` | `thinking: disabled` |
+|---|---|---|---|---|
+| Fable 5 / 5.1 | 400 | 400 | low–max | 400 |
+| Opus 5 | 400 | 400 | low–max | effort ≤ high에서만 |
+| Opus 4.8 / 4.7 | 400 | 400 | low–max | 허용 |
+| Sonnet 5 | 400 | 400 | low–max | 허용 |
+| Opus 4.6 / Sonnet 4.6 | 허용 | deprecated | low/medium/high/max (xhigh 없음) | — |
+| Opus 4.5 | 허용 | — | low/medium/high | — |
+| Sonnet 4.5 / Haiku 4.5 | 허용 | thinking에 필수 | 오류 | — |
+
+| 제약 | 적용 모델 |
+|---|---|
+| assistant prefill 400 | Fable 5/5.1, Opus 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6 |
+| 강제 `tool_choice`(`any`/`tool`) 400 | Fable 5.1, Mythos 5.1 |
+| 대화 중간 system 메시지 | Opus 5, Opus 4.8, Fable 5/5.1 — Sonnet 5는 미지원 |
+| `inference_geo` | Opus 4.6 / Sonnet 4.6 이후 |
+| `speed: "fast"` | Opus 5, Opus 4.8만. 4.7은 오류 |
+| 128K `max_tokens` | Fable 5/5.1, Opus 5, Opus 4.6/4.7/4.8, Sonnet 5, Sonnet 4.6 |
+
+추론 깊이 조절이 샘플링에서 `output_config.effort`로 옮겨간 것이 최신 모델 계열의 핵심 변화다.
+`temperature`로 결정성을 조절하던 코드는 effort로 바꿔야 한다.
+
+#### Gemini `FinishReason`
+
+허브 어휘에 1:1 대응물이 있는 셋만 옮기고 나머지 15개는 원문을 유지한다.
+
+| Gemini | 허브 | Gemini | 허브 |
+|---|---|---|---|
+| `STOP` | `end_turn` | `MALFORMED_FUNCTION_CALL` | 원문 |
+| `MAX_TOKENS` | `max_tokens` | `UNEXPECTED_TOOL_CALL` | 원문 |
+| `SAFETY` | `content_filter` | `TOO_MANY_TOOL_CALLS` | 원문 |
+| `RECITATION` | 원문 | `IMAGE_SAFETY` | 원문 |
+| `LANGUAGE` | 원문 | `IMAGE_PROHIBITED_CONTENT` | 원문 |
+| `OTHER` | 원문 | `IMAGE_RECITATION` | 원문 |
+| `BLOCKLIST` | 원문 | `IMAGE_OTHER` | 원문 |
+| `PROHIBITED_CONTENT` | 원문 | `NO_IMAGE` | 원문 |
+| `SPII` | 원문 | `FINISH_REASON_UNSPECIFIED` | 원문 |
+
+`BLOCKLIST`/`PROHIBITED_CONTENT`/`SPII` 계열을 `content_filter`로 접지 않는다. 모두 콘텐츠
+정책 정지이지만 사유가 서로 다르고, 금칙어와 PII 검출은 소비 앱이 다르게 다뤄야 한다.
+
+프롬프트 자체가 차단되면 `candidates`가 오지 않고 `promptFeedback.blockReason`에 사유가 실린다.
+이것은 `finishReason`과 다른 축이라 `HubResponse.block_reason`으로 따로 받는다.
+
+#### OpenAI Responses
+
+| 필드 | 제약 |
+|---|---|
+| `reasoning` | gpt-5 · o-series 전용 |
+| `prompt_cache_options` | gpt-5.6 이후 |
+| `prompt_cache_retention` | deprecated. `prompt_cache_options.ttl` 사용 |
+| `previous_response_id` | `conversation`과 **동시 사용 불가** |
+| `user` | deprecated. `safety_identifier`와 `prompt_cache_key`가 대체 |
+| `logprobs` | **없다.** `include`에 `message.output_text.logprobs`를 넣고 `top_logprobs`로 개수를 정한다 |
+| `stop`, `presence_penalty`, `frequency_penalty`, `seed`, `logit_bias`, `top_k` | 없다 |
+| `truncation` | `auto` \| `disabled` |
+| `service_tier` | `auto` \| `default` \| `flex` \| `fast` \| `priority` \| `ultrafast`. Chat·Anthropic과 값 집합이 다르다 |
+
+#### vLLM Chat Completions
+
+| 필드 | 동작 |
+|---|---|
+| `user` | 받되 **무시** |
+| `image_url.detail` | 미지원. 400인지 무시인지는 문서에 없음 |
+| `reasoning_effort` | 필요한 모델에 thinking을 자동 활성화 |
+| `chat_template_kwargs` | 키가 모델의 chat template에 종속 (`enable_thinking`, `thinking` 등) |
 
 ### 최신 공식 타입과의 차이
 
@@ -254,18 +330,24 @@ Responses API에 재생한다.
 도구별 call/result content block을 **파싱하는 것**은 도구를 **활성화하거나 실행하는 것**과
 별개다. 파서는 실제 응답과 저장 이력을 관찰할 수 있게 남겨둔다.
 
-| 기능 | 상태 | 현재 동작 |
+**활성화와 이력은 별개다.** 아래는 도구를 **켜는** 쪽 규칙이다. 이미 실행된 도구의 기록을 다른
+벤더로 **옮기는** 규칙은 [내장 도구 변환표](../README.md#벤더-api-내장-도구-변환표)에 있다.
+
+| 기능 | 활성화 | 이 API에서의 응답 수집 |
 |---|---|---|
-| Anthropic web search/fetch | 명시적 native | 정의를 요청에 통과시키고 결과를 `ServerToolBlock`으로 수집 |
-| Responses web search | 명시적 native | 정의를 요청에 통과시키고 `web_search_call`과 인용을 수집 |
-| Gemini Google Search | 명시적 native | `googleSearch` 정의를 통과시키고 grounding metadata를 수집 |
-| code/computer/shell 계열 | 원형 보존 | 명시된 경우의 call/result를 파싱하지만 공통 실행 기능으로 보증하지 않음 |
-| file search/tool search/MCP | 원형 보존 | 정의와 응답 wire를 보존하지만 ID·인증·연결 수명주기는 외부 책임 |
-| Anthropic `container_upload` | 응답만 지원 | raw와 `file_id`를 진단용 보존; 요청 재생은 명시적 오류 |
-| Responses MCP approval | 지원 | approval request를 client `ToolUseBlock`, response를 `ToolResultBlock`으로 표현 |
-| Gemini executable code/result, toolCall/toolResponse | 원형 보존 | 원래 Part와 순서를 보존 |
-| Gemini grounding/url context metadata | 부분 지원 | Hub에 보존하지만 candidate 전용이므로 요청 이력에서는 생략 |
-| server tool을 다른 벤더 client tool로 변환 | 비지원 | 실행 주체와 보안 의미가 달라 의도적으로 변환하지 않음 |
+| Anthropic web search/fetch | 명시적 native | `ServerToolBlock` |
+| Responses web search | 명시적 native | `web_search_call`과 인용 |
+| Gemini Google Search | 명시적 native | grounding metadata |
+| code/computer/shell 계열 | 명시적 native | call/result 파싱. 실행 환경과 세션은 외부 책임 |
+| file search/tool search/MCP | 명시적 native | 정의와 응답 wire 보존. ID·인증·연결 수명주기는 외부 책임 |
+| Anthropic `container_upload` | 해당 없음 | raw와 `file_id`를 진단용 보존; 요청 재생은 명시적 오류 |
+| Responses MCP approval | 명시적 native | approval request는 client `ToolUseBlock`, response는 `ToolResultBlock` |
+| Gemini executable code/result, toolCall/toolResponse | 명시적 native | 원래 Part와 순서 보존 |
+| Gemini grounding/url context metadata | 명시적 native | candidate 전용이라 같은 벤더 요청 이력에서도 생략 |
+
+**어떤 경우에도 브리지가 도구를 자동 등록하지 않는다.** 다른 벤더에서 옮겨온 가상 도구
+(`anthropic_web_search` 등)는 이력에만 존재하고 요청 `tools`에는 들어가지 않는다. 따라서 모델이
+그것을 호출할 수 없고, 옮겨진 것은 실행 능력이 아니라 기록이다.
 
 ## 파일·세션·외부 리소스 수명주기
 
@@ -314,22 +396,27 @@ inline base64 `ImageBlock`/`DocumentBlock`으로 물질화한 뒤에만 일반 c
 
 ### 실행 환경·세션 의존 도구 분류
 
-| 계열 | 활성화 | 응답 표현 | 공통 Bridge 지원 |
-|---|---|---|---|
-| 일반 function call/result | 명시적 portable tool 정의 | `ToolUseBlock`/`ToolResultBlock` | 네 API 사이 변환 지원 |
-| web search/fetch | 명시적 native 정의 | `ServerToolBlock`/grounding metadata | 벤더별 정의·결과 수집 지원, 교차 변환 없음 |
-| Responses computer/shell/apply patch | 명시적 native 정의 | 전용 call/output Item | 파싱만 보장; 실행 환경 loop 제외 |
-| Anthropic Bash/computer/text editor/browser/memory | 명시적 tool 정의 | `tool_use`/`tool_result` 및 전용 결과 block | 파싱만 보장; persistent 환경 제외 |
-| Anthropic/Responses server code execution | 명시적 native 정의 | code/container Item·block | 결과 파싱; container와 산출물 수명주기 제외 |
-| Gemini computer use | 명시적 native 정의 | action `functionCall`과 screenshot 이력 | UI action loop 제외 |
-| Gemini built-in code execution | 명시적 native 정의 | `executableCode`/`codeExecutionResult` Part | 결과 파싱; 실행 환경 제외 |
-| file search/tool search | 명시적 native 정의와 원격 리소스 | 전용 Item·block | file/vector-store ID 때문에 normalized 지원 제외 |
-| MCP | 명시적 native 정의와 인증 | MCP call/result/approval | 연결·인증·원격 상태 제외 |
+도구를 **다시 호출 가능하게 만드는 것**과 **호출 기록을 옮기는 것**은 다르다. 아래 "실행 재개"
+열이 전자, "이력 이동"이 후자다.
 
-computer use나 지속 shell을 타 벤더의 평범한 function call로 바꾸지 않는 이유는 좌표계, 현재
-화면, working directory, mount, 설치 패키지, 권한과 이전 명령의 side effect를 함께 옮길 수 없기
-때문이다. `ToolUseBlock.kind="function"`인 일반 함수만 교차 변환한다. 이러한 전용 content
-block의 parser를 유지해도 요청 `tools`에는 아무것도 자동 추가되지 않는다.
+| 계열 | 활성화 | 응답 표현 | 실행 재개 | 이력 이동 |
+|---|---|---|---|---|
+| 일반 function call/result | 명시적 portable tool 정의 | `ToolUseBlock`/`ToolResultBlock` | 지원 | 그대로 교차 변환 |
+| web search/fetch | 명시적 native 정의 | `ServerToolBlock`/grounding metadata | 대상 벤더 native 정의 필요 | 가상 도구 |
+| Responses computer/shell/apply patch | 명시적 native 정의 | 전용 call/output Item | 제외 | 가상 도구 |
+| Anthropic Bash/computer/text editor/browser/memory | 명시적 tool 정의 | `tool_use`/`tool_result` 및 전용 결과 block | 제외 | 가상 도구 |
+| Anthropic/Responses server code execution | 명시적 native 정의 | code/container Item·block | 제외 | 가상 도구 |
+| Gemini computer use | 명시적 native 정의 | action `functionCall`과 screenshot 이력 | 제외 | 가상 도구 |
+| Gemini built-in code execution | 명시적 native 정의 | `executableCode`/`codeExecutionResult` Part | 제외 | 가상 도구 |
+| file search/tool search | 명시적 native 정의와 원격 리소스 | 전용 Item·block | 제외 | 가상 도구 |
+| MCP | 명시적 native 정의와 인증 | MCP call/result/approval | 연결·인증 필요 | 가상 도구 |
+| Gemini grounding/url context | 명시적 native 정의 | candidate metadata | 제외 | 직렬화 (쌍 없음) |
+
+**"실행 재개 제외"의 근거는 이력 이동에 적용되지 않는다.** 좌표계, 현재 화면, working directory,
+mount, 설치 패키지, 권한, 이전 명령의 side effect를 옮길 수 없다는 것은 그 도구를 대상 벤더에서
+**다시 호출할 수 있게 만들 때**의 제약이다. 가상 도구는 요청 `tools`에 등록되지 않으므로 모델이
+호출할 수 없고, 옮겨지는 것은 "이렇게 호출되어 이런 결과가 나왔다"는 사실뿐이다. 어떤 경로로도
+요청 `tools`에 자동 추가되는 것은 없다.
 
 ## Content block의 반복과 식별
 
