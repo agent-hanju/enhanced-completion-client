@@ -133,36 +133,17 @@ request에만 마지막 덮어쓰기로 적용된다. 후보 수(`n`, `candidate
 표현하므로 선언하지 않는다. `extensions`로 wire에 넣을 수는 있지만 다중 후보 응답 처리는
 별도로 구현해야 한다.
 
-### 모델별 요청 제약
+### 필드 유효성은 판정하지 않는다
 
-**브리지는 모델을 보지 않는다.** 알려진 필드를 대상 API가 소유하면 그대로 싣고, 그 값이 그
-모델에서 유효한지는 판정하지 않는다. 전파 없이 투명하게 전달하는 전략의 귀결이며, 모델 능력
-매트릭스를 코드에 넣으면 모델이 나올 때마다 조용히 낡기 때문이다. 아래는 호출자가 참고할
-레퍼런스이고, 어긋나면 벤더가 400으로 알려준다.
+**브리지는 모델을 보지 않는다.** 대상 API가 소유한 필드는 그대로 싣고, 그 값이 그 모델에서
+유효한지는 판정하지 않는다. 전파 없이 투명하게 전달하는 전략의 귀결이다.
 
-#### Anthropic Messages
+같은 API라도 모델에 따라 받는 필드와 값 범위가 다르다. 어떤 계열은 샘플링 파라미터를 거부하고,
+어떤 값 범위는 특정 모델에서만 열리고, 어떤 필드는 beta 헤더를 함께 요구한다. 그 목록을 코드나
+이 문서에 담지 않는다 — 모델이 나올 때마다 낡고, 낡은 채로 남으면 조용히 틀린 정보가 된다.
 
-| 모델 | `temperature`/`top_p`/`top_k` | `thinking.budget_tokens` | `output_config.effort` | `thinking: disabled` |
-|---|---|---|---|---|
-| Fable 5 / 5.1 | 400 | 400 | low–max | 400 |
-| Opus 5 | 400 | 400 | low–max | effort ≤ high에서만 |
-| Opus 4.8 / 4.7 | 400 | 400 | low–max | 허용 |
-| Sonnet 5 | 400 | 400 | low–max | 허용 |
-| Opus 4.6 / Sonnet 4.6 | 허용 | deprecated | low/medium/high/max (xhigh 없음) | — |
-| Opus 4.5 | 허용 | — | low/medium/high | — |
-| Sonnet 4.5 / Haiku 4.5 | 허용 | thinking에 필수 | 오류 | — |
-
-| 제약 | 적용 모델 |
-|---|---|
-| assistant prefill 400 | Fable 5/5.1, Opus 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6 |
-| 강제 `tool_choice`(`any`/`tool`) 400 | Fable 5.1, Mythos 5.1 |
-| 대화 중간 system 메시지 | Opus 5, Opus 4.8, Fable 5/5.1 — Sonnet 5는 미지원 |
-| `inference_geo` | Opus 4.6 / Sonnet 4.6 이후 |
-| `speed: "fast"` | Opus 5, Opus 4.8만. 4.7은 오류 |
-| 128K `max_tokens` | Fable 5/5.1, Opus 5, Opus 4.6/4.7/4.8, Sonnet 5, Sonnet 4.6 |
-
-추론 깊이 조절이 샘플링에서 `output_config.effort`로 옮겨간 것이 최신 모델 계열의 핵심 변화다.
-`temperature`로 결정성을 조절하던 코드는 effort로 바꿔야 한다.
+**각 벤더의 사용 전략은 해당 API 문서를 참고한다.** 어긋나면 벤더가 400으로 알려주고, 그
+응답 본문은 `TransportError.detail`에 실린다.
 
 #### Gemini `FinishReason`
 
@@ -188,52 +169,14 @@ request에만 마지막 덮어쓰기로 적용된다. 후보 수(`n`, `candidate
 
 #### Gemini `responseFormat`
 
-`generationConfig.responseFormat`은 흩어져 있던 출력 형식 필드를 modality별로 모은 새 구조다.
-구 필드와 **공존**하며 deprecated 표기는 없다.
+`ResponseFormat` 타입 객체는 구 필드로 투영한다(`responseMimeType` + `responseJsonSchema`).
+문서가 구 필드를 deprecated로 표기하지 않았고 그쪽이 더 오래 지원되기 때문이다.
 
-```
-responseFormat: {
-  text:  { mimeType, schema }
-  audio: { mimeType, delivery, sampleRate, bitRate }
-  image: { mimeType, delivery, aspectRatio, imageSize }
-}
-```
-
-| 새 구조 | 대응하는 구 필드 |
-|---|---|
-| `responseFormat.text.mimeType` | `responseMimeType` |
-| `responseFormat.text.schema` | `responseSchema` / `responseJsonSchema` |
-| `responseFormat.audio.*` | 형식 부분은 새로 생긴 것. `speechConfig`는 음성 선택이라 별개다 |
-| `responseFormat.image.*` | `imageConfig` |
-| `text`/`audio`/`image` 키의 존재 | `responseModalities` |
-
-`ResponseFormat` 타입 객체는 **구 필드로 투영한다**(`responseMimeType` + `responseJsonSchema`).
-문서가 구 필드를 deprecated로 표기하지 않았고 그쪽이 더 오래 지원되기 때문이다. 새 구조를 쓰려면
-`gemini_response_format`에 직접 넣는다. 그 필드를 설정하면 투영이 **생략**된다 — 함께 보내면
-`responseFormat.text.mimeType`과 `responseMimeType`이 서로 모순될 수 있다.
-
-#### OpenAI Responses
-
-| 필드 | 제약 |
-|---|---|
-| `reasoning` | gpt-5 · o-series 전용 |
-| `prompt_cache_options` | gpt-5.6 이후 |
-| `prompt_cache_retention` | deprecated. `prompt_cache_options.ttl` 사용 |
-| `previous_response_id` | `conversation`과 **동시 사용 불가** |
-| `user` | deprecated. `safety_identifier`와 `prompt_cache_key`가 대체 |
-| `logprobs` | **없다.** `include`에 `message.output_text.logprobs`를 넣고 `top_logprobs`로 개수를 정한다 |
-| `stop`, `presence_penalty`, `frequency_penalty`, `seed`, `logit_bias`, `top_k` | 없다 |
-| `truncation` | `auto` \| `disabled` |
-| `service_tier` | `auto` \| `default` \| `flex` \| `fast` \| `priority` \| `ultrafast`. Chat·Anthropic과 값 집합이 다르다 |
-
-#### vLLM Chat Completions
-
-| 필드 | 동작 |
-|---|---|
-| `user` | 받되 **무시** |
-| `image_url.detail` | 미지원. 400인지 무시인지는 문서에 없음 |
-| `reasoning_effort` | 필요한 모델에 thinking을 자동 활성화 |
-| `chat_template_kwargs` | 키가 모델의 chat template에 종속 (`enable_thinking`, `thinking` 등) |
+`generationConfig.responseFormat`은 출력 형식을 modality별로 모은 새 구조이고 구 필드와
+공존한다. 그쪽을 쓰려면 `gemini_response_format`에 직접 넣는다. 그 필드를 설정하면 투영이
+**생략된다** — 브리지가 만든 `responseMimeType`이 호출자가 쓴 값과 모순될 수 있기 때문이다.
+`responseModalities`나 `imageConfig`처럼 호출자가 직접 쓴 필드끼리의 조합은 브리지가 개입하지
+않는다.
 
 ### 최신 공식 타입과의 차이
 

@@ -190,6 +190,35 @@ class TestMergeAndValidation:
         assert request["max_completion_tokens"] == 16
         assert request["temperature"] == 0.1
 
+    def test_explicit_none_clears_a_constructor_default(self) -> None:
+        """명시한 ``None``은 그 요청에서 필드를 지운다. 안 쓴 것과 구분된다."""
+        bridge = SyncBridge(
+            vendor=VLLM,
+            base_url=BASE,
+            model="m",
+            hyperparameters=Hyperparameters(temperature=0.2, max_completion_tokens=256),
+        )
+        cleared = bridge.build_request(
+            ["질문"], hyperparameters=Hyperparameters(temperature=None)
+        )
+        assert "temperature" not in cleared
+        assert cleared["max_completion_tokens"] == 256
+
+        untouched = bridge.build_request(["질문"], hyperparameters=Hyperparameters(top_p=0.9))
+        assert untouched["temperature"] == 0.2
+        assert untouched["top_p"] == 0.9
+
+    def test_explicit_none_clears_a_typed_object(self) -> None:
+        bridge = SyncBridge(
+            vendor=VLLM,
+            base_url=BASE,
+            model="m",
+            hyperparameters=Hyperparameters(response_format=ResponseFormat(type="json_object")),
+        )
+        assert "response_format" not in bridge.build_request(
+            ["질문"], hyperparameters=Hyperparameters(response_format=None)
+        )
+
     def test_legacy_keyword_is_the_final_override(self) -> None:
         """``**params``는 대상 wire body에 그대로 실린다. 키를 옮기지 않는다."""
         bridge = SyncBridge(

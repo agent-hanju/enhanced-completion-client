@@ -12,7 +12,7 @@ deprecated), Responses의 ``prompt_cache_retention``, vLLM의 ``max_tokens``가 
 정의되지 않은 이름은 검증 오류이므로 낡은 코드가 조용히 통과하지 않고 이주 지점을 알려준다.
 
 브리지는 모델을 보지 않는다. 대상 API가 소유한 필드는 그대로 싣고, 그 값이 그 모델에서
-유효한지는 판정하지 않는다. 모델별 제약은 ``docs/Support-Matrix.md``의 레퍼런스를 따른다.
+유효한지는 판정하지 않는다. 각 벤더의 사용 전략은 해당 API 문서를 따른다.
 """
 
 from __future__ import annotations
@@ -330,9 +330,21 @@ class Hyperparameters(BaseModel):
         return cls.model_validate(dict(value))
 
     def merged(self, override: Hyperparameters | Mapping[str, Any] | None) -> Hyperparameters:
+        """생성자 기본값 위에 호출별 값을 덮는다.
+
+        **명시한 ``None``은 그 요청에서 필드를 지운다.** Pydantic이 "명시한 ``None``"과
+        "쓰지 않은 것"을 ``model_fields_set``으로 구분하므로, 오른쪽에서 ``exclude_none``을
+        걸지 않는다. 그것 없이는 생성자 기본값을 호출별로 해제할 방법이 없다.
+
+        >>> defaults = Hyperparameters(temperature=0.2)
+        >>> defaults.merged(Hyperparameters(temperature=None)).temperature is None
+        True
+        >>> defaults.merged(Hyperparameters(top_p=0.9)).temperature
+        0.2
+        """
         if override is None:
             return self
-        right = self.coerce(override).model_dump(exclude_none=True, exclude_unset=True)
+        right = self.coerce(override).model_dump(exclude_unset=True)
         left = self.model_dump(exclude_none=True, exclude_unset=True)
         return type(self).model_validate(_merge(left, right))
 
