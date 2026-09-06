@@ -97,7 +97,7 @@ class TestLiveStreaming:
             bridge = _bridge(client)
             stream = bridge.stream(
                 ["한 단어로만 답하세요: 대한민국의 수도"],
-                max_tokens=SHORT,
+                max_completion_tokens=SHORT,
                 temperature=0.0,
                 **NO_THINKING,
             )
@@ -118,7 +118,7 @@ class TestLiveStreaming:
     async def test_complete_matches_stream(self) -> None:
         async with httpx.AsyncClient(timeout=300.0) as client:
             result = await _bridge(client).complete(
-                ["1+1은? 숫자만"], max_tokens=SHORT, temperature=0.0, **NO_THINKING
+                ["1+1은? 숫자만"], max_completion_tokens=SHORT, temperature=0.0, **NO_THINKING
             )
         assert result.text.strip()
         print(f"\n[live] complete={result.text!r}")
@@ -135,7 +135,7 @@ class TestLiveStreaming:
         """
         async with httpx.AsyncClient(timeout=300.0) as client:
             result = await _bridge(client).complete(
-                ["하늘은 왜 파란가?"], max_tokens=SHORT, temperature=0.0
+                ["하늘은 왜 파란가?"], max_completion_tokens=SHORT, temperature=0.0
             )
         thinking = [b for b in result.content if isinstance(b, ThinkingBlock)]
         assert thinking, "추론 블록이 없다. 필드 이름이 바뀌었는지 확인하라"
@@ -160,7 +160,7 @@ class TestLiveStreaming:
         """
         async with httpx.AsyncClient(timeout=900.0) as client:
             stream = _bridge(client).stream(
-                ["1+1은? 숫자만 답하세요."], max_tokens=REASONING_BUDGET, temperature=0.0
+                ["1+1은? 숫자만 답하세요."], max_completion_tokens=REASONING_BUDGET, temperature=0.0
             )
             deltas = [d async for d in stream]
             result = stream.result
@@ -229,14 +229,19 @@ class TestLiveStreaming:
                 vocabularies=[vocabulary],
                 http_client=client,
             )
-            first = await bridge.complete([prompt], max_tokens=160, temperature=0.0, **NO_THINKING)
+            first = await bridge.complete(
+                [prompt],
+                max_completion_tokens=160,
+                temperature=0.0,
+                **NO_THINKING,
+            )
 
             history = [prompt, HubMessage.of_response(first), "방금 답을 한 단어로 줄이면?"]
             body = bridge.build_request(history)
 
             # 5. 되쓴 이력이 실린 요청이 실제로 통한다. 400이면 여기서 터진다.
             second = await bridge.complete(
-                history, max_tokens=SHORT, temperature=0.0, **NO_THINKING
+                history, max_completion_tokens=SHORT, temperature=0.0, **NO_THINKING
             )
 
         cited = [
@@ -291,7 +296,7 @@ class TestLiveStreaming:
             result = await _bridge(client).complete(
                 ["서울 날씨 알려줘"],
                 tools=[tool],
-                max_tokens=96,
+                max_completion_tokens=96,
                 temperature=0.0,
                 **NO_THINKING,
             )
@@ -312,7 +317,9 @@ class TestLiveStreaming:
                 http_client=client,
             )
             stream = bridge.stream(
-                ["한 단어로만 답하세요: 대한민국의 수도"], max_tokens=SHORT, **NO_THINKING
+                ["한 단어로만 답하세요: 대한민국의 수도"],
+                max_completion_tokens=SHORT,
+                **NO_THINKING,
             )
             deltas = list(stream)
             result = stream.result

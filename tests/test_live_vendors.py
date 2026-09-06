@@ -26,6 +26,7 @@ from completion_bridge import (
     DocumentBlock,
     HubMessage,
     HubResponse,
+    Hyperparameters,
     ServerToolBlock,
     TextBlock,
     ToolDefinition,
@@ -73,6 +74,19 @@ WEATHER_TOOL = ToolDefinition(
 )
 
 
+
+def budget(limit: int) -> Hyperparameters:
+    """출력 예산. 필드 사이 전이가 없으므로 API별 필드를 각각 쓴다.
+
+    대상이 소유하지 않은 필드는 그 요청에서 빠지므로, 벤더를 가리지 않는 시험 코드는 셋을
+    함께 쓰는 것이 정상 사용법이다.
+    """
+    return Hyperparameters(
+        max_completion_tokens=limit,
+        max_tokens=limit,
+        max_output_tokens=limit,
+    )
+
 async def _check_stream(bridge: Bridge, label: str, **params: object) -> None:
     """공통 검증. 델타와 병합 결과가 일치하고 되쓸 수 있어야 한다."""
     stream = bridge.stream(["한 단어로만 답하세요: 대한민국의 수도"], **params)
@@ -114,7 +128,7 @@ class TestAnthropicMessages:
                 http_client=client,
                 headers={"x-api-key": key},
             )
-            await _check_stream(bridge, "messages", max_tokens=SHORT)
+            await _check_stream(bridge, "messages", hyperparameters=budget(SHORT))
 
     @skip_anthropic
     async def test_tool_call(self) -> None:
@@ -129,7 +143,7 @@ class TestAnthropicMessages:
                 headers={"x-api-key": key},
             )
             result = await bridge.complete(
-                ["서울 날씨 알려줘"], tools=[WEATHER_TOOL], max_tokens=256
+                ["서울 날씨 알려줘"], tools=[WEATHER_TOOL], hyperparameters=budget(256)
             )
         calls = [b for b in result.content if isinstance(b, ToolUseBlock)]
         print(f"\n[messages] calls={[(c.name, c.input_json) for c in calls]}")
@@ -168,7 +182,7 @@ class TestAnthropicMessages:
                 headers={"x-api-key": key},
             )
             body = bridge.build_request([message])
-            result = await bridge.complete([message], max_tokens=300)
+            result = await bridge.complete([message], hyperparameters=budget(300))
 
         # 요청: 문서가 네이티브 채널로 나가고 인용이 켜진다.
         wire = body["messages"][0]
@@ -217,7 +231,7 @@ class TestAnthropicMessages:
                 headers={"x-api-key": key},
             )
             result = await bridge.complete(
-                [vocabulary.prompt_hint() + "\n\n" + CITE_PROMPT_DOCS], max_tokens=256
+                [vocabulary.prompt_hint() + "\n\n" + CITE_PROMPT_DOCS], hyperparameters=budget(256)
             )
         cited = [
             b for b in result.content if isinstance(b, TextBlock) and b.citations
@@ -253,7 +267,7 @@ class TestAnthropicMessages:
             result = await bridge.complete(
                 ["웹 검색으로 현재 Anthropic 공식 홈페이지 제목을 확인하고 제목만 답해."],
                 tools=[web],
-                max_tokens=192,
+                hyperparameters=budget(192),
             )
         print(f"\n[server/messages] blocks={[block.type for block in result.content]}")
         assert any(isinstance(block, ServerToolBlock) for block in result.content)
@@ -339,7 +353,7 @@ class TestGemini:
                 model=model,
                 http_client=client,
             )
-            await _check_stream(bridge, "gemini", max_tokens=SHORT)
+            await _check_stream(bridge, "gemini", hyperparameters=budget(SHORT))
 
     @skip_gemini
     async def test_tool_call_arrives_complete(self) -> None:
@@ -375,7 +389,7 @@ class TestGemini:
             result = await bridge.complete(
                 ["웹 검색으로 현재 Google AI 공식 홈페이지 제목을 확인하고 제목만 답해."],
                 tools=[web],
-                max_tokens=192,
+                hyperparameters=budget(192),
             )
         print(f"\n[server/gemini] blocks={[block.type for block in result.content]}")
         assert any(isinstance(block, ServerToolBlock) for block in result.content)
@@ -404,7 +418,7 @@ class TestCrossVendor:
                 headers={"x-api-key": a_key},
             )
             first = await anthropic_bridge.complete(
-                ["한 단어로만 답하세요: 대한민국의 수도"], max_tokens=SHORT
+                ["한 단어로만 답하세요: 대한민국의 수도"], hyperparameters=budget(SHORT)
             )
 
             gemini_bridge = Bridge(
@@ -419,7 +433,7 @@ class TestCrossVendor:
                 "방금 답한 도시의 인구는 대략? 숫자만",
             ]
             body = gemini_bridge.build_request(history)
-            second = await gemini_bridge.complete(history, max_tokens=SHORT)
+            second = await gemini_bridge.complete(history, hyperparameters=budget(SHORT))
 
         print(f"\n[cross] anthropic={first.text!r}")
         print(f"[cross] gemini contents={body['contents']}")
@@ -457,7 +471,11 @@ class TestDenseInput:
                 http_client=client,
                 headers={"x-api-key": key},
             )
-            result = await bridge.complete(dense_history(), tools=[DENSE_TOOL], max_tokens=SHORT)
+            result = await bridge.complete(
+                dense_history(),
+                tools=[DENSE_TOOL],
+                hyperparameters=budget(SHORT),
+            )
         _report_dense("messages", result)
 
     @skip_gemini
@@ -472,7 +490,11 @@ class TestDenseInput:
                 vocabularies=[CiteVocabulary()],
                 http_client=client,
             )
-            result = await bridge.complete(dense_history(), tools=[DENSE_TOOL], max_tokens=SHORT)
+            result = await bridge.complete(
+                dense_history(),
+                tools=[DENSE_TOOL],
+                hyperparameters=budget(SHORT),
+            )
         _report_dense("gemini", result)
 
     @skip_responses
