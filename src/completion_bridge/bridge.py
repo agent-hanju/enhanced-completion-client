@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
+import html
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
 from .blocks import (
+    UNAVAILABLE,
+    AnnotationBlock,
     AudioBlock,
     ContentBlock,
     DocumentBlock,
+    GroundingBlock,
     ImageBlock,
     ServerToolBlock,
     TextBlock,
@@ -26,11 +30,39 @@ from .parameters import Hyperparameters
 from .transport.http import astream_sse, stream_sse
 from .transport.sse import SseEvent
 from .vendors.base import VendorAdapter
+from .vendors.tool_policy import to_portable
 from .vocabulary import Vocabulary
 
 __all__ = ["AsyncStream", "Bridge", "SyncBridge", "SyncStream"]
 
 MessageInput = HubMessage | str | Mapping[str, Any]
+#: media_type을 텍스트로 뽑는 전처리기. 등록되지 않은 유형은 전달 불가로 표시된다.
+Extractor = Callable[[Any], str | None]
+
+
+def _attrs(**pairs: object) -> str:
+    """빈 값을 뺀 XML-like 속성 문자열."""
+    rendered = [
+        f' {name}="{html.escape(str(value), quote=True)}"'
+        for name, value in pairs.items()
+        if value not in (None, "")
+    ]
+    return "".join(rendered)
+
+
+def _grounding_lines(block: GroundingBlock) -> list[str]:
+    """구간-출처 그래프를 평탄화하지 않고 두 종류의 줄로 내린다."""
+    lines = [
+        f"<source{_attrs(index=source.index, uri=source.uri, title=source.title)}/>"
+        for source in block.sources
+    ]
+    for support in block.supports:
+        refs = ",".join(str(i) for i in support.source_indices)
+        attrs = _attrs(sources=refs, start=support.start_index, end=support.end_index)
+        lines.append(f"<support{attrs}>{html.escape(support.text or '')}</support>")
+    for query in block.search_queries:
+        lines.append(f"<query>{html.escape(query)}</query>")
+    return lines
 
 
 class _Lowerer:
@@ -40,9 +72,15 @@ class _Lowerer:
     가져가지 않은 블록은 생략된다. 다른 벤더로 옮길 수 없는 추론 블록이 이 경로로 조용히 빠진다.
     """
 
-    def __init__(self, vocabularies: Sequence[Vocabulary], vendor_name: str) -> None:
+    def __init__(
+        self,
+        vocabularies: Sequence[Vocabulary],
+        vendor_name: str,
+        extractors: Mapping[str, Extractor] | None = None,
+    ) -> None:
         self._vocabularies = vocabularies
         self._vendor = vendor_name
+        self._extractors = dict(extractors or {})
 
     def lower_text(self, blocks: Any) -> str:
         return "".join(self.lower_text_parts(blocks))
@@ -58,17 +96,100 @@ class _Lowerer:
             replaced = vocabulary.lower(current)
             if replaced is not None:
                 current = list(replaced)
-        parts = [b.text for b in current if isinstance(b, TextBlock) and b.text]
+        parts = [
+            self._lower_citations(b) for b in current if isinstance(b, TextBlock) and b.text
+        ]
         documents = self._lower_documents(current)
-        if not documents:
-            return parts
-        if parts:
-            parts[0] = f"{documents}\n\n{parts[0]}"
-            return parts
-        return [documents]
+        attachments = self._lower_attachments(current)
+        references = self._lower_references(current)
+        if attachments:
+            documents = f"{documents}\n{attachments}" if documents else attachments
+        if documents:
+            if parts:
+                parts[0] = f"{documents}\n\n{parts[0]}"
+            else:
+                parts = [documents]
+        if references:
+            # 근거 목록은 그것이 가리키는 본문 뒤에 온다.
+            if parts:
+                parts[-1] = f"{parts[-1]}\n\n{references}"
+            else:
+                parts.append(references)
+        return parts
 
     @staticmethod
-    def _lower_documents(blocks: list[ContentBlock]) -> str:
+    def _lower_citations(block: TextBlock) -> str:
+        """네이티브 인용 채널이 없는 대상에서 인용 구간을 태그로 감싼다.
+
+        어휘가 가져가지 않고 남은 인용만 여기 온다. ``CiteVocabulary``는 자기 문법의 인용을
+        이미 처리하고 ``citations``를 비우므로, 남는 것은 다른 벤더의 native 인용이다. 그것을
+        조용히 버리면 답변만 남고 근거가 사라진다.
+        """
+        if not block.citations:
+            return block.text
+        first = block.citations[0]
+        marker = first.id or first.document_title or first.source or "citation"
+        return f'<cite id="{html.escape(str(marker), quote=True)}">{block.text}</cite>'
+
+    @staticmethod
+    def _lower_references(blocks: list[ContentBlock]) -> str:
+        """annotation과 grounding을 본문 뒤 참고 목록으로 내린다.
+
+        둘은 본문 구간을 감쌀 수 없다. annotation은 대상 text보다 늦게 도착할 수 있어 독립
+        블록으로 두고, grounding은 한 구간이 여러 출처에 걸리는 그래프라 단일 인용 목록으로
+        평탄화하면 관계가 사라진다. 그래서 감싸지 않고 뒤에 붙인다.
+        """
+        lines: list[str] = []
+        for block in blocks:
+            if isinstance(block, AnnotationBlock):
+                ident = block.id if block.id and block.id != block.uri else None
+                attrs = _attrs(id=ident, kind=block.kind, uri=block.uri, title=block.title)
+                if block.text:
+                    lines.append(f"<reference{attrs}>{html.escape(block.text)}</reference>")
+                else:
+                    lines.append(f"<reference{attrs}/>")
+            elif isinstance(block, GroundingBlock):
+                lines.extend(_grounding_lines(block))
+        if not lines:
+            return ""
+        body = "\n".join(lines)
+        return f"<references>\n{body}\n</references>"
+
+    def _lower_attachments(self, blocks: list[ContentBlock]) -> str:
+        """네이티브 채널이 없어 못 내려간 이미지·음성을 태그로 남긴다.
+
+        지금까지 이것들은 조용히 사라졌다. 호출자는 보냈다고 믿고 모델은 받지 못한다.
+        전처리기가 등록되어 있으면 추출 텍스트를, 없으면 전달 불가 표시를 남긴다.
+        """
+        lines: list[str] = []
+        for block in blocks:
+            if isinstance(block, ImageBlock):
+                tag, media = "image", block.media_type
+            elif isinstance(block, AudioBlock):
+                tag, media = "audio", block.media_type or (
+                    f"audio/{block.format}" if block.format else None
+                )
+            else:
+                continue
+            extracted = self._extract(media, block)
+            attrs = _attrs(**{"media-type": media})
+            if extracted is not None:
+                lines.append(f"<{tag}{attrs}>{html.escape(extracted)}</{tag}>")
+            else:
+                lines.append(f'<{tag}{attrs} unavailable="true">{UNAVAILABLE}</{tag}>')
+        if not lines:
+            return ""
+        body = "\n".join(lines)
+        return f"<attachments>\n{body}\n</attachments>"
+
+    def _extract(self, media_type: str | None, block: ContentBlock) -> str | None:
+        """등록된 전처리기로 내용을 텍스트로 뽑는다. 없으면 ``None``."""
+        extractor = self._extractors.get(media_type or "")
+        if extractor is None:
+            return None
+        return extractor(block)
+
+    def _lower_documents(self, blocks: list[ContentBlock]) -> str:
         """네이티브 문서 채널이 없는 벤더에서 문서를 본문에 실는다.
 
         허브 수준 기본 동작이다. 어휘에 맡기지 않는 이유는 사용자가 준 근거가 조용히 사라지는
@@ -83,7 +204,9 @@ class _Lowerer:
         documents = [b for b in blocks if isinstance(b, DocumentBlock)]
         if not documents:
             return ""
-        rendered = "\n".join(d.to_prompt() for d in documents)
+        rendered = "\n".join(
+            d.to_prompt(extracted=self._extract(d.media_type, d)) for d in documents
+        )
         return f"<documents>\n{rendered}\n</documents>"
 
 
@@ -259,6 +382,7 @@ class _BridgeBase:
         api_key: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
+        extractors: Mapping[str, Extractor] | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: float = 120.0,
     ) -> None:
@@ -274,7 +398,7 @@ class _BridgeBase:
         for vocabulary in self._vocabularies:
             vocabulary.register()
 
-        self._lowerer = _Lowerer(self._vocabularies, vendor.name)
+        self._lowerer = _Lowerer(self._vocabularies, vendor.name, extractors)
 
     @property
     def url(self) -> str:
@@ -292,6 +416,12 @@ class _BridgeBase:
         """전송할 wire body를 만들어 돌려준다. 진단과 통과 경로에 쓴다."""
         normalized_messages = [_coerce_message(m) for m in messages]
         _reject_remote_content_references(normalized_messages, self._vendor.name)
+        normalized_messages = [
+            message.model_copy(
+                update={"content": to_portable(message.content, self._vendor.name)}
+            )
+            for message in normalized_messages
+        ]
         request = HubRequest(
             model=model or self._model,
             messages=normalized_messages,
@@ -345,6 +475,7 @@ class Bridge(_BridgeBase):
         api_key: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
+        extractors: Mapping[str, Extractor] | None = None,
         headers: Mapping[str, str] | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 120.0,
@@ -356,6 +487,7 @@ class Bridge(_BridgeBase):
             api_key=api_key,
             hyperparameters=hyperparameters,
             vocabularies=vocabularies,
+            extractors=extractors,
             headers=headers,
             timeout=timeout,
         )
@@ -438,6 +570,7 @@ class SyncBridge(_BridgeBase):
         api_key: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
+        extractors: Mapping[str, Extractor] | None = None,
         headers: Mapping[str, str] | None = None,
         http_client: httpx.Client | None = None,
         timeout: float = 120.0,
@@ -449,6 +582,7 @@ class SyncBridge(_BridgeBase):
             api_key=api_key,
             hyperparameters=hyperparameters,
             vocabularies=vocabularies,
+            extractors=extractors,
             headers=headers,
             timeout=timeout,
         )

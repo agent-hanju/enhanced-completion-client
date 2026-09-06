@@ -19,6 +19,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SerializeAsAny, model_validator
 
 __all__ = [
+    "UNAVAILABLE",
     "AnnotationBlock",
     "AudioBlock",
     "Block",
@@ -40,6 +41,10 @@ __all__ = [
     "registered_blocks",
     "resolve_block",
 ]
+
+#: 전처리기가 없어 내용을 옮길 수 없을 때 직렬화 태그에 남기는 표시.
+#: 조용히 사라지는 것보다 전달되지 않았다는 사실이 남는 편이 낫다.
+UNAVAILABLE = "이 형식은 이 요청에 전달할 수 없다"
 
 # 병합 전략을 필드 메타로 선언할 때 쓰는 키.
 STREAM_META_KEY = "stream"
@@ -198,6 +203,8 @@ class ImageBlock(ContentBlock):
     """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
     detail: str | None = Field(default=None, json_schema_extra=_overwrite())
     """Chat Completions ``image_url.detail``. ``auto``/``low``/``high``."""
+    serialize: bool = Field(default=False, json_schema_extra=_overwrite())
+    """참이면 네이티브 채널이 있어도 텍스트로 직렬화한다."""
 
 
 class AudioBlock(ContentBlock):
@@ -212,6 +219,8 @@ class AudioBlock(ContentBlock):
     """
 
     type: Literal["audio"] = "audio"
+    serialize: bool = Field(default=False, json_schema_extra=_overwrite())
+    """참이면 네이티브 채널이 있어도 텍스트로 직렬화한다."""
     data: str | None = None
     uri: str | None = Field(default=None, json_schema_extra=_overwrite())
     format: str | None = Field(default=None, json_schema_extra=_overwrite())
@@ -325,6 +334,8 @@ class DocumentBlock(ContentBlock):
     """
 
     type: Literal["document"] = "document"
+    serialize: bool = Field(default=False, json_schema_extra=_overwrite())
+    """참이면 네이티브 채널이 있어도 텍스트로 직렬화한다."""
     id: str = Field(default="", json_schema_extra=_overwrite())
     title: str | None = Field(default=None, json_schema_extra=_overwrite())
     text: str = ""
@@ -340,7 +351,7 @@ class DocumentBlock(ContentBlock):
         """평문 본문만 있는지. 참이면 본문 태그로 내려도 무손실이다."""
         return not self.data and not self.uri and not self.file_id
 
-    def to_prompt(self) -> str:
+    def to_prompt(self, *, extracted: str | None = None) -> str:
         """네이티브 문서 채널이 없는 벤더에서 본문에 실을 형태.
 
         Java ``IDocument.toSerializedPrompt()``와 같은 모양이다. 평문이 아닌 문서는 여기로
@@ -351,9 +362,17 @@ class DocumentBlock(ContentBlock):
             parts.append(f"<title>{self.title}</title>")
         if self.is_inline_text:
             parts.append(f"<content>{self.text}</content>")
+        elif extracted is not None:
+            parts.append(f'<content media-type="{self.media_type}">{extracted}</content>')
         else:
             reference = self.uri or self.file_id or ""
-            parts.append(f'<content media-type="{self.media_type}">{reference}</content>')
+            if reference:
+                parts.append(f'<content media-type="{self.media_type}">{reference}</content>')
+            else:
+                parts.append(
+                    f'<content media-type="{self.media_type}" unavailable="true">'
+                    f"{UNAVAILABLE}</content>"
+                )
         parts.append("</document>")
         return "\n".join(parts)
 

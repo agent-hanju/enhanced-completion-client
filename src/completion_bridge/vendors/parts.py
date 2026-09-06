@@ -71,6 +71,9 @@ def _raw(block: ServerToolBlock | VendorBlock, source: str) -> dict[str, Any] | 
 
 def as_anthropic_part(block: ContentBlock) -> dict[str, Any] | None:
     """Anthropic ``ContentBlock``. 요청과 응답이 같은 유니온을 쓴다."""
+    if getattr(block, "serialize", False):
+        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
+        return None
     if isinstance(block, TextBlock) and block.source == "messages":
         part = _native(block, "messages")
         part.update({"type": "text", "text": block.text})
@@ -140,6 +143,9 @@ def _anthropic_source(
 
 def as_chat_completions_part(block: ContentBlock) -> dict[str, Any] | None:
     """vLLM OpenAI compatible Chat Completions 요청 part."""
+    if getattr(block, "serialize", False):
+        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
+        return None
     if isinstance(block, ImageBlock):
         url = block.url or (data_url(block.media_type, block.data) if block.data else None)
         if url:
@@ -170,6 +176,9 @@ def as_responses_part(block: ContentBlock) -> dict[str, Any] | None:
 
     ``ResponseInputMessageContentListParam`` 유니온은 text/image/file만 허용한다.
     """
+    if getattr(block, "serialize", False):
+        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
+        return None
     if isinstance(block, ImageBlock):
         url = block.url or (data_url(block.media_type, block.data) if block.data else None)
         if url:
@@ -191,6 +200,9 @@ def as_responses_part(block: ContentBlock) -> dict[str, Any] | None:
 
 def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
     """Gemini ``Part``는 type 없이 채워진 필드가 종류를 말한다."""
+    if getattr(block, "serialize", False):
+        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
+        return None
     if (
         isinstance(block, TextBlock)
         and block.source == "generate_content"
