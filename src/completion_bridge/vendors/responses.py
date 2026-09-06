@@ -34,7 +34,7 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
-from ..transport.sse import SseFrame
+from ..transport.sse import SseEvent
 from .base import Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_responses
 from .parts import as_responses_part, has_opaque_media_reference
@@ -939,13 +939,13 @@ class ResponsesAdapter:
             "parameters": tool.input_schema,
         }
 
-    def is_terminal(self, frame: SseFrame) -> bool:
+    def is_terminal(self, frame: SseEvent) -> bool:
         name = frame.event.strip()
         if name in TERMINAL_EVENTS:
             return True
         return self._peek_type(frame) in TERMINAL_EVENTS
 
-    def decode(self, frame: SseFrame) -> dict[str, Any] | None:
+    def decode(self, frame: SseEvent) -> dict[str, Any] | None:
         payload = frame.data.strip()
         if not payload:
             return None
@@ -960,7 +960,7 @@ class ResponsesAdapter:
         return parsed
 
     @staticmethod
-    def _peek_type(frame: SseFrame) -> str:
+    def _peek_type(frame: SseEvent) -> str:
         payload = frame.data.strip()
         if not payload:
             return ""

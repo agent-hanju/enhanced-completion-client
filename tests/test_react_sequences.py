@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from enhanced_completion import (
+from completion_bridge import (
     AnnotationBlock,
     AudioBlock,
     CitationBlock,
@@ -21,13 +21,13 @@ from enhanced_completion import (
     ToolUseBlock,
     VendorBlock,
 )
-from enhanced_completion.vendors import (
+from completion_bridge.vendors import (
     GenerateContentAdapter,
     MessagesAdapter,
     ResponsesAdapter,
     chat_completions,
 )
-from enhanced_completion.vendors.base import VendorAdapter
+from completion_bridge.vendors.base import VendorAdapter
 
 BASE = "https://react.test"
 GEMINI = GenerateContentAdapter(model="gemini-test")
@@ -45,7 +45,7 @@ def merge(adapter: VendorAdapter, events: list[dict[str, Any]]) -> HubResponse:
 
 
 def build(adapter: VendorAdapter, messages: list[HubMessage]) -> dict[str, Any]:
-    from enhanced_completion import SyncBridge
+    from completion_bridge import SyncBridge
 
     return SyncBridge(vendor=adapter, base_url=BASE, model="test").build_request(messages)
 

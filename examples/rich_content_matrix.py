@@ -7,7 +7,7 @@ from typing import Any
 
 from conversion_matrix import TARGETS, bridge, cell, conversation, table
 
-from enhanced_completion import (
+from completion_bridge import (
     AudioBlock,
     DocumentBlock,
     HubMessage,
@@ -22,8 +22,8 @@ from enhanced_completion import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from enhanced_completion.errors import MappingError
-from enhanced_completion.vendors.base import VendorAdapter
+from completion_bridge.errors import MappingError
+from completion_bridge.vendors.base import VendorAdapter
 
 
 @dataclass(frozen=True)

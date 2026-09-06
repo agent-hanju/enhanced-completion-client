@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from enhanced_completion import (
+from completion_bridge import (
     HubMessage,
     HubResponse,
     StreamMerger,
@@ -16,13 +16,13 @@ from enhanced_completion import (
     ToolDefinition,
     ToolResultBlock,
 )
-from enhanced_completion.vendors import (
+from completion_bridge.vendors import (
     ChatCompletionsAdapter,
     GenerateContentAdapter,
     MessagesAdapter,
     ResponsesAdapter,
 )
-from enhanced_completion.vendors.base import VendorAdapter
+from completion_bridge.vendors.base import VendorAdapter
 
 
 @dataclass(frozen=True)

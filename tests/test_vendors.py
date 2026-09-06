@@ -17,7 +17,7 @@ import pytest
 import respx
 from _dense import CITED, dense_history
 
-from enhanced_completion import (
+from completion_bridge import (
     Bridge,
     CiteVocabulary,
     HubMessage,
@@ -30,7 +30,7 @@ from enhanced_completion import (
     ToolDefinition,
     ToolUseBlock,
 )
-from enhanced_completion.vendors import generate_content, messages, responses
+from completion_bridge.vendors import generate_content, messages, responses
 
 BASE = "http://vendor.test"
 
@@ -875,7 +875,7 @@ class TestHubConvergence:
     @respx.mock
     async def test_cite_vocabulary_works_on_every_vendor(self) -> None:
         """어휘 축과 벤더 축이 직교한다. 어휘 코드를 고치지 않는다."""
-        from enhanced_completion import CiteVocabulary
+        from completion_bridge import CiteVocabulary
 
         tagged = '서울은 <cite id="d1">수도</cite>다.'
         respx.post(MSG_URL).mock(
@@ -968,7 +968,7 @@ class TestNativeCitations:
     """
 
     def test_document_goes_out_on_the_native_channel(self) -> None:
-        from enhanced_completion import DocumentBlock
+        from completion_bridge import DocumentBlock
 
         message = HubMessage(
             role="user",
@@ -990,7 +990,7 @@ class TestNativeCitations:
 
     def test_citations_are_all_or_nothing(self) -> None:
         """한 요청에서 섞으면 거절된다. 하나라도 켜져 있으면 전체를 켠다."""
-        from enhanced_completion import DocumentBlock
+        from completion_bridge import DocumentBlock
 
         message = HubMessage(
             role="user",
@@ -1007,7 +1007,7 @@ class TestNativeCitations:
 
     def test_document_without_native_channel_lowers_to_text(self) -> None:
         """네이티브 문서 채널이 없는 벤더에서는 본문에 태그로 내린다."""
-        from enhanced_completion import DocumentBlock
+        from completion_bridge import DocumentBlock
 
         document = DocumentBlock(id="d1", title="지리", text="서울은 수도다.")
         assert document.to_prompt().splitlines() == [
@@ -1098,7 +1098,7 @@ class TestNativeCitations:
     @respx.mock
     async def test_native_and_xml_share_container_but_keep_source_semantics(self) -> None:
         """둘 다 TextBlock.citations이지만 원문 인용과 답변 태그를 혼동하지 않는다."""
-        from enhanced_completion import CiteVocabulary
+        from completion_bridge import CiteVocabulary
 
         native = sse(
             (

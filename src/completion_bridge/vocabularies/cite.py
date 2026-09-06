@@ -1,16 +1,4 @@
-"""인용 어휘. ``<cite id="d1">본문</cite>``을 인용이 붙은 text block으로 올린다.
-
-속성형을 쓴다. 실측에서 확인한 것이 근거다. 모델은 인용 문법을 스스로 정하지 않는다.
-프롬프트가 지시하지 않으면 입력 문서의 태그를 흉내낸다. 즉 이 문법은 우리가 고르는 것이고,
-Java 초기 구현의 중첩형(``<cite><id>d1</id>본문</cite>``)보다 파서 상태가 하나 적다. 중첩형은
-``id`` 태그 안의 텍스트를 본문 인덱스에서 빼는 별도 처리가 필요하다.
-
-``common-hitl-chat``의 ``CitationAwareLlmProvider``도 속성형을 쓰므로 두 구현이 같은 어휘를
-공유한다.
-
-인용 구간은 Anthropic Messages처럼 독립된 ``TextBlock``이 되고 ``citations`` 목록에 근거가
-붙는다. 태그가 감싼 문구는 생성 답변이지 근거 원문의 ``cited_text``가 아니므로 둘을 섞지 않는다.
-"""
+"""인용 어휘. ``<cite id="d1">본문</cite>``을 인용이 붙은 text block으로 올린다."""
 
 from __future__ import annotations
 

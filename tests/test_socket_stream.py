@@ -14,8 +14,8 @@ from contextlib import asynccontextmanager
 
 import httpx
 
-from enhanced_completion import Bridge, ToolUseBlock
-from enhanced_completion.vendors import chat_completions
+from completion_bridge import Bridge, ToolUseBlock
+from completion_bridge.vendors import chat_completions
 
 
 def _delta(**fields: object) -> str:

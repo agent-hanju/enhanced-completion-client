@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from enhanced_completion import (
+from completion_bridge import (
     HubResponse,
     StreamMerger,
     TextBlock,

@@ -1,6 +1,6 @@
 """OpenAI 호환 Chat Completions 어댑터.
 
-사내 vLLM(LUXIA)이 이 규약을 쓴다. 첫 번째로 구현하는 스포크다.
+vLLM이 이 규약을 쓴다. 첫 번째로 구현하는 스포크다.
 
 이 벤더의 응답은 ``choices[0].delta``에 조각이 담기고 필드가 셋으로 갈린다. ``content``는
 본문, ``reasoning``은 추론, ``tool_calls``는 도구 호출이다. 추론 필드 이름은 vLLM 버전에 따라
@@ -28,7 +28,7 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubMessage, HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
-from ..transport.sse import SseFrame
+from ..transport.sse import SseEvent
 from .base import Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_chat
 from .parts import as_chat_completions_part, has_opaque_media_reference
@@ -38,7 +38,6 @@ __all__ = ["ChatCompletionsAdapter", "chat_completions"]
 
 DONE = "[DONE]"
 
-# 서버 소관이라 호출자가 params로 덮어쓰지 못하게 막는 이름.
 _RESERVED = frozenset({"model", "messages", "tools", "stream"})
 
 
@@ -230,10 +229,10 @@ class ChatCompletionsAdapter:
             body[key] = value
         return body
 
-    def is_terminal(self, frame: SseFrame) -> bool:
+    def is_terminal(self, frame: SseEvent) -> bool:
         return frame.data.strip() == DONE
 
-    def decode(self, frame: SseFrame) -> dict[str, Any] | None:
+    def decode(self, frame: SseEvent) -> dict[str, Any] | None:
         payload = frame.data.strip()
         if not payload or payload == DONE:
             return None

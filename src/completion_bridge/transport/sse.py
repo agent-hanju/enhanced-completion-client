@@ -1,11 +1,5 @@
-"""SSE 프레임 파서.
-
-프레임 전체를 보존하는 것이 이 모듈의 존재 이유다. Spring의 ``bodyToFlux(String)``이나 벤더
-SDK는 ``data`` 필드만 넘겨주는데, 그러면 이름 붙은 이벤트를 쓰는 서버에 대응할 수 없다.
-응답 어댑터는 필요에 따라 ``event``, ``data``, ``id``와 comment를 모두 볼 수 있어야 한다.
-
-W3C SSE 규칙을 그대로 따른다. 콜론 뒤 공백 하나만 벗기므로 ``data: x``와 ``data:x``가 같은
-값으로 파싱된다.
+"""W3C SSE 규칙에 기반한 SSE 파서. ``event``, ``data``, ``id``와 comment를 모두 지원한다.
+W3C 파싱 규칙에 따라 콜론 뒤 공백 하나만 벗기므로 ``data: x``와 ``data:x``가 같은 값으로 파싱된다.
 """
 
 from __future__ import annotations
@@ -13,15 +7,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-__all__ = ["SseFrame", "SseParser"]
+__all__ = ["SseEvent", "SseParser"]
 
 
 @dataclass(slots=True)
-class SseFrame:
-    """SSE 이벤트 하나.
-
-    주석 전용 프레임도 방출한다. 하트비트가 왔다는 사실 자체가 소비자에게 의미 있는 신호일 수
-    있고, 버리는 판단을 파서가 대신하지 않는다.
+class SseEvent:
+    """SSE 전송에서의 이벤트 하나
     """
 
     data: str = ""
@@ -32,15 +23,13 @@ class SseFrame:
 
     @property
     def is_comment_only(self) -> bool:
-        """하트비트처럼 주석만 있는 프레임인지."""
+        """하트비트처럼 주석만 있는 프레임인지 확인한다"""
         return not self.data and not self.event and not self.id and bool(self.comments)
 
 
 class SseParser:
-    """바이트/문자 조각을 프레임으로 자른다.
-
-    청크 경계가 라인 중간이나 ``\\r\\n`` 사이에 떨어져도 된다. 남은 조각을 버퍼에 들고 다음
-    입력을 기다린다.
+    """W3C SSE 규칙으로 바이트/문자 조각을 이벤트로 자르고 남은 조각을 버퍼에 보존한다
+    청크 경계가 라인 중간이나 ``\\r\\n`` 사이에 있어도 보정한다.
     """
 
     def __init__(self) -> None:
@@ -53,13 +42,13 @@ class SseParser:
         self._dirty = False
         self._pending_cr = False
 
-    def feed(self, chunk: str) -> Iterator[SseFrame]:
-        """조각을 넣고 완성된 프레임을 순서대로 돌려준다."""
+    def feed(self, chunk: str) -> Iterator[SseEvent]:
+        """조각을 넣고 완성된 이벤트를 순서대로 돌려준다."""
         if not chunk:
             return
 
         if self._pending_cr:
-            # 앞 청크가 CR로 끝났다. 이어지는 LF는 같은 줄바꿈의 일부다.
+            # 앞 청크가 CR로 끝났다면 이어지는 LF는 같은 줄바꿈의 일부이므로 무시한다.
             self._pending_cr = False
             if chunk.startswith("\n"):
                 chunk = chunk[1:]
@@ -74,17 +63,15 @@ class SseParser:
                 break
             self._buffer = rest
             if sep == "\r" and not rest:
-                # LF가 다음 청크에 올 수 있다. 판단을 미룬다.
+                # LF가 다음 청크에 올 수 있으므로 플래그를 활성화한다.
                 self._pending_cr = True
-            frame = self._consume_line(line)
-            if frame is not None:
-                yield frame
+            event = self._consume_line(line)
+            if event is not None:
+                yield event
 
-    def flush(self) -> Iterator[SseFrame]:
-        """스트림이 끝났을 때 남은 줄과 미완성 프레임을 내보낸다.
-
-        마지막 프레임이 빈 줄로 끝나지 않는 서버가 있어서 필요하다. 규격 위반이지만 실제로
-        만난다.
+    def flush(self) -> Iterator[SseEvent]:
+        """스트림이 끝났을 때 남은 줄과 미완성 이벤트 내보낸다.
+        마지막 이벤트가 빈 줄로 끝나지 않는 경우의 보정 역할을 겸한다.
         """
         if self._buffer:
             line, self._buffer = self._buffer, ""
@@ -94,25 +81,24 @@ class SseParser:
         if self._dirty:
             yield self._emit()
 
-    # ---- 내부 ----
-
     @staticmethod
     def _split_line(buffer: str) -> tuple[str, str | None, str]:
-        """첫 줄바꿈에서 자른다. 반환은 (줄, 줄바꿈 종류, 남은 것)."""
+        """첫 줄바꿈에서 자른다. 줄바꿈 종류는 \n, \r, \n\r을 인식한다.
+        반환 튜플은 (줄, 줄바꿈 종류, 남은 문자열)
+        """
         idx_n = buffer.find("\n")
         idx_r = buffer.find("\r")
 
         if idx_n == -1 and idx_r == -1:
-            return buffer, None, buffer
+            return buffer, None, buffer     # 줄바꿈 없음
         if idx_r != -1 and (idx_n == -1 or idx_r < idx_n):
-            if idx_r + 1 < len(buffer) and buffer[idx_r + 1] == "\n":
+            if idx_r + 1 < len(buffer) and buffer[idx_r + 1] == "\n":   # 줄바꿈 \r\n의 경우
                 return buffer[:idx_r], "\r\n", buffer[idx_r + 2 :]
-            return buffer[:idx_r], "\r", buffer[idx_r + 1 :]
-        return buffer[:idx_n], "\n", buffer[idx_n + 1 :]
+            return buffer[:idx_r], "\r", buffer[idx_r + 1 :]        # 줄바꿈 \r의 경우
+        return buffer[:idx_n], "\n", buffer[idx_n + 1 :]        # 줄바꿈 \n의 경우
 
-    def _consume_line(self, line: str) -> SseFrame | None:
+    def _consume_line(self, line: str) -> SseEvent | None:
         if not line:
-            # 빈 줄이 프레임 경계다.
             return self._emit() if self._dirty else None
 
         if line.startswith(":"):
@@ -125,7 +111,7 @@ class SseParser:
             # 콜론 없는 줄은 값이 빈 필드다.
             name, value = line, ""
         elif value.startswith(" "):
-            # 공백 하나만 벗긴다. 'data:x'와 'data: x'가 같아지는 지점이다.
+            # 공백 하나를 제거한다
             value = value[1:]
 
         if name == "data":
@@ -146,8 +132,8 @@ class SseParser:
         # 그 밖의 필드 이름은 규격대로 무시한다.
         return None
 
-    def _emit(self) -> SseFrame:
-        frame = SseFrame(
+    def _emit(self) -> SseEvent:
+        event = SseEvent(
             data="\n".join(self._data),
             event=self._event,
             id=self._id,
@@ -159,5 +145,5 @@ class SseParser:
         self._retry = None
         self._comments = []
         self._dirty = False
-        # id는 규격상 다음 프레임까지 유지된다. 재연결 커서로 쓰기 때문이다.
-        return frame
+        # id는 재연결 커서로 쓰기 때문에 다음 이벤트까지 유지한다.
+        return event

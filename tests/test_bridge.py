@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from enhanced_completion import (
+from completion_bridge import (
     Bridge,
     HubMessage,
     StreamNotFinished,
@@ -19,7 +19,7 @@ from enhanced_completion import (
     ToolUseBlock,
     TransportError,
 )
-from enhanced_completion.vendors import chat_completions
+from completion_bridge.vendors import chat_completions
 
 BASE = "http://llm.test"
 URL = f"{BASE}/v1/chat/completions"
@@ -111,7 +111,7 @@ class TestRequestBuilding:
 
     def test_thinking_block_is_dropped_when_lowering(self) -> None:
         """추론 블록은 발급 벤더로만 되돌릴 수 있다. 어휘가 없으면 생략된다."""
-        from enhanced_completion import ThinkingBlock
+        from completion_bridge import ThinkingBlock
 
         bridge = SyncBridge(vendor=chat_completions, base_url=BASE, model="luxia")
         message = HubMessage(

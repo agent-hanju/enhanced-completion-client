@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from enhanced_completion import (
+from completion_bridge import (
     Hyperparameters,
     OutputFormat,
     SyncBridge,
     ToolChoice,
 )
-from enhanced_completion.vendors import (
+from completion_bridge.vendors import (
     ChatCompletionsAdapter,
     generate_content,
     messages,

@@ -20,7 +20,7 @@ import httpx
 import pytest
 from _dense import DENSE_TOOL, dense_history
 
-from enhanced_completion import (
+from completion_bridge import (
     Bridge,
     CiteVocabulary,
     DocumentBlock,
@@ -31,7 +31,7 @@ from enhanced_completion import (
     ToolDefinition,
     ToolUseBlock,
 )
-from enhanced_completion.vendors import generate_content, messages, responses
+from completion_bridge.vendors import generate_content, messages, responses
 
 pytestmark = pytest.mark.live
 

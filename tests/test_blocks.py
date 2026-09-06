@@ -6,7 +6,7 @@ from typing import Literal
 
 import pytest
 
-from enhanced_completion import (
+from completion_bridge import (
     ContentBlock,
     HubResponse,
     TextBlock,

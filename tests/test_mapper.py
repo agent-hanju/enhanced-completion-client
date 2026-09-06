@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enhanced_completion import compose, identity_mapper
+from completion_bridge import compose, identity_mapper
 
 
 class Doubler:

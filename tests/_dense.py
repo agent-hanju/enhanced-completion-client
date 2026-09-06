@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from enhanced_completion import (
+from completion_bridge import (
     Citation,
     DocumentBlock,
     HubMessage,

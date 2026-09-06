@@ -12,7 +12,7 @@ import httpx
 import pytest
 import respx
 
-from enhanced_completion import (
+from completion_bridge import (
     AnnotationBlock,
     AudioBlock,
     Bridge,
@@ -24,8 +24,8 @@ from enhanced_completion import (
     ThinkingBlock,
     ToolResultBlock,
 )
-from enhanced_completion.vendors import chat_completions, generate_content, messages, responses
-from enhanced_completion.vendors.normalize import (
+from completion_bridge.vendors import chat_completions, generate_content, messages, responses
+from completion_bridge.vendors.normalize import (
     REFUSAL_PREFIX,
     normalize_role,
     stop_reason_from_chat,

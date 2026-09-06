@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from enhanced_completion import (
+from completion_bridge import (
     Bridge,
     Citation,
     CitationBlock,
@@ -20,7 +20,7 @@ from enhanced_completion import (
     TextBlock,
     ThinkingBlock,
 )
-from enhanced_completion.vendors import chat_completions
+from completion_bridge.vendors import chat_completions
 
 BASE = "http://llm.test"
 URL = f"{BASE}/v1/chat/completions"
@@ -329,7 +329,7 @@ class TestRoundTrip:
 
 class TestVocabularyContract:
     def test_block_type_is_registered(self) -> None:
-        from enhanced_completion import registered_blocks
+        from completion_bridge import registered_blocks
 
         CiteVocabulary().register()
         assert registered_blocks()["citation"] is CitationBlock

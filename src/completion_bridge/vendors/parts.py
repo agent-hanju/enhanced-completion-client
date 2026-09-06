@@ -1,23 +1,12 @@
-"""요청 방향 content part 렌더러.
-
-허브 블록을 각 벤더의 요청 part 모양으로 바꾼다. 목록과 근거는
-``docs/Support-Matrix.md``에 있다.
-
-**content block은 응답 전용이 아니다.** 요청에 넣는 종류가 따로 있고 벤더마다 이름과 구조가
-다르다. 같은 이미지 하나가 네 이름으로 불린다.
+"""허브 블록을 각 벤더의 요청 part 모양으로 바꾸기 위한 렌더러
+도구 결과의 경우 block과 part가 대응되지 않을 수 있기에 각 어댑터의 ``build_body``가 다룬다.
+벤더가 발급한 ``file_id``/container 참조는 사용할 수 없다. URL 또는 inline base64만 직렬화한다.
 
 | 허브 | Anthropic | Chat Completions | Responses | Gemini |
 |---|---|---|---|---|
 | 이미지 | ``image.source`` | ``image_url`` | ``input_image`` | ``inlineData`` |
 | 음성 | 없음 | ``input_audio`` | 없음 | ``inlineData`` |
 | 문서 | ``document`` | ``file`` | ``input_file`` | ``inlineData``/``fileData`` |
-
-벤더가 발급한 ``file_id``/container 참조는 이 렌더러의 공통 입력 범위가 아니다. URL 또는 inline
-base64만 직렬화한다.
-
-도구 결과는 part가 아니라 별개 항목이라 각 어댑터의 ``build_body``가 다룬다. Anthropic은
-``tool_result`` 블록, Chat Completions는 role ``tool`` 메시지, Responses는
-``function_call_output`` Item, Gemini는 ``functionResponse`` Part다.
 """
 
 from __future__ import annotations
@@ -57,7 +46,7 @@ def data_url(media_type: str | None, data: str) -> str:
 
 
 def has_opaque_media_reference(block: ContentBlock) -> bool:
-    """서버 발급 ID 또는 public URL이 아닌 vendor URI인지 검사한다."""
+    """멀티모달 content block이 서버 발급 ID 혹은 vendor URI로 지시되는지 검사한다.(지원 불가능)"""
     if isinstance(block, ImageBlock | AudioBlock | DocumentBlock) and block.file_id:
         return True
     reference = None
@@ -150,11 +139,7 @@ def _anthropic_source(
 
 
 def as_chat_completions_part(block: ContentBlock) -> dict[str, Any] | None:
-    """OpenAI Chat Completions 요청 part.
-
-    ``streambind-base``의 ``RequestContentPart``는 ``text``와 ``image_url`` 둘만 permit하지만
-    실제 API는 ``input_audio``와 ``file``도 받는다. 그 둘까지 낸다.
-    """
+    """vLLM OpenAI compatible Chat Completions 요청 part."""
     if isinstance(block, ImageBlock):
         url = block.url or (data_url(block.media_type, block.data) if block.data else None)
         if url:
@@ -183,9 +168,7 @@ def as_chat_completions_part(block: ContentBlock) -> dict[str, Any] | None:
 def as_responses_part(block: ContentBlock) -> dict[str, Any] | None:
     """OpenAI Responses 요청 ``ContentPart``.
 
-    현재 ``ResponseInputMessageContentListParam`` 유니온은 text/image/file만 허용한다.
-    SDK에는 독립된 ``ResponseInputAudioParam`` 타입이 남아 있지만 요청 ``input`` 유니온에는
-    연결되어 있지 않으므로 오디오를 임의로 넣지 않는다.
+    ``ResponseInputMessageContentListParam`` 유니온은 text/image/file만 허용한다.
     """
     if isinstance(block, ImageBlock):
         url = block.url or (data_url(block.media_type, block.data) if block.data else None)
@@ -207,7 +190,7 @@ def as_responses_part(block: ContentBlock) -> dict[str, Any] | None:
 
 
 def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
-    """Gemini ``Part``. 판별자가 없어 채워진 필드가 종류를 말한다."""
+    """Gemini ``Part``는 type 없이 채워진 필드가 종류를 말한다."""
     if (
         isinstance(block, TextBlock)
         and block.source == "generate_content"

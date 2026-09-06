@@ -38,7 +38,7 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
-from ..transport.sse import SseFrame
+from ..transport.sse import SseEvent
 from .base import Lowerer
 from .normalize import normalize_role, stop_reason_from_gemini
 from .parts import as_gemini_part, has_opaque_media_reference
@@ -702,12 +702,12 @@ class GenerateContentAdapter:
             native.insert(0, {"functionDeclarations": declarations})
         return native
 
-    def is_terminal(self, frame: SseFrame) -> bool:
+    def is_terminal(self, frame: SseEvent) -> bool:
         """종료 표지가 없다. 스트림이 끊기면 끝이다."""
         _ = frame
         return False
 
-    def decode(self, frame: SseFrame) -> dict[str, Any] | None:
+    def decode(self, frame: SseEvent) -> dict[str, Any] | None:
         payload = frame.data.strip()
         if not payload or payload == "[DONE]":
             return None

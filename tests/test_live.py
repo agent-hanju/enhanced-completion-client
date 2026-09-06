@@ -23,7 +23,7 @@ import os
 import httpx
 import pytest
 
-from enhanced_completion import (
+from completion_bridge import (
     Bridge,
     CiteVocabulary,
     HubMessage,
@@ -33,7 +33,7 @@ from enhanced_completion import (
     TextBlock,
     ThinkingBlock,
 )
-from enhanced_completion.vendors import chat_completions
+from completion_bridge.vendors import chat_completions
 
 BASE_URL = os.getenv("ECC_LIVE_BASE_URL", "")
 MODEL = os.getenv("ECC_LIVE_MODEL", "")
@@ -276,7 +276,7 @@ class TestLiveStreaming:
         print(f"[live] relifted={actual}")
 
     async def test_tool_call_shape(self) -> None:
-        from enhanced_completion import ToolDefinition, ToolUseBlock
+        from completion_bridge import ToolDefinition, ToolUseBlock
 
         tool = ToolDefinition(
             name="get_weather",

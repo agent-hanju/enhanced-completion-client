@@ -1,13 +1,4 @@
-"""허브 정규형. 값의 어휘를 Anthropic Messages로 모은다.
-
-``streambind-base``의 세 매퍼가 확립한 규칙이다. 자세한 표는 ``docs/Support-Matrix.md``에
-있다.
-
-**타입만 맞추고 값을 벤더별로 흘려보내면 허브가 아니다.** 소비 앱이 ``stop_reason``을 읽으려고
-어느 벤더에서 왔는지 알아야 하면 추상화가 새는 것이다. 그래서 이름 어휘까지 한쪽으로 모은다.
-
-허브 어휘를 Anthropic으로 고른 이유는 허브 모델 자체가 Messages 모양이기 때문이다.
-"""
+"""HubMessage, HubResponse를 위한 벤더별 용어 정규화 규칙"""
 
 from __future__ import annotations
 
@@ -48,16 +39,16 @@ _RESPONSES_STATUS = {
 _ROLES = {
     "user": "user",
     "assistant": "assistant",
-    # Anthropic messages에 system role이 없고 도구 결과는 user 메시지다.
+    "developer": "system",
     "system": "user",
     "tool": "user",
-    # Gemini는 assistant를 model이라 부른다.
     "model": "assistant",
 }
 
 
 def normalize_role(role: str | None) -> str:
-    """벤더 role을 허브 어휘로. 알 수 없으면 ``assistant``."""
+    """벤더 role을 허브 role로 정규화. 알 수 없으면 ``assistant``."""
+    # // TODO: None이나 커스텀 role을 assistant로 가이딩하는 특별한 이유가 없다면, 아래 다른 변환과 같이 커스텀은 통과시키고 None은 에러를 내는 방식으로 하면 안되는지?
     if not role:
         return "assistant"
     return _ROLES.get(role, "assistant")
@@ -72,6 +63,7 @@ def stop_reason_from_chat(reason: str | None) -> str | None:
 
 def stop_reason_from_gemini(reason: str | None) -> str | None:
     """Gemini ``finishReason``. 표에 없으면 소문자화한다."""
+    ## // TODO: 대응되는 어휘가 없으면 원본을 유지한다는 일관화 규칙을 지킬거면 그냥 lower를 안 해도 되는 것 아닌지?
     if not reason:
         return None
     return _GEMINI_STOP.get(reason, reason.lower())

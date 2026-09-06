@@ -10,7 +10,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from enhanced_completion import ContentSchema, Enter, ParseEvent, TagParser, TextRun
+from completion_bridge import ContentSchema, Enter, ParseEvent, TagParser, TextRun
 
 CITE = "/cite"
 

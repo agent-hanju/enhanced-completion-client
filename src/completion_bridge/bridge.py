@@ -24,7 +24,7 @@ from .mapper import StreamMapper, compose
 from .merge import StreamMerger
 from .parameters import Hyperparameters
 from .transport.http import astream_sse, stream_sse
-from .transport.sse import SseFrame
+from .transport.sse import SseEvent
 from .vendors.base import VendorAdapter
 from .vocabulary import Vocabulary
 
@@ -134,7 +134,7 @@ class _StreamBase:
         """지금까지 접힌 부분 결과. 취소 후 남은 것을 읽는 통로."""
         return self._merger.build()
 
-    def _process(self, frame: SseFrame) -> tuple[list[HubResponse], bool]:
+    def _process(self, frame: SseEvent) -> tuple[list[HubResponse], bool]:
         """프레임 하나를 델타 리스트와 종료 여부로 바꾼다.
 
         종료 프레임도 먼저 해석한다. 마지막 프레임이 알맹이를 싣는 벤더가 있다. OpenAI
@@ -169,7 +169,7 @@ class AsyncStream(_StreamBase):
         self,
         vendor: VendorAdapter,
         vocabularies: Sequence[Vocabulary],
-        frames: AsyncIterator[SseFrame],
+        frames: AsyncIterator[SseEvent],
     ) -> None:
         super().__init__(vendor, vocabularies)
         self._frames = frames
@@ -214,7 +214,7 @@ class SyncStream(_StreamBase):
         self,
         vendor: VendorAdapter,
         vocabularies: Sequence[Vocabulary],
-        frames: Iterator[SseFrame],
+        frames: Iterator[SseEvent],
     ) -> None:
         super().__init__(vendor, vocabularies)
         self._frames = frames

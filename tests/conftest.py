@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from enhanced_completion import TransportError
+from completion_bridge import TransportError
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 

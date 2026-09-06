@@ -1,57 +1,56 @@
-# enhanced-completion-client
+# completion_bridge
 
-여러 LLM API의 요청·SSE 응답을 하나의 Python 모델로 연결하는 라이브러리다. 서버가 아니라
-소비 애플리케이션 안에서 `Bridge` 또는 `SyncBridge` 인스턴스를 만들어 사용한다.
+여러 LLM 벤더의 요청 API ·SSE 응답을 하나의 Python 모델로 연결하는 패키지
 
 | 어댑터 | API |
 |---|---|
-| `chat_completions` | OpenAI 호환 Chat Completions, vLLM, DeepSeek 계열 |
+| `chat_completions` | vLLM의 OpenAI compatible Chat Completions |
 | `responses` | OpenAI Responses |
 | `messages` | Anthropic Messages |
 | `generate_content` | Gemini `streamGenerateContent` |
 
 모든 응답은 `HubResponse`로 수렴하고 `HubMessage.of_response(response)`로 다음 요청 이력이 된다.
-텍스트, 멀티모달 입력, 클라이언트 도구 호출·결과는 대상 벤더의 네이티브 wire 형태로 변환한다.
+텍스트, 멀티모달 입력, 클라이언트 도구 호출·결과는 대상 벤더의 content 형태로 변환한다.
+
 추론 서명과 서버 도구처럼 벤더에 종속된 항목은 원본 `native`/`raw`를 보존해 같은 벤더로만
 재전송한다.
 
-공개 입출력 계약은 다음과 같다.
-
-- `build_request()`, `stream()`, `complete()`의 입력은 `Sequence[HubMessage]`다. 문자열과 mapping은
-  각각 user `HubMessage`와 검증된 `HubMessage`로 바꾸는 편의 입력이다.
-- `stream()`은 변환이 끝난 `HubResponse` delta를 즉시 내보내며, 스트림 종료 후
-  `stream.result`에서 같은 delta들을 병합한 `HubResponse`를 얻는다.
+- `HubMessage`는 Anthropic Messages API의 Message 객체에 호환용 필드, 타입을 추가한 확장 형식이다.
+- `build_request()`, `stream()`, `complete()`의 입력은 `(HubMessage | string) []`다. 문자열은 단일 텍스트 content만 있는 user `HubMessage`의 편의 입력이다.
+- `stream()`은 변환이 끝난 `HubResponse` delta를 즉시 내보내며, 스트림 종료 후 `stream.result`에서 같은 delta들을 병합한 `HubResponse`를 얻는다.
 - `complete()`는 스트림을 내부 소비하고 병합된 `HubResponse` 하나를 반환한다.
-- 응답 이력은 `HubMessage.of_response(result)`로 만든다. 따라서 소비 애플리케이션은 어느
-  벤더를 선택해도 Hub 타입만 다루고, wire JSON은 Bridge가 소유한다.
+- `HubMessage.of_response(result)`로 HubResponse에서 HubMessage만 확인할 수 있다.
 
-Augment/RAG 실행 기능은 포함하지 않는다. 문서와 인용은 입력·응답 블록으로만 다룬다.
+## Requirements
+
+- Python 3.12 이상
+- uv
 
 ## 설치
 
-Python 3.12 이상과 `uv`를 사용한다.
-
 ```bash
-uv add enhanced-completion-client
+uv add completion_bridge
 ```
 
-개발 환경은 다음과 같이 준비한다.
+### 개발 환경 구성
 
 ```bash
 uv sync --all-groups
 uv run pytest
 ```
 
-## 비동기 API
+## 사용법
+
+### 비동기 API
 
 ```python
-from enhanced_completion import Bridge, HubMessage
-from enhanced_completion.vendors import responses
+from completion_bridge import StreamBridge, HubMessage
+from completion_bridge.vendors import responses
 
-async with Bridge(
+async with StreamBridge(
     vendor=responses,
     base_url="https://api.openai.com",
-    model="gpt-5-mini",
+    model="gpt-5.6-luna",
     api_key="...",
 ) as bridge:
     stream = bridge.stream(["서울을 한 단어로 설명해줘"])
@@ -68,102 +67,82 @@ async with Bridge(
 ```
 
 `complete()`는 내부적으로 스트림을 끝까지 소비해 병합된 `HubResponse`만 반환한다.
-`build_request()`는 네트워크 요청 없이 실제 wire body를 확인할 때 사용한다.
+요청을 보낼 땐 `HubMessage`를 사용하며, `build_request()`는 네트워크 요청 없이 각 벤더사에 보내지는 변환 형태를 확인할 때 사용한다.
 
-## 동기 API
+### 동기 API
 
 ```python
-from enhanced_completion import SyncBridge
-from enhanced_completion.vendors import chat_completions
+from completion_bridge import SyncBridge
+from completion_bridge.vendors import chat_completions
 
 with SyncBridge(
     vendor=chat_completions,
     base_url="http://127.0.0.1:8000",
-    model="qwen3-8b",
+    model="qwen3.8-27b",
 ) as bridge:
     result = bridge.complete(
         ["대한민국의 수도는?"],
-        max_tokens=32,
-        chat_template_kwargs={"enable_thinking": False},
+        hyperparameters=Hyperparameters(max_completion_tokens=32, chat_template_kwargs={"enable_thinking":False})
     )
     print(result.text)
 ```
 
-재시도와 SSE 재연결 정책은 내장하지 않는다. 필요하면 호출자가 주입하는 `httpx.Client` 또는
-`httpx.AsyncClient`에 연결·프록시·TLS 정책을 설정한다.
-
 ## 요청 옵션과 Hyperparameters
 
-대화 이외의 생성 옵션은 평평한 `Hyperparameters` 하나에 둔다. 공통 필드는 의미가 같은 API의
-wire 이름과 중첩 구조로 투영하고, API 고유 필드는 지원하는 어댑터만 선택한다.
+대화 이외의 생성 옵션은 `Hyperparameters` 객체에 둔다. 각 필드는 각 API와 사용 모델에 사용 가능한 필드들만 적용되며, 나머지 필드는 무시된다.(단 service_tier 필드는 임시적으로 제외한다.)
 
 ```python
-from enhanced_completion import (
+from completion_bridge import (
     Hyperparameters,
     OutputFormat,
     SyncBridge,
     ToolChoice,
 )
-from enhanced_completion.vendors import chat_completions
+from completion_bridge.vendors import chat_completions
 
 defaults = Hyperparameters(
-    max_output_tokens=256,
+    max_completion_tokens=256,
     temperature=0.2,
     top_p=0.9,
-    stop_sequences=["<END>"],
+    stop=["<END>"],
     tool_choice=ToolChoice(mode="auto"),
-    output_format=OutputFormat(
+    response_format=ResponseFormat(
         type="json_schema",
         name="answer",
         json_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
     ),
-    # 알려진 API 고유 필드도 같은 객체에 평평하게 둔다.
-    verbosity="low",                              # Chat에서만 사용
+    # 벤더별 고유 필드도 사용 가능
+    verbosity="low",                              # vLLM Chat Completions에서만 사용
     include=["reasoning.encrypted_content"],      # Responses에서만 사용
     inference_geo="us",                          # Messages에서만 사용
     safety_settings=[{"category": "HARM_CATEGORY_HATE_SPEECH"}],  # Gemini만 사용
-    service_tier="auto",                         # Chat/Responses에서 사용
-    anthropic_service_tier="standard_only",      # Messages에서만 사용
-    gemini_service_tier="PRIORITY",              # Gemini에서만 사용
-    # 표준 목록 밖 호환 서버 확장은 현재 대상 요청에 명시적으로 통과시킨다.
-    extensions={"chat_template_kwargs": {"enable_thinking": False}},
+    extra_body={"chat_template_kwargs":{"enable_thinking":False}}}, # vLLM Chat Completions에서만 확장 필드로 사용
 )
+
+### 대응표
+
+// TODO: 지칭하는 이름이 다르더라도 기능과 값이 동일하여 하나의 필드만 적용하면 다른 벤더 API에도 전이되는 hyperpamameter들을 정리하여(확장 대표 parameter를 따로 만들지 말고 각 API에 제공되는 해당하는 필드들 중 하나에 세팅되면 다른 parameter에도 자동 세팅되는 형태로) 표로 작성할 것.(단, 역할이 같더라도 입력 형태가 다르다면 서로 분리하고, 호환되지 않도록 해야 한다. 호환 대상을 좁고 엄격하게 잡을 것)
 
 bridge = SyncBridge(
     vendor=chat_completions,
     base_url="http://127.0.0.1:8000",
-    model="qwen3-8b",
+    model="qwen-3.8-27b",
     hyperparameters=defaults,
 )
 
-# 호출별 값은 생성자 기본값에 deep-merge된다.
+# 호출별 값은 생성자에 등록했던 기본값에 오버라이드된다.
 body = bridge.build_request(
     ["질문"],
-    hyperparameters=Hyperparameters(max_output_tokens=64),
+    hyperparameters=Hyperparameters(max_completion_tokens=64),
 )
 ```
-
-공통 필드는 `max_output_tokens`, sampling, stop, penalty, reasoning effort, tool choice,
-parallel-tool 정책, 출력 형식이다. 예를 들어 출력 예산은 Chat의
-`max_completion_tokens`, Responses의 `max_output_tokens`, Messages의 `max_tokens`, Gemini의
-`generationConfig.maxOutputTokens`가 된다. 지원하지 않는 필드는 그 요청에서 빠진다.
-
-API 고유 필드도 같은 객체에 평평하게 선언한다. 각 어댑터는 지원 목록만 선택하므로
-`previous_response_id`를 Chat/Messages/Gemini가 받거나 `safety_settings`를 OpenAI가 받는 일은
-없다. 알려졌지만 대상이 지원하지 않는 필드는 조용히 빠지고, 정의되지 않은 필드는 Pydantic
-검증 오류가 되어 오타를 숨기지 않는다.
-
-표준 목록보다 먼저 추가된 호환 서버 필드는 `extensions`에 넣는다. 이 값만은 명시적 escape
-hatch이므로 현재 대상 요청에 그대로 적용된다. 기존 `complete(..., **params)` 호출도 유지하며
-같은 방식으로 마지막 덮어쓰기가 된다. 여러 후보를 반환하는 `n`/`candidateCount`는 Bridge가
-후보 하나만 표현하므로 필드로 만들지 않았다.
 
 ## 도구 호출과 결과
 
 허브에서는 `ToolUseBlock`과 `ToolResultBlock` 한 쌍을 사용한다.
 
 ```python
-from enhanced_completion import HubMessage, ToolResultBlock
+from completion_bridge import HubMessage, ToolResultBlock
 
 first = await bridge.complete(messages, tools=tools)
 assistant = HubMessage.of_response(first)
@@ -184,7 +163,7 @@ second = await bridge.complete(
 )
 ```
 
-동일한 허브 블록은 대상에 따라 다음처럼 내려간다.
+tool call/result 블록은 대상에 따라 다음처럼 내려간다.
 
 | API | 호출 | 결과 |
 |---|---|---|
@@ -193,19 +172,20 @@ second = await bridge.complete(
 | Responses | `function_call` Item | `function_call_output` Item |
 | Gemini | model `functionCall` Part | user `functionResponse` Part |
 
-Gemini의 `functionResponse.name`은 앞선 호출 ID로 함수명을 찾아 채운다. ID가 지원되는 API에서는
-ID도 함께 보존한다. Anthropic과 Responses는 도구 결과 안의 이미지·파일 같은 중첩 블록도
-지원되는 네이티브 content part로 변환한다.
+벤더 API의 내장 도구(Web search, Web fetch, ... 등)는 실행될 경우 hitl loop를 타지 않고, 서버에서 실행하는 도구와는 다른 필드로 벤더 응답에 포함되어 전달된다.(주로 assistant content의 전용 블록이나 특수 필드를 통해 전달됨)
 
-벤더 내장 도구는 자동 등록하지 않는다. `tools`를 생략하면 wire에도 `tools` 필드가 없고,
-web search 같은 내장 기능은 matching vendor의 `ToolDefinition.native(...)`를 명시한 요청에서만
-활성화된다. computer/shell/code 계열 응답 block은 관찰을 위해 파싱하지만 실행 환경이나 세션을
-Bridge가 관리하지 않는다.
+각 벤더에 상호 대응되는 벤더 내장 도구가 있다 하더라도, 서로의 형식으로 교차 변환할 경우 해당 벤더 API가 생성하지 않은 비신뢰적 내용을 대화 내용에 침투시킨 것으로 해석하여 보안 상 응답이 거절되는 경우가 많다.
+
+따라서 벤더 API의 내장 도구의 경우 다른 벤더에 적용될 경우 현재 요청에는 제공되지 않는 가상의 서버 툴의 동작으로 변환해 제공하거나(벤더_tool_name 형태의 tool call과 user측 tool result), tool_result 형태로 정리할 수 없는 특수 툴 실행 결과의 경우 content 내에 직렬화하여 포함시킨다.
+
+### 벤더 API 내장 도구 변환표
+
+// TODO: 현재 지원하는 벤더 API 내장 도구 목록에 대해, 어떤 tool call과 result 형태로 변환되는지, 벤더 API별로 작성할 것(row: 벤더 API 내장 도구, 지원 여부, column: chat_completions, responses, messages, generateContent 별 변환 결과)([지원표](docs/Support-Matrix.md)의 내용을 여기로 옮겨 비지원 이유까지 지원 여부에 작성해둘 것)
 
 ## 멀티모달 입력
 
 ```python
-from enhanced_completion import AudioBlock, DocumentBlock, HubMessage, ImageBlock, TextBlock
+from completion_bridge import AudioBlock, DocumentBlock, HubMessage, ImageBlock, TextBlock
 
 message = HubMessage(
     role="user",
@@ -225,31 +205,28 @@ message = HubMessage(
 wire = bridge.build_request([message])
 ```
 
-대상 API가 네이티브 입력 타입을 제공하면 이미지·음성·파일 Part로 보낸다. 지원하지 않는
-조합은 임의의 잘못된 Part를 만들지 않는다. 평문 `DocumentBlock`은 네이티브 문서 채널이 없는
-대상에서 XML-like 문서 텍스트로 내릴 수 있다. 현재 오디오 입력은 Chat Completions와 Gemini에
-내리며, Responses의 output audio stream은 수집만 하고 요청에는 재생하지 않는다.
+대상 API가 네이티브 멀티모달 입/출력을 지원한다면 이미지·음성·파일을 지원하는 형태로 보내고 받을 수 있다.
+- 입력: 지원될 경우 해당하는 형식으로 변환되어 전달되고, 지원되지 않거나 content 직렬화 여부를 true로 선택한다면, bridge에 해당 유형에 대한 텍스트 전처리 과정이 등록되어있으면 XML-like 직렬화되어 content의 적절한 위치에 포함, 등록되어있지 않다면 직렬화 태그 내에 구체 내용 대신 전달될 수 없는 내용임을 명시하여 포함된다.
+- 출력: 사용자에겐 멀티모달 파일을 다운로드할 수 있도록 메서드를 제공한다. 요청에 대화내역으로 포함될 경우 bridge에 해당 유형에 대한 텍스트 전처리 과정이 등록되어있으면 XML-like 직렬화되어 적절한 위치에 포함, 등록되어있지 않다면 직렬화 태그 내에 구체 내용 대신 전달될 수 없는 내용임을 명시하여 포함된다.
 
-`input_audio`는 모델에 넣는 입력 음성이다. 음성 출력은 별도 응답 채널이며 Responses에서는
-`AudioBlock.data`에 base64, `AudioBlock.transcript`에 전사문이 누적된다.
 
 ```python
 import base64
 
-from enhanced_completion import AudioBlock
+from completion_bridge import AudioBlock
 
 audio = next(block for block in result.content if isinstance(block, AudioBlock))
 audio_bytes = base64.b64decode(audio.data) if audio.data else b""
 print(audio.transcript)
 ```
 
-파일 확장자/codec은 요청에서 선택한 출력 audio format을 따른다. Responses 입력 content에는 현재
-audio가 없으므로 수집한 `AudioBlock`을 다음 Responses 요청에 자동 재생하지 않는다.
+파일 확장자/codec은 요청에서 선택한 출력 audio format을 따른다.
 
-공통 멀티모달 요청은 URL 또는 inline base64만 지원한다. `file_id`, `container_id`, Gemini Files의
-`gs://`/opaque URI처럼 벤더 서버가 발급·관리하는 참조는 요청 생성 시 `MappingError`로 거부한다.
-응답 원본에는 진단용으로 남지만, 호출자가 실제 파일을 URL이나 inline bytes로 물질화하기 전에는
-다음 요청으로 재생하지 않는다.
+공통 멀티모달 요청은 URL 또는 inline base64만 지원한다. `file_id`, `container_id`, Gemini Files의 `gs://`/opaque URI처럼 벤더 서버가 발급·관리하는 참조는 요청 생성 시 `MappingError`로 거부한다.
+
+### 변환표
+
+// TODO: 멀티모달입력 유형에 대해(pdf, 구조화된 데이터 document, 각종 document 확장자들은 document로 묶지 말고 별개 취급하여) row는 멀티모달 유형, column은 4개 호환 API로의 변환 결과 및 직렬화 시 처리를 표로 작성한다.
 
 ## 인용과 사용자 정의 content type
 
@@ -259,7 +236,7 @@ audio가 없으므로 수집한 `AudioBlock`을 다음 Responses 요청에 자�
 같은 필드에 저장하지만 `source="messages"`와 근거 원문 `cited_text`로 원형을 구분한다.
 
 ```python
-from enhanced_completion import Bridge, CiteVocabulary
+from completion_bridge import Bridge, CiteVocabulary
 
 cite = CiteVocabulary()
 bridge = Bridge(
@@ -293,24 +270,18 @@ result = await bridge.complete([prompt])
 Bridge가 시스템 프롬프트에 자동 삽입하지 않는다. 등록되지 않은 벤더 타입은
 `VendorBlock`으로 떨어져 원본을 보존한다.
 
+// TODO: 인용과 사용자 정의 conent type을 섹션을 구분해 벤더 별 citation, annotation에 대한 설명과 타 벤더에 제공될 때는 직렬화되어 content에 적절히 포함된다는 내용을 적는다. 사용자 정의 content type은 정의 방법을 설명하는 기존의 문단을 그대로 사용한다.
+
 ## 벤더별 특수 규약
 
-- Anthropic은 `anthropic-version`을 자동으로 보낸다. Citations는 GA라 beta 헤더가 필요 없다.
-  MCP connector처럼 beta가 필요한 기능은
-  `MessagesAdapter(betas=["mcp-client-2025-11-20"])`로 명시한다.
-- Responses의 reasoning은 표시 가능한 summary와 불투명한 `encrypted_content`를 구분한다.
-  같은 API로 이력을 되보낼 때 reasoning Item을 원형대로 재전송한다.
-- 타 벤더 assistant 이력을 Responses로 보낼 때는 `id`/`status`가 필요한 output message를
-  위조하지 않고 OpenAI SDK의 `EasyInputMessageParam`(`role=assistant`, 문자열 content)을
-  사용한다. `phase=commentary|final_answer`가 있으면 함께 보존한다.
-- Gemini의 `thoughtSignature`는 `functionCall`뿐 아니라 일반 Part에도 붙을 수 있다. 반환된 Part와
-  서명을 같은 Gemini 요청에서 그대로 재생한다.
-- DeepSeek의 thinking/tool loop가 필요하면
-  `ChatCompletionsAdapter(name="deepseek", reasoning_input_field="reasoning_content")`를 사용한다.
+- Anthropic은 `anthropic-version`을 자동으로 보낸다. MCP connector처럼 beta가 필요한 기능은 `MessagesAdapter(betas=["mcp-client-2025-11-20"])`로 명시한다.
+- Responses의 reasoning은 표시 가능한 summary와 불투명한 `encrypted_content`를 구분한다. 같은 API로 이력을 되보낼 때 reasoning Item을 원형대로 재전송한다.
+- 타 벤더 assistant 이력을 Responses로 보낼 때는 `id`/`status`가 필요한 output message를 위조하지 않고 OpenAI SDK의 `EasyInputMessageParam`(`role=assistant`, 문자열 content)을 사용한다. `phase=commentary|final_answer`가 있으면 함께 보존한다.
+- Gemini의 `thoughtSignature`는 `functionCall`뿐 아니라 일반 Part에도 붙을 수 있다. 반환된 Part와 서명을 같은 Gemini 요청에서 그대로 재생한다.
 
-정확한 보존 범위, 최신 API 차이와 의도적 비지원은 [지원표](docs/Support-Matrix.md), 다양한
-content·ReAct 흐름의 실제 4×4 pretty JSON은
-[변환 규칙 및 실행 예시](docs/Conversion-Examples.md)에서 확인한다.
+## 예시
+
+다양한 content·ReAct 흐름의 실제 4×4 pretty JSON은 [변환 규칙 및 실행 예시](docs/Conversion-Examples.md)에서 확인한다.
 
 ## 검증
 

@@ -53,7 +53,7 @@ from .parameters import (
     OutputFormat,
     ToolChoice,
 )
-from .transport.sse import SseFrame, SseParser
+from .transport.sse import SseEvent, SseParser
 from .vendors.base import Lowerer, VendorAdapter
 from .vocabularies import CiteVocabulary, cite_schema
 from .vocabulary import Vocabulary
@@ -86,7 +86,7 @@ __all__ = [
     "MappingError",
     "ParseEvent",
     "ServerToolBlock",
-    "SseFrame",
+    "SseEvent",
     "SseParser",
     "TagParser",
     "StreamMapper",

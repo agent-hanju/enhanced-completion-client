@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enhanced_completion import SseParser
+from completion_bridge import SseParser
 
 
 def parse_all(*chunks: str) -> list[tuple[str, str, str]]:

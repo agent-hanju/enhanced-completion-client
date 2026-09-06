@@ -32,7 +32,7 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
-from ..transport.sse import SseFrame
+from ..transport.sse import SseEvent
 from .base import Lowerer
 from .parts import as_anthropic_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -537,12 +537,12 @@ class MessagesAdapter:
             headers["anthropic-beta"] = ",".join(self.betas)
         return headers
 
-    def is_terminal(self, frame: SseFrame) -> bool:
+    def is_terminal(self, frame: SseEvent) -> bool:
         if frame.event.strip() in TERMINAL_EVENTS:
             return True
         return self._peek_type(frame) in TERMINAL_EVENTS
 
-    def decode(self, frame: SseFrame) -> dict[str, Any] | None:
+    def decode(self, frame: SseEvent) -> dict[str, Any] | None:
         payload = frame.data.strip()
         if not payload:
             return None
@@ -558,7 +558,7 @@ class MessagesAdapter:
         return parsed
 
     @staticmethod
-    def _peek_type(frame: SseFrame) -> str:
+    def _peek_type(frame: SseEvent) -> str:
         payload = frame.data.strip()
         if not payload:
             return ""

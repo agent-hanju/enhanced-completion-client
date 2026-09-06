@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from enhanced_completion import (
+from completion_bridge import (
     AudioBlock,
     Bridge,
     DocumentBlock,
@@ -23,7 +23,7 @@ from enhanced_completion import (
     ToolUseBlock,
     VendorBlock,
 )
-from enhanced_completion.vendors import (
+from completion_bridge.vendors import (
     ChatCompletionsAdapter,
     MessagesAdapter,
     chat_completions,
