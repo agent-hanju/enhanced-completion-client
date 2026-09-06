@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from completion_bridge import (
     AnnotationBlock,
     AudioBlock,
@@ -13,6 +15,7 @@ from completion_bridge import (
     HubMessage,
     HubResponse,
     ImageBlock,
+    MappingError,
     ServerToolBlock,
     StreamMerger,
     TextBlock,
@@ -600,3 +603,23 @@ def test_gemini_interleaved_thought_and_tool_parts_keep_order() -> None:
     ]
     replay = build(GEMINI, [HubMessage.of_response(result)])["contents"][0]["parts"]
     assert replay == parts
+
+
+def test_remote_reference_results_are_omitted_not_faked() -> None:
+    """산출물이 원격 참조에만 있으면 옮길 내용이 없다. 빈 가상 호출을 만들지 않는다."""
+    block = ServerToolBlock(
+        id="cu-1",
+        name="container_upload",
+        source="messages",
+        raw={"type": "container_upload", "file_id": "file-abc"},
+    )
+    history = [HubMessage(role="assistant", content=[block])]
+
+    # 같은 벤더라면 재생을 기대하는 것이 자연스럽다. 조용히 빠지지 않고 실패시킨다.
+    with pytest.raises(MappingError, match="remote file/container references"):
+        build(MessagesAdapter(), history)
+
+    # 다른 벤더에는 표현할 방법이 없다. 생략한다.
+    assert build(chat_completions, history)["messages"] == []
+    assert build(ResponsesAdapter(), history)["input"] == []
+    assert build(GEMINI, history)["contents"] == []

@@ -316,6 +316,15 @@ tool call/result 블록은 대상에 따라 다음처럼 내려간다.
 | **원본** | 벤더 native 블록을 그대로 재전송 | `source`가 대상과 같을 때. 항상 우선한다 |
 | **가상 도구** | assistant `벤더_도구명` tool call + user tool result 쌍 | 원본에 호출과 결과가 **쌍으로** 남아 있을 때 |
 | **직렬화** | content 안 XML-like 태그 | 쌍이 없을 때. 또는 결과가 대상의 tool result 모양에 담기지 않을 때 |
+| **생략** | 아무것도 내리지 않는다 | 결과가 **원격 참조에만 존재**할 때. 동일 벤더에서는 `MappingError` |
+
+**생략은 옮길 내용이 없어서다.** `container_upload`처럼 결과가 `file_id`/`container_id`로만
+표현되는 도구는 브리지가 그 내용을 알지 못한다. 발급 서버, 권한, 처리 상태, 만료에 묶여 있어
+다른 벤더에서 조회할 수도 없다. 태그로 내릴 내용 자체가 없으므로 빈 가상 호출을 만들지 않고
+생략한다. 원본은 응답의 `raw`에 진단용으로 남는다.
+
+같은 벤더로 되보낼 때는 생략하지 않고 `MappingError`로 실패시킨다. 그 벤더라면 재생될 것이라고
+기대하는 것이 자연스럽고, 조용히 빠지면 호출자가 보냈다고 믿게 된다.
 
 **실행 환경 의존성은 판정 기준이 아니다.** 가상 도구는 실행 제안이 아니라 이력 기록이다.
 `벤더_도구명`은 그 요청의 `tools`에 없으므로 모델이 호출할 수 없고, 옮겨지는 것은 "그 도구가
@@ -346,10 +355,17 @@ tool call/result 블록은 대상에 따라 다음처럼 내려간다.
 | **Responses** computer / shell / apply patch | O | 가상 + **결과 직렬화** | **원본** | 가상 | 가상 |
 | **Responses** MCP call / list tools | O | 가상 | **원본** | 가상 | 가상 |
 | **Responses** MCP approval | O | 가상 | **원본** | 가상 | 가상 |
+| **Anthropic** `container_upload` | – | **생략** | **생략** | `MappingError` | **생략** |
+| **Responses** container 산출물 (`container_id`) | – | **생략** | `MappingError` | **생략** | **생략** |
 | **Gemini** Google Search grounding | X | 직렬화 | 직렬화 | 직렬화 | **원본** |
 | **Gemini** URL context | X | 직렬화 | 직렬화 | 직렬화 | **원본** |
 | **Gemini** code execution | O | 가상 | 가상 | 가상 | **원본** |
 | **Gemini** computer use | O | 가상 + **결과 직렬화** | 가상 | 가상 | **원본** |
+
+**`쌍` 열이 `–`인 것은 애초에 옮길 내용이 없다.** 위 두 행은 도구가 만든 산출물이 원격
+리소스에만 존재해서, 호출 기록은 있어도 결과를 표현할 방법이 없다. file search의
+vector store ID나 MCP의 연결·인증 상태도 같은 이유로 옮겨지지 않는다 — 다만 그쪽은 검색 질의와
+결과 텍스트가 남아 있어 그 부분만 가상 도구가 된다.
 
 **쌍 `X`인 것만 통째로 직렬화한다.** Gemini의 grounding과 url context는 call/result가 아니라
 candidate에 붙는 응답 metadata다. 쌍으로 만들 호출 자체가 없으므로 근거 목록을 content에
