@@ -624,14 +624,8 @@ class ResponsesAdapter:
         ``function_call_output``과 ``mcp_approval_response``가 그것이고, 클라이언트가 되보내는
         입력 항목이다.
         """
-        instructions: list[str] = []
         turns: list[dict[str, Any]] = []
         for message in request.messages:
-            if message.role == "system":
-                text = lowerer.lower_text(message.content)
-                if text:
-                    instructions.append(text)
-                continue
             phase = getattr(message, "phase", None)
             turns.extend(self._items(message.role, message.content, lowerer, phase=phase))
 
@@ -641,8 +635,6 @@ class ResponsesAdapter:
             "input": turns,
             "stream": True,
         }
-        if instructions:
-            body["instructions"] = "\n\n".join(instructions)
         tools = [
             definition
             for tool in request.tools

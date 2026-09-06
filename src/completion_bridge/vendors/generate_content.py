@@ -40,7 +40,7 @@ from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseEvent
 from .base import Lowerer
-from .normalize import normalize_role, stop_reason_from_gemini
+from .normalize import INSTRUCTION_ROLES, normalize_role, stop_reason_from_gemini
 from .parts import as_gemini_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
 
@@ -107,6 +107,11 @@ class _ToHub:
         content = head.get("content") or {}
 
         blocks: list[ContentBlock] = []
+        feedback = chunk.get("promptFeedback")
+        if isinstance(feedback, dict) and feedback.get("blockReason"):
+            # 입력이 차단되면 candidates가 아예 오지 않는다. 여기서 잡지 않으면 빈 응답과
+            # 구분되지 않는다.
+            blocks.append(VendorBlock(type="promptFeedback", raw=dict(feedback), source=SOURCE))
         for position, part in enumerate(content.get("parts") or []):
             if isinstance(part, dict):
                 block = self._part(part, self._part_index(part, position=position))
@@ -136,6 +141,9 @@ class _ToHub:
         reason = head.get("finishReason")
         if isinstance(reason, str) and reason:
             fields["stop_reason"] = stop_reason_from_gemini(reason)
+        if isinstance(feedback, dict) and isinstance(feedback.get("blockReason"), str):
+            # 허브 어휘가 따로 없으므로 원문을 유지한다.
+            fields["block_reason"] = feedback["blockReason"]
         usage = self._usage(chunk.get("usageMetadata"))
         if usage is not None:
             fields["usage"] = usage
@@ -540,7 +548,7 @@ class GenerateContentAdapter:
         contents: list[dict[str, Any]] = []
         call_names: dict[str, str] = {}
         for message in request.messages:
-            if message.role == "system":
+            if message.role in INSTRUCTION_ROLES:
                 text = lowerer.lower_text(message.content)
                 if text:
                     system.append(text)
@@ -555,19 +563,7 @@ class GenerateContentAdapter:
         if tools:
             body["tools"] = tools
 
-        # 생성 파라미터가 generationConfig 안에 들어간다. 다른 셋은 최상위다.
-        config = dict(params.pop("generationConfig", {}) or {})
-        for key in ("temperature", "topP", "topK", "maxOutputTokens", "stopSequences", "seed"):
-            if key in params:
-                config[key] = params.pop(key)
-        # 허브 어휘를 이 API 이름으로 옮긴다.
-        if "max_tokens" in params:
-            config["maxOutputTokens"] = params.pop("max_tokens")
-        if "top_p" in params:
-            config["topP"] = params.pop("top_p")
-        if config:
-            body["generationConfig"] = config
-
+        # ``for_vendor``가 generationConfig 중첩까지 만들어 준다. 여기서 옮길 것이 없다.
         for key, value in params.items():
             if key not in ("contents", "tools", "systemInstruction"):
                 body[key] = value

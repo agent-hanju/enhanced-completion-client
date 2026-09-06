@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..blocks import (
@@ -34,6 +34,7 @@ from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseEvent
 from .base import Lowerer
+from .normalize import INSTRUCTION_ROLES
 from .parts import as_anthropic_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
 
@@ -332,7 +333,7 @@ class MessagesAdapter:
         ]
         citations_enabled = any(document.citations_enabled for document in documents)
         for message in request.messages:
-            if message.role == "system":
+            if message.role in INSTRUCTION_ROLES:
                 text = lowerer.lower_text(message.content)
                 if text:
                     system.append(text)
@@ -358,7 +359,38 @@ class MessagesAdapter:
         for key, value in params.items():
             if key not in ("model", "messages", "stream", "tools", "system"):
                 body[key] = value
+        self._reject_invalid_combinations(body, citations_enabled=citations_enabled)
         return body
+
+    @staticmethod
+    def _reject_invalid_combinations(body: dict[str, Any], *, citations_enabled: bool) -> None:
+        """이 API가 함께 받지 않는 조합을 요청 생성 시점에 막는다.
+
+        조용히 400을 받는 것보다 낫다. 어느 필드가 문제인지 여기서는 알지만 서버 오류
+        본문에서는 되짚어야 한다.
+        """
+        output_config = body.get("output_config")
+        if citations_enabled and isinstance(output_config, Mapping) and "format" in output_config:
+            raise MappingError(
+                "document citations and output_config.format cannot be used together"
+            )
+
+        if body.get("mcp_servers"):
+            declared = {
+                tool.get("mcp_server_name")
+                for tool in body.get("tools") or []
+                if isinstance(tool, Mapping) and tool.get("type") == "mcp_toolset"
+            }
+            missing = [
+                str(server.get("name"))
+                for server in body["mcp_servers"]
+                if isinstance(server, Mapping) and server.get("name") not in declared
+            ]
+            if missing:
+                raise MappingError(
+                    "mcp_servers requires a matching mcp_toolset tool for each server: "
+                    + ", ".join(missing)
+                )
 
     def _message_turns(
         self,

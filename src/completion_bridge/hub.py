@@ -33,7 +33,7 @@ class Usage(BaseModel):
 class HubResponse(BaseModel):
     """벤더 응답의 허브 표현. 델타와 최종 결과가 같은 타입이다.
 
-    스트리밍 중에는 조각만 채워진 델타로 흐르고, :class:`~enhanced_completion.merge.StreamMerger`
+    스트리밍 중에는 조각만 채워진 델타로 흐르고, :class:`~completion_bridge.merge.StreamMerger`
     가 그것들을 접어 같은 타입의 최종 결과를 만든다. 소비자가 두 타입을 구분할 필요가 없다.
     """
 
@@ -44,6 +44,12 @@ class HubResponse(BaseModel):
     role: str | None = Field(default=None, json_schema_extra=_overwrite())
     content: list[Block] = Field(default_factory=list)
     stop_reason: str | None = Field(default=None, json_schema_extra=_overwrite())
+    block_reason: str | None = Field(default=None, json_schema_extra=_overwrite())
+    """입력이 거부되어 생성이 시작되지 않은 이유.
+
+    ``stop_reason``과 축이 다르다. 저쪽은 생성이 왜 멈췄는지이고 이쪽은 생성이 시작조차
+    못 한 이유다. 값이 있으면 ``content``가 비어 있어도 모델이 할 말이 없었던 것이 아니다.
+    """
     usage: Usage | None = None
 
     @property
