@@ -14,7 +14,7 @@ from completion_bridge import (
     HubResponse,
     Hyperparameters,
     ImageBlock,
-    OutputFormat,
+    ResponseFormat,
     StreamMerger,
     TextBlock,
     ToolChoice,
@@ -128,24 +128,32 @@ STATELESS_WEB_TOOLS = (
 )
 
 PARAMETERS = Hyperparameters(
-    max_output_tokens=64,
+    # 여러 API가 공유하는 필드
     temperature=0.2,
     top_p=0.9,
     top_k=20,
     seed=7,
-    stop_sequences=["<END>"],
     presence_penalty=0.1,
     frequency_penalty=0.2,
-    reasoning_effort="low",
-    tool_choice=ToolChoice(mode="named", name="lookup"),
     parallel_tool_calls=False,
-    output_format=OutputFormat(
+    # 출력 예산은 API마다 필드가 다르다. 전이가 없으므로 각각 쓴다.
+    max_completion_tokens=64,
+    max_tokens=64,
+    max_output_tokens=64,
+    # stop도 마찬가지다.
+    stop=["<END>"],
+    stop_sequences=["<END>"],
+    # 대상 모양으로 투영되는 두 타입 객체
+    tool_choice=ToolChoice(mode="named", name="lookup"),
+    response_format=ResponseFormat(
         type="json_schema",
         name="answer",
         json_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
         strict=True,
     ),
-    verbosity="low",
+    # 벤더 전용 필드
+    reasoning_effort="low",
+    chat_template_kwargs={"enable_thinking": False},
     include=["reasoning.encrypted_content"],
     inference_geo="us",
     service_tier="auto",
@@ -683,11 +691,11 @@ def render_document() -> str:
             "",
             table(_tool_activation_rows()),
             "",
-            "## 7. 공통 Hyperparameters의 API별 투영",
+            "## 7. Hyperparameters의 API별 선택",
             "",
-            "같은 공통 옵션 객체를 네 request builder에 넣고, 대화·도구 정의를 제외한 실제 "
-            "wire 파라미터만 표시했다. 지원하지 않는 필드는 빠지고 API 고유 필드는 해당 "
-            "대상에만 남는다.",
+            "같은 옵션 객체를 네 request builder에 넣고, 대화·도구 정의를 제외한 실제 "
+            "wire 파라미터만 표시했다. 대상이 소유한 필드만 남고 나머지는 빠진다. "
+            "필드 사이 전이는 없으므로 출력 예산과 stop은 API별 필드를 각각 설정했다.",
             "",
             table(_parameter_rows()),
             "",
@@ -696,7 +704,7 @@ def render_document() -> str:
             "이 문서는 core Hub content 계열 전부(text, thinking, tool use/result, image, "
             "audio, document, nested citation, annotation, grounding, server tool, "
             "vendor fallback)와 "
-            "공통/전용 요청 Hyperparameters의 "
+            "요청 Hyperparameters의 "
             "변환 정책을 실제 adapter 또는 해당 adapter의 회귀 테스트에 통과시킨다. "
             "각 서버 도구의 모든 버전 문자열을 반복하지는 않고 실행 주체와 변환 정책이 같은 "
             "계열별 대표 wire payload를 사용한다. 전체 subtype 목록은 "

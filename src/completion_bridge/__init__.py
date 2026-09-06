@@ -3,8 +3,8 @@
 여러 벤더 API의 스트리밍 응답을 하나의 허브 타입으로 받고, 그것을 그대로 다음 요청의 대화
 이력으로 되쓴다. custom content type을 등록해 확장한다.
 
-    from enhanced_completion import Bridge
-    from enhanced_completion.vendors import chat_completions
+    from completion_bridge import Bridge
+    from completion_bridge.vendors import chat_completions
 
     bridge = Bridge(vendor=chat_completions, base_url="http://...", model="...")
 
@@ -40,7 +40,7 @@ from .blocks import (
 from .bridge import AsyncStream, Bridge, SyncBridge, SyncStream
 from .contentstream import ContentSchema, Enter, Exit, ParseEvent, TagParser, TextRun
 from .errors import (
-    EnhancedCompletionError,
+    CompletionBridgeError,
     MappingError,
     StreamNotFinished,
     TransportError,
@@ -50,7 +50,7 @@ from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
 from .parameters import (
     Hyperparameters,
-    OutputFormat,
+    ResponseFormat,
     ToolChoice,
 )
 from .transport.sse import SseEvent, SseParser
@@ -73,7 +73,7 @@ __all__ = [
     "ContentBlock",
     "DocumentBlock",
     "Enter",
-    "EnhancedCompletionError",
+    "CompletionBridgeError",
     "Exit",
     "HubMessage",
     "HubRequest",
@@ -112,6 +112,6 @@ __all__ = [
     "register_block",
     "registered_blocks",
     "Hyperparameters",
-    "OutputFormat",
+    "ResponseFormat",
     "ToolChoice",
 ]
