@@ -238,7 +238,7 @@ def test_chat_unindexed_text_deltas_form_one_protocol_channel() -> None:
     assert result.content[0].text == "firstsecond"
 
 
-def test_responses_computer_session_items_are_same_api_only() -> None:
+def test_responses_computer_session_items_move_as_a_virtual_tool() -> None:
     call = {
         "type": "computer_call",
         "id": "item-call",
@@ -267,12 +267,20 @@ def test_responses_computer_session_items_are_same_api_only() -> None:
     history = [HubMessage.of_response(result)]
 
     assert build(adapter, history)["input"] == [call, output]
-    assert build(chat_completions, history)["messages"] == []
-    assert build(MessagesAdapter(), history)["messages"] == []
-    assert build(GEMINI, history)["contents"] == []
+    # 다른 벤더로는 실행 가능한 도구가 아니라 호출 기록으로 옮긴다.
+    foreign = build(chat_completions, history)["messages"]
+    call = foreign[0]["tool_calls"][0]
+    assert call["function"]["name"] == "openai_computer"
+    assert foreign[1]["role"] == "tool"
+    assert build(MessagesAdapter(), history)["messages"][0]["content"][0]["name"] == (
+        "openai_computer"
+    )
+    assert build(GEMINI, history)["contents"][0]["parts"][0]["functionCall"]["name"] == (
+        "openai_computer"
+    )
 
 
-def test_anthropic_persistent_bash_call_is_same_api_only() -> None:
+def test_anthropic_persistent_bash_call_moves_as_a_virtual_tool() -> None:
     adapter = MessagesAdapter()
     result = merge(
         adapter,
@@ -323,9 +331,15 @@ def test_anthropic_persistent_bash_call_is_same_api_only() -> None:
         "input": {"command": "pwd"},
     }
     assert same[1]["content"][0]["type"] == "tool_result"
-    assert build(chat_completions, history)["messages"] == []
-    assert build(ResponsesAdapter(), history)["input"] == []
-    assert build(GEMINI, history)["contents"] == []
+    # 좌표계나 working directory를 옮길 수 없다는 제약은 도구를 다시 호출 가능하게 만들 때의
+    # 이야기다. 가상 도구는 요청 tools에 없으므로 모델이 호출할 수 없다.
+    foreign = build(chat_completions, history)["messages"]
+    assert foreign[0]["tool_calls"][0]["function"]["name"] == "anthropic_bash"
+    assert foreign[1]["content"] == "/workspace"
+    assert build(ResponsesAdapter(), history)["input"][0]["name"] == "anthropic_bash"
+    assert build(GEMINI, history)["contents"][0]["parts"][0]["functionCall"]["name"] == (
+        "anthropic_bash"
+    )
 
 
 def test_multiple_client_tool_cycles_keep_turn_order_for_every_vendor() -> None:

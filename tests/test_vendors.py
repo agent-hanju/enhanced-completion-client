@@ -22,6 +22,7 @@ from completion_bridge import (
     CiteVocabulary,
     HubMessage,
     HubResponse,
+    Hyperparameters,
     MappingError,
     ServerToolBlock,
     StreamMerger,
@@ -325,6 +326,26 @@ class TestMessages:
         assert body["messages"] == [{"role": "user", "content": "질문"}]
         assert body["max_tokens"] == 4096
 
+    def test_developer_role_hoists_with_system_in_written_order(self) -> None:
+        """``messages``는 user/assistant뿐이다. developer도 system과 같은 채널로 올린다."""
+        body = make(messages).build_request(
+            [
+                HubMessage.system("규칙"),
+                HubMessage(role="developer", content=[TextBlock(text="세부 지침")]),
+                "질문",
+            ]
+        )
+        assert body["system"] == "규칙\n\n세부 지침"
+        assert body["messages"] == [{"role": "user", "content": "질문"}]
+
+    def test_mid_conversation_instruction_is_hoisted_and_loses_position(self) -> None:
+        """표현할 수 없으므로 위치를 잃는다. 축약이라는 사실을 계약으로 고정한다."""
+        body = make(messages).build_request(
+            ["질문", HubMessage.assistant("답"), HubMessage.system("중간 규칙")]
+        )
+        assert body["system"] == "중간 규칙"
+        assert [turn["role"] for turn in body["messages"]] == ["user", "assistant"]
+
     def test_max_tokens_can_be_overridden(self) -> None:
         assert make(messages).build_request(["x"], max_tokens=16)["max_tokens"] == 16
 
@@ -566,11 +587,34 @@ class TestResponses:
         respx.post(RESP_URL).mock(return_value=httpx.Response(200, content=payload))
         assert (await make(responses).complete(["x"])).text == "본문"
 
+    def test_instruction_roles_stay_inline_at_their_position(self) -> None:
+        """``input``이 system/developer item을 받는다. 위치와 role을 접지 않는다."""
+        body = make(responses).build_request(
+            [
+                "질문",
+                HubMessage.assistant("답"),
+                HubMessage(role="developer", content=[TextBlock(text="중간 지침")]),
+                "다음 질문",
+            ]
+        )
+        assert "instructions" not in body
+        assert [item["role"] for item in body["input"]] == [
+            "user",
+            "assistant",
+            "developer",
+            "user",
+        ]
+
     def test_body_uses_input_items_with_content_parts(self) -> None:
         """``input``은 ``Item`` 리스트이고 ``Item`` 안에 ``ContentPart`` 리스트가 있다."""
         body = make(responses).build_request([HubMessage.system("규칙"), "질문"])
-        assert body["instructions"] == "규칙"
+        assert "instructions" not in body
         assert body["input"] == [
+            {
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": "규칙"}],
+            },
             {
                 "type": "message",
                 "role": "user",
@@ -785,13 +829,24 @@ class TestGenerateContent:
             {"role": "model", "parts": [{"text": "답"}]},
         ]
 
-    def test_generation_params_move_into_config(self) -> None:
-        body = make(GEMINI).build_request(["x"], temperature=0.2, max_tokens=16, top_p=0.9)
+    def test_hyperparameters_land_in_generation_config(self) -> None:
+        """중첩은 ``for_vendor``가 만든다. 어댑터가 키를 옮기지 않는다."""
+        body = make(GEMINI).build_request(
+            ["x"],
+            hyperparameters=Hyperparameters(temperature=0.2, max_output_tokens=16, top_p=0.9),
+        )
         assert body["generationConfig"] == {
             "temperature": 0.2,
             "maxOutputTokens": 16,
             "topP": 0.9,
         }
+
+    def test_legacy_keywords_are_raw_wire_passthrough(self) -> None:
+        """``**params``는 대상 body에 그대로 실린다. 이름을 바꾸거나 옮기지 않는다."""
+        body = make(GEMINI).build_request(
+            ["x"], generationConfig={"temperature": 0.2, "maxOutputTokens": 16}
+        )
+        assert body["generationConfig"] == {"temperature": 0.2, "maxOutputTokens": 16}
 
     def test_tools_use_function_declarations(self) -> None:
         tool = ToolDefinition(name="get", description="d", input_schema={"type": "object"})

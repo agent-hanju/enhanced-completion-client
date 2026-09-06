@@ -16,6 +16,7 @@ from completion_bridge import (
     AnnotationBlock,
     AudioBlock,
     Bridge,
+    Citation,
     DocumentBlock,
     GroundingBlock,
     HubMessage,
@@ -23,6 +24,7 @@ from completion_bridge import (
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
+    VendorBlock,
 )
 from completion_bridge.vendors import chat_completions, generate_content, messages, responses
 from completion_bridge.vendors.normalize import (
@@ -77,12 +79,17 @@ class TestStopReasonVocabulary:
     @pytest.mark.parametrize(
         ("raw", "expected"),
         [
+            # 허브 어휘에 1:1 대응물이 있는 셋만 옮긴다.
             ("STOP", "end_turn"),
             ("MAX_TOKENS", "max_tokens"),
             ("SAFETY", "content_filter"),
-            ("RECITATION", "recitation"),
-            ("OTHER", "other"),
-            ("BLOCKLIST", "blocklist"),
+            # 나머지는 원문 그대로다. 케이스만 바꾸면 허브 어휘도 원문도 아니게 된다.
+            ("RECITATION", "RECITATION"),
+            ("OTHER", "OTHER"),
+            ("BLOCKLIST", "BLOCKLIST"),
+            ("SPII", "SPII"),
+            ("MALFORMED_FUNCTION_CALL", "MALFORMED_FUNCTION_CALL"),
+            ("TOO_MANY_TOOL_CALLS", "TOO_MANY_TOOL_CALLS"),
             (None, None),
         ],
     )
@@ -156,10 +163,6 @@ class TestRoleVocabulary:
         [
             ("user", "user"),
             ("assistant", "assistant"),
-            # Anthropic messages에 system role이 없다.
-            ("system", "user"),
-            # 도구 결과는 user 메시지다.
-            ("tool", "user"),
             # Gemini는 assistant를 model이라 부른다.
             ("model", "assistant"),
             (None, "assistant"),
@@ -168,6 +171,17 @@ class TestRoleVocabulary:
     )
     def test_table(self, raw: str | None, expected: str) -> None:
         assert normalize_role(raw) == expected
+
+    def test_chat_completions_keeps_instruction_roles_inline(self) -> None:
+        """``messages``가 system/developer를 받는다. 위치와 role을 접지 않는다."""
+        body = make(chat_completions).build_request(
+            [
+                "질문",
+                HubMessage.assistant("답"),
+                HubMessage(role="developer", content=[TextBlock(text="중간 지침")]),
+            ]
+        )
+        assert [turn["role"] for turn in body["messages"]] == ["user", "assistant", "developer"]
 
     def test_anthropic_tool_result_turn_is_user(self) -> None:
         """도구 결과가 실린 턴은 반드시 user다. 이 API의 계약이다."""
@@ -221,6 +235,47 @@ class TestRefusal:
         result = await make(responses).complete(["x"])
         assert result.text == f"{REFUSAL_PREFIX}못 합니다"
         assert result.text.count(REFUSAL_PREFIX) == 1
+
+
+class TestGeminiPromptBlocking:
+    """입력이 차단되면 candidates가 오지 않는다. 빈 응답과 구분되어야 한다."""
+
+    @respx.mock
+    async def test_block_reason_is_reported(self) -> None:
+        payload = sse(
+            (
+                None,
+                {
+                    "promptFeedback": {
+                        "blockReason": "PROHIBITED_CONTENT",
+                        "safetyRatings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT"}],
+                    },
+                    "usageMetadata": {"promptTokenCount": 42},
+                    "responseId": "r1",
+                },
+            )
+        )
+        respx.post(f"{BASE}{GEMINI.path}").mock(return_value=httpx.Response(200, content=payload))
+        result = await make(GEMINI).complete(["x"])
+
+        assert result.block_reason == "PROHIBITED_CONTENT"
+        assert result.text == ""
+        # 원본은 진단용으로 보존한다.
+        raw = result.blocks_of(VendorBlock)
+        assert len(raw) == 1
+        assert raw[0].raw["safetyRatings"][0]["category"] == "HARM_CATEGORY_DANGEROUS_CONTENT"
+
+    @respx.mock
+    async def test_normal_empty_response_has_no_block_reason(self) -> None:
+        """정상 종료된 빈 응답을 차단으로 오인하지 않는다."""
+        payload = sse(
+            (None, {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]})
+        )
+        respx.post(f"{BASE}{GEMINI.path}").mock(return_value=httpx.Response(200, content=payload))
+        result = await make(GEMINI).complete(["x"])
+
+        assert result.block_reason is None
+        assert result.stop_reason == "end_turn"
 
 
 class TestGeminiPartRules:
@@ -341,6 +396,41 @@ class TestResponsesReasoning:
         assert block.encrypted_content == "ENC"
 
 
+class TestCitationSerialization:
+    """네이티브 인용 채널이 없는 대상에서는 근거를 직렬화한다. 조용히 버리지 않는다."""
+
+    def test_native_citation_replays_on_the_same_vendor(self) -> None:
+        block = TextBlock(
+            text="서울이다",
+            source="messages",
+            citations=[Citation(source="messages", native={"type": "char_location"})],
+        )
+        body = make(messages).build_request([HubMessage(role="assistant", content=[block])])
+        part = body["messages"][0]["content"][0]
+        assert part["text"] == "서울이다"
+        assert part["citations"] == [{"type": "char_location"}]
+
+    def test_native_citation_is_serialized_for_other_vendors(self) -> None:
+        block = TextBlock(
+            text="서울이다",
+            source="messages",
+            citations=[Citation(id="d1", source="messages", native={"type": "char_location"})],
+        )
+        message = HubMessage(role="assistant", content=[block])
+        tagged = '<cite id="d1">서울이다</cite>'
+
+        chat = make(chat_completions).build_request([message])
+        assert chat["messages"][0]["content"] == tagged
+
+        gemini = make(GEMINI).build_request([message])
+        assert gemini["contents"][0]["parts"][0]["text"] == tagged
+
+    def test_plain_text_is_untouched(self) -> None:
+        message = HubMessage(role="assistant", content=[TextBlock(text="서울이다")])
+        body = make(chat_completions).build_request([message])
+        assert body["messages"][0]["content"] == "서울이다"
+
+
 class TestEvidenceFamilies:
     """비슷해 보이는 근거 구조를 추측 변환하지 않고 원형별로 보존한다."""
 
@@ -383,8 +473,12 @@ class TestEvidenceFamilies:
 
         replay = make(responses).build_request([HubMessage.of_response(result)])
         assert replay["input"][0]["content"][0]["annotations"] == [annotation]
+        # 타 벤더에는 native annotation 채널이 없다. 조용히 버리지 않고 직렬화한다.
         foreign = make(chat_completions).build_request([HubMessage.of_response(result)])
-        assert foreign["messages"] == [{"role": "assistant", "content": "서울"}]
+        content = foreign["messages"][0]["content"]
+        assert content.startswith("서울\n\n<references>")
+        assert 'uri="https://example.test/source"' in content
+        assert 'title="근거"' in content
 
     @respx.mock
     async def test_streamed_annotation_is_not_duplicated_by_final_item(self) -> None:
@@ -485,8 +579,12 @@ class TestEvidenceFamilies:
         assert grounding.supports[0].text == "서울"
         assert grounding.search_queries == ["서울"]
 
+        # grounding 그래프는 평탄화하지 않는다. 출처와 구간-출처 관계를 함께 내린다.
         foreign = make(chat_completions).build_request([HubMessage.of_response(result)])
-        assert foreign["messages"] == [{"role": "assistant", "content": "서울"}]
+        content = foreign["messages"][0]["content"]
+        assert '<source index="0" uri="https://ground.test" title="검색 결과"/>' in content
+        assert '<support sources="0" start="0" end="2">서울</support>' in content
+        assert "<query>서울</query>" in content
 
 
 class TestMultimodalRequest:
@@ -512,14 +610,22 @@ class TestMultimodalRequest:
         assert parts[2]["file"]["filename"] == "보고서"
 
     def test_responses_uses_current_input_content_union(self) -> None:
+        """오디오 입력 채널이 없다. 조용히 버리지 않고 자리에 표시를 남긴다."""
         body = make(responses).build_request([self._message()])
         parts = body["input"][0]["content"]
         assert [p["type"] for p in parts] == [
             "input_image",
+            "input_text",  # 오디오 자리
             "input_file",
             "input_text",
         ]
-        assert parts[1]["filename"] == "보고서"
+        assert parts[2]["filename"] == "보고서"
+        assert '<audio media-type="audio/wav" unavailable="true">' in parts[1]["text"]
+
+    def test_anthropic_has_no_audio_channel_either(self) -> None:
+        body = make(messages).build_request([self._message()])
+        texts = [p["text"] for p in body["messages"][0]["content"] if p["type"] == "text"]
+        assert any("<attachments>" in t and "audio/wav" in t for t in texts)
 
     def test_gemini_uses_inline_data(self) -> None:
         body = make(GEMINI).build_request([self._message()])
@@ -560,3 +666,41 @@ class TestMultimodalRequest:
         result = body["messages"][0]["content"][0]
         assert result["type"] == "tool_result"
         assert [b["type"] for b in result["content"]] == ["text", "image"]
+
+
+class TestSerializationFallback:
+    """네이티브 채널이 없거나 호출자가 고르면 텍스트로 내린다. 조용히 사라지지 않는다."""
+
+    PDF = DocumentBlock(id="d1", data="PDFBYTES", media_type="application/pdf")
+
+    def _content(self, doc: DocumentBlock, **kwargs: object) -> str:
+        bridge = make(messages, **kwargs)
+        message = HubMessage(role="user", content=[doc, TextBlock(text="요약해")])
+        parts = bridge.build_request([message])["messages"][0]["content"]
+        if isinstance(parts, str):
+            return parts
+        return " ".join(p.get("text", f"<{p['type']}>") for p in parts)
+
+    def test_native_channel_is_used_by_default(self) -> None:
+        assert "<document>" in self._content(self.PDF)
+
+    def test_serialize_flag_overrides_the_native_channel(self) -> None:
+        forced = self.PDF.model_copy(update={"serialize": True})
+        content = self._content(forced)
+        assert "<documents>" in content
+        assert 'unavailable="true"' in content
+
+    def test_extractor_supplies_the_text(self) -> None:
+        forced = self.PDF.model_copy(update={"serialize": True})
+        content = self._content(
+            forced, extractors={"application/pdf": lambda block: "1장. 서울의 기후"}
+        )
+        assert '<content media-type="application/pdf">1장. 서울의 기후</content>' in content
+        assert "unavailable" not in content
+
+    def test_unsupported_audio_leaves_a_notice(self) -> None:
+        """오디오 입력 채널이 없는 대상에서 조용히 버리지 않는다."""
+        message = HubMessage(role="user", content=[AudioBlock(data="AAAA", format="wav")])
+        parts = make(messages).build_request([message])["messages"][0]["content"]
+        text = parts if isinstance(parts, str) else parts[0]["text"]
+        assert '<audio media-type="audio/wav" unavailable="true">' in text
