@@ -1,0 +1,59 @@
+[project]
+name = "completion-bridge"
+version = "0.1.0"
+description = "LLM streaming bridge: one hub response model across vendor APIs, with extensible content blocks"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "hanju", email = "agent.hanju@gmail.com" }]
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.9",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "completion_bridge"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "respx>=0.21.0",
+    "python-dotenv>=1.2.3",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# 라이브 시험은 기본 제외다. 마커만 달아두면 .env를 채운 순간 오프라인 검증이 외부 서비스의
+# 가용성과 요금에 묶인다. 돌릴 때는 -m live로 명시한다.
+addopts = "-m 'not live'"
+markers = [
+    "live: requires an explicitly configured live endpoint",
+    "slow: takes tens of seconds against a real model",
+]
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+fail_under = 70
