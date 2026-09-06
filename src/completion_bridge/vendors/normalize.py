@@ -60,8 +60,12 @@ _ROLES = {
 
 
 def normalize_role(role: str | None) -> str:
-    """벤더 응답 role을 허브 role로 정규화. 알 수 없으면 ``assistant``."""
-    # // TODO: 커스텀 role을 assistant로 접을 때 원문을 보존할지 정한다.
+    """벤더 응답 role을 허브 role로 정규화. 알 수 없으면 ``assistant``.
+
+    알 수 없는 role의 원문은 보존하지 않는다. 호출부가 Gemini 응답 하나뿐이고 그 API는
+    ``user``/``model`` 외의 role을 응답에 내보내지 않으므로 지금은 도달하지 않는 경로다.
+    새 어댑터가 실제로 무엇을 내보내는지 보고 정하는 편이 근거가 있다.
+    """
     if not role:
         return "assistant"
     return _ROLES.get(role, "assistant")

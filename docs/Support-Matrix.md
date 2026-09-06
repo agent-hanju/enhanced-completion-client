@@ -186,6 +186,32 @@ request에만 마지막 덮어쓰기로 적용된다. 후보 수(`n`, `candidate
 프롬프트 자체가 차단되면 `candidates`가 오지 않고 `promptFeedback.blockReason`에 사유가 실린다.
 이것은 `finishReason`과 다른 축이라 `HubResponse.block_reason`으로 따로 받는다.
 
+#### Gemini `responseFormat`
+
+`generationConfig.responseFormat`은 흩어져 있던 출력 형식 필드를 modality별로 모은 새 구조다.
+구 필드와 **공존**하며 deprecated 표기는 없다.
+
+```
+responseFormat: {
+  text:  { mimeType, schema }
+  audio: { mimeType, delivery, sampleRate, bitRate }
+  image: { mimeType, delivery, aspectRatio, imageSize }
+}
+```
+
+| 새 구조 | 대응하는 구 필드 |
+|---|---|
+| `responseFormat.text.mimeType` | `responseMimeType` |
+| `responseFormat.text.schema` | `responseSchema` / `responseJsonSchema` |
+| `responseFormat.audio.*` | 형식 부분은 새로 생긴 것. `speechConfig`는 음성 선택이라 별개다 |
+| `responseFormat.image.*` | `imageConfig` |
+| `text`/`audio`/`image` 키의 존재 | `responseModalities` |
+
+`ResponseFormat` 타입 객체는 **구 필드로 투영한다**(`responseMimeType` + `responseJsonSchema`).
+문서가 구 필드를 deprecated로 표기하지 않았고 그쪽이 더 오래 지원되기 때문이다. 새 구조를 쓰려면
+`gemini_response_format`에 직접 넣는다. 그 필드를 설정하면 투영이 **생략**된다 — 함께 보내면
+`responseFormat.text.mimeType`과 `responseMimeType`이 서로 모순될 수 있다.
+
 #### OpenAI Responses
 
 | 필드 | 제약 |

@@ -254,3 +254,29 @@ class TestMessagesCombinationGuards:
         )
         request = bridge.build_request(["질문"], tools=[toolset], hyperparameters=params)
         assert request["mcp_servers"][0]["name"] == "srv"
+
+
+class TestGeminiResponseFormat:
+    """``responseFormat``은 흩어진 출력 형식 필드를 modality별로 모은 새 구조다."""
+
+    SCHEMA = {"type": "object"}
+
+    def _config(self, **kwargs: object) -> dict[str, object]:
+        params = Hyperparameters(**kwargs)  # type: ignore[arg-type]
+        return body(GEMINI, params).get("generationConfig", {})
+
+    def test_projection_targets_the_established_fields(self) -> None:
+        config = self._config(
+            response_format=ResponseFormat(type="json_schema", json_schema=self.SCHEMA)
+        )
+        assert config["responseMimeType"] == "application/json"
+        assert config["responseJsonSchema"] == self.SCHEMA
+
+    def test_raw_response_format_suppresses_the_projection(self) -> None:
+        """둘을 함께 보내면 mimeType이 서로 모순된다. raw 쪽이 이긴다."""
+        config = self._config(
+            response_format=ResponseFormat(type="json_schema", json_schema=self.SCHEMA),
+            gemini_response_format={"text": {"mimeType": "text/plain"}},
+        )
+        assert config == {"responseFormat": {"text": {"mimeType": "text/plain"}}}
+        assert "responseMimeType" not in config

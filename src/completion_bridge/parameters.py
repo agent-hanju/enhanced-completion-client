@@ -387,8 +387,11 @@ class Hyperparameters(BaseModel):
         for field, wire in _GEMINI_TOP.items():
             _put(out, wire, getattr(self, field))
 
+        # ``responseFormat``은 흩어져 있던 출력 형식 필드를 modality별로 모은 새 구조다.
+        # 호출자가 그쪽을 명시하면 구 필드로 투영하지 않는다. 둘을 함께 보내면
+        # ``responseFormat.text.mimeType``과 ``responseMimeType``이 모순될 수 있다.
         formatted = _response_format(self.response_format, "generate_content")
-        if isinstance(formatted, dict):
+        if isinstance(formatted, dict) and self.gemini_response_format is None:
             generation.update(formatted)
         choice = _tool_choice(self.tool_choice, "generate_content")
         if isinstance(choice, dict):
