@@ -849,15 +849,22 @@ class TestGenerateContent:
         assert body["generationConfig"] == {"temperature": 0.2, "maxOutputTokens": 16}
 
     def test_tools_use_function_declarations(self) -> None:
-        tool = ToolDefinition(name="get", description="d", input_schema={"type": "object"})
+        """일반 JSON Schema는 ``parametersJsonSchema`` 하나로만 나간다."""
+        schema = {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "additionalProperties": False,
+        }
+        tool = ToolDefinition(name="get", description="d", input_schema=schema)
         body = make(GEMINI).build_request(["x"], tools=[tool])
         assert body["tools"] == [
             {
                 "functionDeclarations": [
-                    {"name": "get", "description": "d", "parameters": {"type": "object"}}
+                    {"name": "get", "description": "d", "parametersJsonSchema": schema}
                 ]
             }
         ]
+        assert "parameters" not in body["tools"][0]["functionDeclarations"][0]
 
 
 # =============================================================================

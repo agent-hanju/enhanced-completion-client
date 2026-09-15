@@ -691,7 +691,9 @@ class GenerateContentAdapter:
                 {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.input_schema,
+                    # ``parameters``와 배타적이다. 둘을 함께 실으면 안 된다.
+                    # 이 필드는 일반 JSON Schema를 그대로 받는다.
+                    "parametersJsonSchema": tool.input_schema,
                 }
             )
         if declarations:

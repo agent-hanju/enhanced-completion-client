@@ -833,7 +833,7 @@
         {
           "name": "get_weather",
           "description": "도시의 현재 기온을 조회한다.",
-          "parameters": {
+          "parametersJsonSchema": {
             "type": "object",
             "properties": {
               "city": {
