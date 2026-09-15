@@ -155,6 +155,49 @@ A-1과 같은 이유로, 남는 모델 게이트는 사용자 책임이다.
 
 ---
 
+### A-12. Gemini 도구 스키마를 `parameters`에 실었다 — 400
+
+`해결` · `vendors/generate_content.py`
+
+라이브 호출에서 드러났다. `INVALID_ARGUMENT: Unknown name "additionalProperties" at
+'tools[0].function_declarations[1].parameters'`.
+
+`FunctionDeclaration`에는 파라미터 필드가 둘이고 서로 배타적이다. `parameters`는 OpenAPI 3.0
+부분집합인 `Schema` 객체만 받아 `additionalProperties`, `$ref`, `oneOf` 같은 일반 JSON Schema
+키워드를 거부한다. `parametersJsonSchema`는 일반 JSON Schema를 그대로 받는다.
+
+허브의 `ToolDefinition.input_schema`는 Anthropic·Responses·Chat과 공유하는 값이라 일반 JSON
+Schema일 수밖에 없다. 그것을 변형 없이 받는 쪽은 `parametersJsonSchema` 하나다. `parameters`를
+쓰려면 키를 걸러내는 변환기가 필요한데, 벤더 방언 지식을 코드에 들이는 일이고 표현력이 조용히
+깎인다. 필드를 바꾸는 쪽을 택했다.
+
+`parametersJsonSchema`가 모든 모델과 API 버전에서 GA인지는 공식 문서에서 확인하지 못했다.
+
+### A-13. 유효한 JSON 조각이 `ToolUseBlock.input`을 덮는다 — 400
+
+`해결` · `blocks.py`
+
+라이브 호출에서 드러났다. `messages.1.content.0.tool_use.input: Input should be an object`와
+Gemini `contents[1].parts[0].function_call.args ... ":"`.
+
+`parse_complete_input`이 `model_validator(mode="after")`라 델타 블록마다 실행된다. 스트리밍
+조각은 임의 지점에서 끊기므로 그 자체로 유효한 JSON인 조각이 나온다. `'":"'`는 JSON 문자열
+`:`로 파싱된다. 검증자가 그 결과를 `input`에 대입하면 Pydantic이 그 이름을
+`__pydantic_fields_set__`에 추가하고, `StreamMerger`는 그 표시로 "델타가 실은 필드"를 판단한다.
+`input`은 마지막 값이 이기는 필드라 조각의 추측이 누적 상태를 덮는다. `build()`의 재파싱은
+`if self.input is not None` 조기 반환에 막힌다. 결과적으로 `input_json`은 온전한데 `input`만
+어긋난다.
+
+`input`을 읽는 Anthropic(`parts.py:97`)과 Gemini(`parts.py:225`)에서만 터진다. Chat과 Responses는
+`input_json`을 읽어 드러나지 않는다. 도구를 쓴 대화를 되보내는 두 번째 호출에서 실패한다.
+
+세 규칙을 함께 넣었다. 파싱되면 기존 `input`을 덮어 원문을 진실로 삼고, 결과가 객체일 때만
+싣고(스칼라는 완성된 도구 인수일 수 없다), 대입한 이름을 `model_fields_set`에서 뺀다. 이미
+저장된 대화도 다시 읽는 시점에 교정된다.
+
+기존 회귀 테스트가 `input_json`만 단언하고 `input`을 보지 않아 통과했다. 조각 경계를 유효 JSON
+지점에서 끊는 테스트를 `test_merge.py`에 넣었다.
+
 ## B. 새 설계가 요구하는 미구현 항목
 
 README 표가 기술하지만 코드에 아직 없는 것이다.
