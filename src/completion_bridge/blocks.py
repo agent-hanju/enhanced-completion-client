@@ -154,14 +154,33 @@ class ToolUseBlock(ContentBlock):
 
     @model_validator(mode="after")
     def parse_complete_input(self) -> ToolUseBlock:
-        """완성된 JSON 인수는 원문과 파싱 결과를 함께 제공한다."""
-        if self.input is not None or not self.input_json:
+        """``input_json``을 파싱해 ``input``에 싣는다.
+
+        블록이 만들어질 때마다 실행되므로 조립 중인 델타에도 적용된다.
+
+        동작:
+            ``input_json``이 비어 있거나, JSON으로 파싱되지 않거나, 파싱 결과가 객체가 아니면
+            아무것도 바꾸지 않는다. 그 외에는 파싱 결과를 ``input``에 대입하고, 호출자가 준
+            ``input``이 있어도 덮는다.
+
+        상태 변경:
+            ``input``에 대입할 때 그 이름을 ``model_fields_set``에서 제거한다. 이 블록을
+            :class:`~completion_bridge.merge.StreamMerger`에 델타로 넣으면 ``input``은
+            명시된 필드로 취급되지 않는다.
+
+        호출 조건:
+            Pydantic이 호출한다. 직접 부르지 않는다.
+        """
+        if not self.input_json:
             return self
         try:
             parsed = json.loads(self.input_json)
         except json.JSONDecodeError:
             return self
+        if not isinstance(parsed, dict):
+            return self
         self.input = parsed
+        self.model_fields_set.discard("input")
         return self
 
 

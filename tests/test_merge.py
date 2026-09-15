@@ -147,6 +147,30 @@ class TestHubResponse:
         assert block.id == "c1"
         assert block.name == "get"
         assert block.input_json == '{"q":2}'
+        assert block.input == {"q": 2}
+
+    def test_self_valid_fragment_does_not_win_input(self) -> None:
+        """그 자체로 유효한 JSON인 조각이 ``input``을 덮지 않는다.
+
+        ``'":"'``는 JSON 문자열 ``:``로 파싱되는 조각이다.
+        """
+        merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+        for fragment in ('{"term', '":"', '하이비"}'):
+            merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, index=0)]))
+        block = merger.build().content[0]
+        assert isinstance(block, ToolUseBlock)
+        assert block.input_json == '{"term":"하이비"}'
+        assert block.input == {"term": "하이비"}
+
+    def test_truncated_arguments_leave_input_empty(self) -> None:
+        """스트림이 인수 중간에 끊기면 ``input``은 ``None``으로 남는다."""
+        merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+        for fragment in ('{"term', '":"'):
+            merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, index=0)]))
+        block = merger.build().content[0]
+        assert isinstance(block, ToolUseBlock)
+        assert block.input_json == '{"term":"'
+        assert block.input is None
 
     def test_build_is_repeatable(self) -> None:
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
