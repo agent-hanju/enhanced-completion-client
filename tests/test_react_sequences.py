@@ -465,6 +465,53 @@ def test_chat_repeated_reasoning_and_parallel_tool_deltas_do_not_collide() -> No
     ]
 
 
+def test_chat_merged_tool_call_keeps_its_id_in_the_next_request() -> None:
+    """첫 델타에만 실려 온 ``id``가 다음 요청의 ``tool_calls``에 남는다.
+
+    Chat Completions는 도구 호출의 ``id``를 첫 델타에만 싣고 이후 델타로는 인수만
+    이어붙인다. 병합은 ``native``의 마지막 값을 남기므로 병합된 ``native``에는 ``id``가
+    없다. 서버는 ``id`` 없는 assistant 도구 호출을 거부하므로, 도구를 쓴 대화를 되보내는
+    두 번째 호출이 실패한다.
+    """
+    result = merge(
+        chat_completions,
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": '{"step":'},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "1}"}}]},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ],
+    )
+
+    block = result.content[0]
+    assert isinstance(block, ToolUseBlock)
+    assert block.id == "c1"
+    assert "id" not in (block.native or {})
+
+    turn = build(chat_completions, [HubMessage.of_response(result)])["messages"][0]
+    assert [call["id"] for call in turn["tool_calls"]] == ["c1"]
+
+
 def test_anthropic_interleaved_server_and_client_blocks_keep_order() -> None:
     adapter = MessagesAdapter()
     blocks = [

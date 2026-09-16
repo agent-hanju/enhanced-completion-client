@@ -361,6 +361,11 @@ class ChatCompletionsAdapter:
             # ``index`` identifies a tool-call delta inside a streamed response.
             # It is not part of an assistant tool call accepted in request history.
             call.pop("index", None)
+            # A streamed tool call carries its ``id`` on the first delta only, and merging
+            # keeps the last ``native`` seen, so the id is usually absent here. The server
+            # rejects an assistant tool call without one.
+            if not call.get("id") and block.id:
+                call["id"] = block.id
         else:
             call = {"id": block.id, "type": block.kind}
         if block.kind == "custom":
