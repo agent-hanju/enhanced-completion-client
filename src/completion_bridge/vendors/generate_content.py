@@ -543,6 +543,11 @@ class GenerateContentAdapter:
 
         이 API는 ``messages``가 아니라 ``contents``를 받고 role ``assistant``를 ``model``이라
         부른다. system은 ``systemInstruction``으로 따로 나간다.
+
+        함수 도구와 ``generate_content`` native 도구가 함께 있으면
+        ``toolConfig.includeServerSideToolInvocations``를 ``True``로 채운다. 호출자가
+        ``Hyperparameters.tool_config``나 raw ``toolConfig``로 이 키를 명시했으면 그 값을 그대로
+        보낸다.
         """
         system: list[str] = []
         contents: list[dict[str, Any]] = []
@@ -567,6 +572,14 @@ class GenerateContentAdapter:
         for key, value in params.items():
             if key not in ("contents", "tools", "systemInstruction"):
                 body[key] = value
+
+        # 함수 선언과 내장 도구가 함께 있으면 서버 측 도구 실행 플래그의 기본값을 켠다.
+        # ``_tools``는 함수 선언을 0번에 두므로 길이 2 이상이면 두 종류가 모두 있다.
+        # 호출자가 이 키를 명시했으면 값을 바꾸지 않고 서버의 판단에 맡긴다.
+        if len(tools) > 1 and "functionDeclarations" in tools[0]:
+            tool_config = dict(body.get("toolConfig") or {})
+            tool_config.setdefault("includeServerSideToolInvocations", True)
+            body["toolConfig"] = tool_config
         return body
 
     def _contents(

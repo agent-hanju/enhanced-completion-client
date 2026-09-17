@@ -28,12 +28,16 @@ from completion_bridge import (
     StreamMerger,
     TextBlock,
     ThinkingBlock,
+    ToolChoice,
     ToolDefinition,
     ToolUseBlock,
 )
 from completion_bridge.vendors import generate_content, messages, responses
 
 BASE = "http://vendor.test"
+
+GEMINI_FUNCTION = ToolDefinition(name="get", input_schema={"type": "object"})
+GEMINI_SEARCH = ToolDefinition.native("generate_content", {"googleSearch": {}})
 
 
 def sse(*frames: tuple[str | None, object]) -> bytes:
@@ -865,6 +869,52 @@ class TestGenerateContent:
             }
         ]
         assert "parameters" not in body["tools"][0]["functionDeclarations"][0]
+
+    def test_single_tool_kind_sends_no_tool_config(self) -> None:
+        """함수 도구나 내장 도구 한 종류만 있으면 ``toolConfig``를 만들지 않는다."""
+        function_only = make(GEMINI).build_request(["x"], tools=[GEMINI_FUNCTION])
+        native_only = make(GEMINI).build_request(["x"], tools=[GEMINI_SEARCH])
+        assert "toolConfig" not in function_only
+        assert "toolConfig" not in native_only
+
+    def test_mixed_tools_enable_server_side_tool_invocations(self) -> None:
+        """함수 도구와 내장 도구를 함께 보내면 플래그를 켠다."""
+        body = make(GEMINI).build_request(["x"], tools=[GEMINI_FUNCTION, GEMINI_SEARCH])
+        assert body["toolConfig"] == {"includeServerSideToolInvocations": True}
+
+    def test_derived_flag_keeps_function_calling_config(self) -> None:
+        """``tool_choice``가 만든 ``functionCallingConfig``와 함께 실린다."""
+        body = make(GEMINI).build_request(
+            ["x"],
+            tools=[GEMINI_FUNCTION, GEMINI_SEARCH],
+            hyperparameters=Hyperparameters(tool_choice=ToolChoice(mode="required")),
+        )
+        assert body["toolConfig"] == {
+            "functionCallingConfig": {"mode": "ANY"},
+            "includeServerSideToolInvocations": True,
+        }
+
+    @pytest.mark.parametrize("explicit", [True, False])
+    def test_explicit_flag_is_sent_unchanged(self, explicit: bool) -> None:
+        """명시한 값은 도구 구성과 무관하게 그대로 보낸다. 거절 여부는 서버가 정한다."""
+        parameters = Hyperparameters(tool_config={"includeServerSideToolInvocations": explicit})
+        mixed = make(GEMINI).build_request(
+            ["x"], tools=[GEMINI_FUNCTION, GEMINI_SEARCH], hyperparameters=parameters
+        )
+        function_only = make(GEMINI).build_request(
+            ["x"], tools=[GEMINI_FUNCTION], hyperparameters=parameters
+        )
+        assert mixed["toolConfig"] == {"includeServerSideToolInvocations": explicit}
+        assert function_only["toolConfig"] == {"includeServerSideToolInvocations": explicit}
+
+    def test_explicit_raw_tool_config_is_sent_unchanged(self) -> None:
+        """raw ``toolConfig`` 통과 경로에서도 명시한 값을 덮지 않는다."""
+        body = make(GEMINI).build_request(
+            ["x"],
+            tools=[GEMINI_FUNCTION, GEMINI_SEARCH],
+            toolConfig={"includeServerSideToolInvocations": False},
+        )
+        assert body["toolConfig"] == {"includeServerSideToolInvocations": False}
 
 
 # =============================================================================
