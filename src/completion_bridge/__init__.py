@@ -59,7 +59,7 @@ from .vendors.base import Lowerer, VendorAdapter
 from .vocabularies import CiteVocabulary, cite_schema
 from .vocabulary import Vocabulary
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AnnotationBlock",
