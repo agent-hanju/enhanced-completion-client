@@ -907,6 +907,26 @@ class TestGenerateContent:
         assert mixed["toolConfig"] == {"includeServerSideToolInvocations": explicit}
         assert function_only["toolConfig"] == {"includeServerSideToolInvocations": explicit}
 
+    def test_other_tool_config_keys_do_not_block_the_derived_flag(self) -> None:
+        """다른 키만 설정했으면 플래그는 정하지 않은 것으로 보고 도구 구성에서 정한다."""
+        retrieval = {"retrievalConfig": {"languageCode": "ko"}}
+        mixed = make(GEMINI).build_request(
+            ["x"],
+            tools=[GEMINI_FUNCTION, GEMINI_SEARCH],
+            hyperparameters=Hyperparameters(tool_config=retrieval),
+        )
+        function_only = make(GEMINI).build_request(
+            ["x"],
+            tools=[GEMINI_FUNCTION],
+            hyperparameters=Hyperparameters(tool_config=retrieval),
+        )
+        assert mixed["toolConfig"] == {
+            "retrievalConfig": {"languageCode": "ko"},
+            "includeServerSideToolInvocations": True,
+        }
+        assert function_only["toolConfig"] == {"retrievalConfig": {"languageCode": "ko"}}
+        assert retrieval == {"retrievalConfig": {"languageCode": "ko"}}
+
     def test_explicit_raw_tool_config_is_sent_unchanged(self) -> None:
         """raw ``toolConfig`` 통과 경로에서도 명시한 값을 덮지 않는다."""
         body = make(GEMINI).build_request(
