@@ -197,6 +197,7 @@ Anthropic의 `anthropic_service_tier`, Gemini의 `gemini_service_tier`는 서로
 | `background`, `conversation`, `previous_response_id`, `include`, `prompt`, `text`, `truncation` | – | O | – | – |
 | `container`, `context_management`, `inference_geo`, `mcp_servers`, `cache_control` | – | – | O | – |
 | `generation_config`, `tool_config`, `safety_settings`, `cached_content` | – | – | – | O |
+| `tool_config.includeServerSideToolInvocations` (명시하지 않으면 도구 구성에서 도출) | – | – | – | O |
 | `metadata` | – | O | – | – |
 | `anthropic_metadata` | – | – | O | – |
 | `service_tier` | – | O | – | – |

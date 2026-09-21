@@ -119,7 +119,8 @@ synthetic index를 사용해야 한다.
   `reasoning`, `text`, `truncation` 등
 - Messages: `container`, `context_management`, `inference_geo`, `mcp_servers`, `thinking`,
   `output_config` 등
-- GenerateContent: `generation_config`, `tool_config`, `safety_settings`, `cached_content` 등
+- GenerateContent: `generation_config`, `tool_config`, `safety_settings`, `cached_content` 등.
+  `tool_config.includeServerSideToolInvocations`는 명시하지 않으면 어댑터가 도구 구성에서 정한다
 - 둘 이상이 공유: `prompt_cache_key`, `store`, `stream_options`, `top_logprobs`, `user` 등.
   실제 지원 대상만 선택한다.
 
@@ -313,6 +314,11 @@ Responses API에 재생한다.
 | Responses MCP approval | 명시적 native | approval request는 client `ToolUseBlock`, response는 `ToolResultBlock` |
 | Gemini executable code/result, toolCall/toolResponse | 명시적 native | 원래 Part와 순서 보존 |
 | Gemini grounding/url context metadata | 명시적 native | candidate 전용이라 같은 벤더 요청 이력에서도 생략 |
+
+Gemini는 `functionDeclarations`와 내장 도구를 한 요청에 함께 받으면
+`toolConfig.includeServerSideToolInvocations`를 요구한다. 두 종류가 모두 있으면 어댑터가 이 키의
+기본값을 채운다. 호출자가 `tool_config`나 raw `toolConfig`로 이 키를 명시하면 그 값을 그대로
+보낸다. `toolConfig`의 다른 키는 어느 경우에도 어댑터가 바꾸지 않는다.
 
 **어떤 경우에도 브리지가 도구를 자동 등록하지 않는다.** 다른 벤더에서 옮겨온 가상 도구
 (`anthropic_web_search` 등)는 이력에만 존재하고 요청 `tools`에는 들어가지 않는다. 따라서 모델이

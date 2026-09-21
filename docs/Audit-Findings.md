@@ -198,6 +198,34 @@ Gemini `contents[1].parts[0].function_call.args ... ":"`.
 기존 회귀 테스트가 `input_json`만 단언하고 `input`을 보지 않아 통과했다. 조각 경계를 유효 JSON
 지점에서 끊는 테스트를 `test_merge.py`에 넣었다.
 
+### A-14. 함수 도구와 내장 도구를 함께 보내면 Gemini가 거절한다 — 400
+
+`해결` · `vendors/generate_content.py`
+
+`INVALID_ARGUMENT: Please enable tool_config.include_server_side_tool_invocations to use
+Built-in tools with Function calling`. 두 종류 중 하나만 있으면 정상이므로, 내장 도구를 카탈로그에
+등록해 둔 배포에서는 Gemini 모델의 모든 요청이 실패했다. 특정 프롬프트나 대화 상태와 무관하다.
+
+`_tools()`는 native wire와 `functionDeclarations`를 한 배열로 만들어 `tools`에 실었지만 본문에
+`toolConfig`를 만들지 않았다. Gemini는 둘을 섞을 때만 이 플래그를 요구해서, 한 종류만 쓰던
+동안에는 드러나지 않았다.
+
+`build_body`가 두 종류가 모두 있을 때 `toolConfig.includeServerSideToolInvocations`의 기본값을
+채운다. `_tools()`가 함수 선언을 0번에 두므로 길이 2 이상이면 두 종류가 모두 있다는 뜻이고,
+따로 표시를 만들지 않는다. `tool_choice`가 만든 `functionCallingConfig` 등 다른 키는 유지한다.
+
+호출자가 `Hyperparameters.tool_config`나 raw `toolConfig`로 이 키를 명시하면 도구 구성과 무관하게
+그 값을 그대로 보낸다. 조합이 거절될 것이 예상되어도 요청 전에 막지 않는다. 한 키의 값을 정하는
+주체를 하나로 두는 편이 우선순위 규칙을 두는 것보다 단순하고, 거절 여부의 판단은 서버에 있다.
+
+`Hyperparameters`가 `extra="forbid"`라 이 플래그를 넣을 방법이 없다고 볼 수 있으나, `tool_config`
+필드가 이미 있어 수정 전에도 호출자가 직접 넣는 우회는 가능했다. 그 경로가 이제 명시값 경로다.
+
+응답 쪽은 바꾸지 않았다. 이 플래그가 켜져 돌아오는 `toolCall`/`toolResponse` part는 이미
+`ServerToolBlock`으로 보존하고 원형으로 재전송한다(`test_current_api_contracts.py`).
+
+wire 수준 재현과 오류 문구는 외부 보고에 근거한다. 라이브 호출로 직접 확인하지 못했다.
+
 ## B. 새 설계가 요구하는 미구현 항목
 
 README 표가 기술하지만 코드에 아직 없는 것이다.
