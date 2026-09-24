@@ -50,12 +50,12 @@ class VendorAdapter(Protocol):
         """
         ...
 
-    def is_terminal(self, event: SseEvent) -> bool:
-        """이 이벤트가 스트림의 끝인지를 확인한다."""
+    def is_terminal(self, frame: SseEvent) -> bool:
+        """이 프레임이 스트림의 끝인지를 확인한다."""
         ...
 
-    def decode(self, event: SseEvent) -> Any | None:
-        """이벤트 하나를 벤더 chunk 객체로. ``None``이면 무시한다."""
+    def decode(self, frame: SseEvent) -> Any | None:
+        """프레임 하나를 벤더 chunk 객체로. ``None``이면 무시한다."""
         ...
 
     def to_hub(self) -> StreamMapper[Any, Any]:
