@@ -41,6 +41,11 @@ uv run pytest
 
 ## 사용법
 
+요청·응답 모델, delta 출력과 병합 규칙, 종료·취소·오류 처리는
+[API 스트리밍 명세](docs/Streaming-API.md)를 참고한다.
+사용자 작성 assistant 이력의 `synthetic=False` 기본값과 사용법은
+[외부 연동 계약](docs/Synthetic-Assistant-Messages.md)에 정리되어 있다.
+
 ### 비동기 API
 
 ```python
@@ -639,6 +644,17 @@ Bridge가 시스템 프롬프트에 자동 삽입하지 않는다. 등록되지 
 - Responses의 reasoning은 표시 가능한 summary와 불투명한 `encrypted_content`를 구분한다. 같은 API로 이력을 되보낼 때 reasoning Item을 원형대로 재전송한다.
 - 타 벤더 assistant 이력을 Responses로 보낼 때는 `id`/`status`가 필요한 output message를 위조하지 않고 OpenAI SDK의 `EasyInputMessageParam`(`role=assistant`, 문자열 content)을 사용한다. `phase=commentary|final_answer`가 있으면 함께 보존한다.
 - Gemini의 `thoughtSignature`는 `functionCall`뿐 아니라 일반 Part에도 붙을 수 있다. 반환된 Part와 서명을 같은 Gemini 요청에서 그대로 재생한다.
+
+### Chat Completions 블록 인덱스
+
+Chat Completions 응답은 블록 최초 등장 순서대로 0부터 index를 부여한다. 같은 채널의
+연속 delta는 누적하지만, `content → reasoning → content`는 서로 다른 세 블록으로
+유지한다. 도구 호출은 원본 호출 index별로 조립하며 허브 index에 타입별 특수값을 쓰지 않는다.
+이 규칙은 Chat Completions 어댑터 출력 기준이며 다른 벤더와 vocabulary의 식별 규칙은 유지한다.
+
+Chat Completions 요청으로 되돌릴 때는 블록 순서에 따라 assistant content와 설정된
+reasoning 필드에 각각 concat한다. 공개 index는 숨기지 않는다. 동시 필드 처리 순서,
+annotation 좌표 및 입력 정렬 조건은 [스트리밍 명세](docs/Streaming-API.md)를 참고한다.
 
 ## 예시
 

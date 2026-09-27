@@ -456,9 +456,16 @@ def test_chat_repeated_reasoning_and_parallel_tool_deltas_do_not_collide() -> No
         ],
     )
 
-    assert [block.type for block in result.content] == ["thinking", "tool_use", "tool_use"]
-    thinking, first, second = result.content
-    assert thinking.thinking == "first; second"
+    assert [block.type for block in result.content] == [
+        "thinking",
+        "tool_use",
+        "thinking",
+        "tool_use",
+    ]
+    assert [block.index for block in result.content] == [0, 1, 2, 3]
+    thinking, first, later_thinking, second = result.content
+    assert thinking.thinking == "first; "
+    assert later_thinking.thinking == "second"
     assert [(first.id, first.input_json), (second.id, second.input_json)] == [
         ("c1", '{"step":1}'),
         ("c2", '{"step":2}'),
@@ -670,3 +677,91 @@ def test_remote_reference_results_are_omitted_not_faked() -> None:
     assert build(chat_completions, history)["messages"] == []
     assert build(ResponsesAdapter(), history)["input"] == []
     assert build(GEMINI, history)["contents"] == []
+
+
+@pytest.mark.parametrize("first", ["content", "reasoning_content"])
+def test_chat_channel_switches_preserve_order_and_replay(first: str) -> None:
+    from completion_bridge.vendors import ChatCompletionsAdapter
+
+    adapter = ChatCompletionsAdapter(reasoning_input_field="reasoning_content")
+    other = "reasoning_content" if first == "content" else "content"
+    payloads = [{first: "A"}, {}, {first: "B"}, {other: "C"}, {first: "D"}]
+    result = merge(adapter, [{"choices": [{"delta": delta}]} for delta in payloads])
+    assert [block.index for block in result.content] == [0, 1, 2]
+    expected = (
+        ["text", "thinking", "text"] if first == "content" else ["thinking", "text", "thinking"]
+    )
+    assert [block.type for block in result.content] == expected
+    assert [getattr(block, "text", getattr(block, "thinking", "")) for block in result.content] == [
+        "AB",
+        "C",
+        "D",
+    ]
+    # Order indices also restore a caller-reordered block list.
+    message = HubMessage(role="assistant", content=list(reversed(result.content)))
+    wire = build(adapter, [message])["messages"][0]
+    assert wire[first] == "ABD"
+    assert wire[other] == "C"
+
+
+def test_chat_same_event_order_and_annotation_target() -> None:
+    result = merge(
+        chat_completions,
+        [
+            {"choices": [{"delta": {"content": "ab"}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning": "why",
+                            "content": "cd",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {
+                                        "start_index": 2,
+                                        "end_index": 4,
+                                        "url": "https://example.test",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        ],
+    )
+    assert [block.index for block in result.content] == [0, 1, 2, 3]
+    assert [block.type for block in result.content] == ["text", "thinking", "text", "annotation"]
+    annotation = result.content[3]
+    assert annotation.target_index == 2
+    assert (annotation.start_index, annotation.end_index) == (0, 2)
+    assert annotation.native["url_citation"]["start_index"] == 2
+
+
+def test_chat_sparse_tool_indices_and_unindexed_complete_calls() -> None:
+    for calls in [
+        [{"index": 7, "id": "a"}, {"index": 3, "id": "b"}],
+        [{"id": "a"}, {"id": "b"}],
+    ]:
+        result = merge(chat_completions, [{"choices": [{"message": {"tool_calls": calls}}]}])
+        assert [block.index for block in result.content] == [0, 1]
+        assert [block.id for block in result.content] == ["a", "b"]
+
+
+def test_chat_refusal_audio_and_metadata_keep_dense_indices() -> None:
+    result = merge(
+        chat_completions,
+        [
+            {"choices": [{"delta": {"refusal": "no"}}]},
+            {"usage": {"completion_tokens": 1}},
+            {"choices": [{"delta": {"refusal": " thanks"}}]},
+            {"choices": [{"delta": {"audio": {"data": "a"}}}]},
+            {"choices": [{"delta": {"audio": {"data": "b"}}}]},
+            {"choices": [{"delta": {"refusal": "again"}}]},
+        ],
+    )
+    assert [block.index for block in result.content] == [0, 1, 2]
+    assert result.content[0].text.endswith("no thanks")
+    assert result.content[1].data == "ab"
+    assert result.content[2].text.endswith("again")

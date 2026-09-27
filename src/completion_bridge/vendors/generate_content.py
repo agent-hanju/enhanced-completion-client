@@ -558,7 +558,15 @@ class GenerateContentAdapter:
                 if text:
                     system.append(text)
                 continue
-            contents.extend(self._contents(message.role, message.content, lowerer, call_names))
+            contents.extend(
+                self._contents(
+                    message.role,
+                    message.content,
+                    lowerer,
+                    call_names,
+                    synthetic=message.synthetic,
+                )
+            )
 
         params = request.parameters_for(self.parameter_family, vendor_name=self.name)
         body: dict[str, Any] = {"contents": contents}
@@ -588,6 +596,8 @@ class GenerateContentAdapter:
         blocks: list[ContentBlock],
         lowerer: Lowerer,
         call_names: dict[str, str],
+        *,
+        synthetic: bool = False,
     ) -> list[dict[str, Any]]:
         """Part가 요구하는 role을 지키며 한 허브 턴을 0..N Content로 펼친다."""
         contents: list[dict[str, Any]] = []
@@ -598,7 +608,7 @@ class GenerateContentAdapter:
             nonlocal pending
             if not pending or pending_role is None:
                 return
-            parts = self._parts(pending, lowerer, call_names)
+            parts = self._parts(pending, lowerer, call_names, synthetic=synthetic)
             pending = []
             if parts:
                 contents.append({"role": pending_role, "parts": parts})
@@ -629,6 +639,8 @@ class GenerateContentAdapter:
         blocks: list[ContentBlock],
         lowerer: Lowerer,
         call_names: dict[str, str],
+        *,
+        synthetic: bool = False,
     ) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
@@ -650,6 +662,9 @@ class GenerateContentAdapter:
             if part is None:
                 plain.append(block)
                 continue
+            if synthetic and isinstance(block, ToolUseBlock) and not part.get("thoughtSignature"):
+                # Official exception for client-authored calls; never mutate stored blocks.
+                part["thoughtSignature"] = "skip_thought_signature_validator"
             if (
                 isinstance(block, ServerToolBlock | VendorBlock)
                 and not any(field in part for field in _PART_FIELDS)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .blocks import Block, ContentBlock, TextBlock
 from .parameters import Hyperparameters
@@ -72,6 +72,14 @@ class HubMessage(BaseModel):
 
     role: str
     content: list[Block] = Field(default_factory=list)
+    synthetic: bool = False
+    """애플리케이션이 작성·편집한 assistant 이력이라는 명시적 선언."""
+
+    @model_validator(mode="after")
+    def validate_synthetic_role(self) -> HubMessage:
+        if self.synthetic and self.role != "assistant":
+            raise ValueError("synthetic=True requires role='assistant'")
+        return self
 
     @classmethod
     def user(cls, text: str) -> HubMessage:
@@ -82,10 +90,12 @@ class HubMessage(BaseModel):
         return cls(role="system", content=[TextBlock(text=text)])
 
     @classmethod
-    def assistant(cls, text: str | None = None, *, blocks: list[Any] | None = None) -> HubMessage:
+    def assistant(
+        cls, text: str | None = None, *, blocks: list[Any] | None = None, synthetic: bool = False
+    ) -> HubMessage:
         if blocks is None:
             blocks = [TextBlock(text=text or "")]
-        return cls(role="assistant", content=blocks)
+        return cls(role="assistant", content=blocks, synthetic=synthetic)
 
     @classmethod
     def of_response(cls, response: HubResponse) -> HubMessage:

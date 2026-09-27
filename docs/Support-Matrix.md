@@ -408,12 +408,12 @@ delta는 한 블록에 누적하고, 다른 index는 타입이 같아도 독립 
 | Anthropic Messages | `content_block.index`가 있어 text/thinking/tool/result를 포함한 독립 블록을 정확히 구분 |
 | OpenAI Responses | `output_index` + `content_index`, reasoning의 `summary_index`로 독립 Item/Part를 정확히 구분 |
 | Gemini GenerateContent | 한 chunk의 `parts[]` 위치는 정확히 구분; chunk 사이에는 part index가 없어 같은 위치·같은 종류의 연속 text를 하나의 streaming block으로 누적 |
-| Chat Completions | content, reasoning, refusal, audio는 각각 단일 delta 채널이라 채널 안의 원래 block 경계를 복원할 수 없음; `tool_calls[].index`만 복수 호출을 구분 |
+| Chat Completions | 블록 최초 등장 순서로 0부터 번호 부여; 채널 전환 시 새 블록, 같은 채널 연속 조각은 누적; 도구 호출은 원본 index별로 추적 |
 
 [변환 규칙 및 실행 예시](Conversion-Examples.md)는 같은 메시지 안의 독립 text block 두 개를 네
 request 형식으로 내린 실제 JSON을 포함한다. [ReAct 순서 테스트](../tests/test_react_sequences.py)는
-core Hub block 각 타입의 동일 타입 반복, Anthropic/Responses/Gemini의 반복 Part, Chat의 단일
-채널 한계를 고정한다.
+core Hub block 각 타입의 동일 타입 반복, Anthropic/Responses/Gemini의 반복 Part, Chat의
+채널 전환 보존과 필드별 요청 재조립을 검증한다.
 
 ## ReAct와 반복 tool/thinking 순서
 
@@ -435,12 +435,12 @@ assistant(thinking, tool_use A)
 |---|---|
 | 여러 HTTP 턴에 걸친 client tool loop | 네 serializer 모두 assistant/result 턴과 call ID 순서 보존 |
 | 한 응답의 여러 tool call | Chat의 `tool_calls[].index`, 나머지 block/item/part 위치로 구분 |
-| Chat의 반복 reasoning delta + 병렬 tool call | reasoning은 한 채널로 누적하고 각 tool index별 인수와 ID를 독립 병합 |
+| Chat의 반복 reasoning delta + 병렬 tool call | 연속 reasoning은 누적하고 도구 호출 뒤의 reasoning은 새 블록; 각 tool index별 인수와 ID는 독립 병합 |
 | Anthropic의 thinking → server tool/result → thinking → client tool | content block index와 도착 순서 보존, signature 포함 동일 벤더 재생 |
 | Anthropic server loop 제한 도달 | `pause_turn`을 그대로 노출하므로 소비 앱이 반환 content로 다음 요청을 결정 가능 |
 | Responses의 reasoning → server tool → reasoning → client tool | `output_index`와 `content_index`/`summary_index`를 합성한 key로 순서 보존 |
 | Gemini의 thought → code/result → thought → functionCall | 여러 Part의 도착 순서와 `thoughtSignature` 보존 |
-| Chat의 reasoning/text/tool 간 세밀한 interleave | 프로토콜이 별도 delta 필드로 제공하므로 reasoning 1개, text 1개 채널로 합쳐짐; 여러 tool call 순서는 보존 |
+| Chat의 reasoning/text/tool 간 세밀한 interleave | 관찰한 채널 전환 순서로 블록 분리; 요청 재생은 블록 순서대로 content와 설정된 reasoning 필드에 각각 concat |
 | 환경 의존 server tool block | 한 응답 안의 순서는 보존하지만 실행·후속 세션 연결은 Bridge 지원 범위가 아님 |
 
 회귀 테스트는 [test_react_sequences.py](../tests/test_react_sequences.py)에 있다. 여기서 Chat의
@@ -496,3 +496,12 @@ SDK가 소유한다. 브리지는 요청 body 생성, SSE 해석, Hub block 보�
 견본의 “전체”는 공개 core Hub block 계열과 변환 정책 계열 전체를 뜻한다. 버전이 붙은 모든 벤더
 내장 tool 이름과 이벤트 문자열을 중복 나열한다는 뜻은 아니다. 같은 실행 주체·보존 정책별 대표
 payload를 견본과 회귀 테스트에서 실행한다.
+
+
+## 사용자 작성 assistant 이력
+
+`HubMessage.synthetic`의 기본값은 `False`다. True인 assistant 메시지를 Gemini로 변환하면
+서명이 없는 함수 호출 Part에만 가상 호출용 처리를 적용하고, 실제 Gemini 서명은 보존한다.
+Chat Completions·Messages·Responses는 기존 변환을 유지한다. 이 선언은 벤더 요청에 전달되지
+않으며 HubResponse 스트리밍 객체에도 추가하지 않는다.
+자세한 생성·저장·복원 계약은 [외부 연동 문서](Synthetic-Assistant-Messages.md)를 참고한다.

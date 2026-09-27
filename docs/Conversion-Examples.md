@@ -76,7 +76,7 @@
   "content": [
     {
       "type": "thinking",
-      "index": -1,
+      "index": 0,
       "source": "chat_completions",
       "native": {},
       "thinking": "날씨 도구를 호출한다."
@@ -1143,7 +1143,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "media_type": "text/plain",
       "citations_enabled": true
     }
-  ]
+  ],
+  "synthetic": false
 }</pre></td></tr>
 <tr><th>Chat Completions</th><td><pre>{
   "messages": [
@@ -1318,22 +1319,14 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "text": "두 번째 text block",
       "citations": []
     }
-  ]
+  ],
+  "synthetic": false
 }</pre></td></tr>
 <tr><th>Chat Completions</th><td><pre>{
   "messages": [
     {
       "role": "assistant",
-      "content": [
-        {
-          "type": "text",
-          "text": "첫 번째 text block"
-        },
-        {
-          "type": "text",
-          "text": "두 번째 text block"
-        }
-      ]
+      "content": "첫 번째 text block두 번째 text block"
     }
   ]
 }</pre></td></tr>
@@ -1400,7 +1393,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
           "step": 1
         }
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "user",
@@ -1414,7 +1408,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         "content": "first",
         "blocks": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "assistant",
@@ -1430,7 +1425,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
           "step": 2
         }
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "user",
@@ -1444,7 +1440,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         "content": "second",
         "blocks": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "assistant",
@@ -1455,7 +1452,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         "text": "완료",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   }
 ]</pre></td></tr>
 <tr><th>Chat Completions</th><td><pre>{
@@ -1679,7 +1677,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
           "city": "서울"
         }
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "user",
@@ -1715,7 +1714,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
           }
         ]
       }
-    ]
+    ],
+    "synthetic": false
   }
 ]</pre></td></tr>
 <tr><th>Chat Completions</th><td><pre>{
@@ -1919,14 +1919,14 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
   "content": [
     {
       "type": "thinking",
-      "index": -1,
+      "index": 0,
       "source": "chat_completions",
       "native": {},
       "thinking": "이미지와 근거를 결합한다."
     },
     {
       "type": "text",
-      "index": 0,
+      "index": 1,
       "source": "chat_completions",
       "native": {},
       "text": "서울은 25도다.",
@@ -1934,7 +1934,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "audio",
-      "index": -3,
+      "index": 2,
       "source": "chat_completions",
       "native": {
         "id": "audio-1",
@@ -1950,6 +1950,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "annotation",
+      "index": 3,
       "source": "chat_completions",
       "native": {
         "type": "url_citation",
@@ -1961,7 +1962,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         }
       },
       "annotation_index": 0,
-      "target_index": 0,
+      "target_index": 1,
       "kind": "url_citation",
       "id": "https://weather.example/seoul",
       "start_index": 0,
@@ -4145,26 +4146,14 @@ unindexed로 만들어 최종 병합에서 순서를 보존한다.
       "level": "warning",
       "text": "저장된 블록"
     }
-  ]
+  ],
+  "synthetic": false
 }</pre></td></tr>
 <tr><th>Chat Completions 요청 직렬화</th><td><pre>{
   "messages": [
     {
       "role": "assistant",
-      "content": [
-        {
-          "type": "text",
-          "text": "앞 "
-        },
-        {
-          "type": "text",
-          "text": "&lt;badge level=\"warning\"&gt;점검 &amp;amp; 확인&lt;/badge&gt;"
-        },
-        {
-          "type": "text",
-          "text": " 뒤"
-        }
-      ]
+      "content": "앞 &lt;badge level=\"warning\"&gt;점검 &amp;amp; 확인&lt;/badge&gt; 뒤"
     }
   ]
 }</pre></td></tr>

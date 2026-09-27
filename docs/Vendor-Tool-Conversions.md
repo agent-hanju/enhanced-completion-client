@@ -354,7 +354,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         "text": "오늘 달러 환율을 웹에서 찾아줘.",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "assistant",
@@ -426,7 +427,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         "text": "오늘 종가는 1,383원이다.",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "user",
@@ -437,7 +439,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         "text": "지난 30일 평균을 계산해줘.",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "assistant",
@@ -516,7 +519,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         "text": "30일 평균은 1,376.4원이다.",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "user",
@@ -527,7 +531,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         "text": "추세를 코드로 확인해줘.",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "assistant",
@@ -580,7 +585,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         "text": "최근 추세는 상승이다.",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "user",
@@ -591,14 +597,15 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         "text": "사내 고시 환율도 확인해줘.",
         "citations": []
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "assistant",
     "content": [
       {
         "type": "tool_use",
-        "index": 1,
+        "index": 0,
         "source": "chat_completions",
         "native": {
           "index": 0,
@@ -617,7 +624,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
           "date": "2026-09-16"
         }
       }
-    ]
+    ],
+    "synthetic": false
   },
   {
     "role": "user",
@@ -634,7 +642,8 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
         },
         "blocks": []
       }
-    ]
+    ],
+    "synthetic": false
   }
 ]</pre></td></tr>
 </table>

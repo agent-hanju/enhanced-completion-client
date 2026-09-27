@@ -155,8 +155,8 @@ class TestLiveStreaming:
         확인하려는 것이 셋이다. 두 채널이 섞이지 않고 갈리는지, 227개 델타가 인덱스로 접혀
         블록 두 개가 되는지, 델타를 이어붙인 것과 병합 결과가 같은지다.
 
-        어댑터가 추론에 ``index=-1``, 본문에 ``index=0``을 준다. 인덱스가 없으면 블록이 델타
-        수만큼 흩어진다.
+        어댑터가 먼저 등장한 추론에 ``index=0``, 뒤의 본문에 ``index=1``을 준다.
+        인덱스가 없으면 블록이 델타 수만큼 흩어진다.
         """
         async with httpx.AsyncClient(timeout=900.0) as client:
             stream = _bridge(client).stream(

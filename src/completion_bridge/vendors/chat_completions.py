@@ -44,21 +44,30 @@ _RESERVED = frozenset({"model", "messages", "tools", "stream"})
 class _ToHub:
     """Chat Completions chunk를 허브 델타로 바꾼다.
 
-    도구 호출 조각의 ``index``를 그대로 블록 ``index``로 옮긴다. 병합기가 그 키로 조각을
-    짝지어 붙인다. 본문과 추론 블록에도 고정 인덱스를 주어 같은 블록에 누적되게 한다.
+    블록 최초 등장 순서로 0부터 번호를 부여한다. 연속 채널은 같은 블록에 누적하고
+    채널이 바뀌면 새 블록을 만든다. 도구 호출은 원본 index별로 같은 블록을 유지한다.
     """
-
-    # 본문과 추론은 choice 하나에 각각 하나씩이다. 도구 인덱스와 겹치지 않게 떨어뜨린다.
-    TEXT_INDEX = 0
-    THINKING_INDEX = -1
-    REFUSAL_INDEX = -2
-    AUDIO_INDEX = -3
-    TOOL_INDEX_BASE = 1
 
     def __init__(self, source: str) -> None:
         self._source = source
-        self._refusal_started = False
         self._next_annotation = 0
+        self._next_index = 0
+        self._channel: str | None = None
+        self._channel_index = 0
+        self._tool_indices: dict[int, int] = {}
+        self._text_ranges: dict[int, tuple[int, int]] = {}
+        self._text_length = 0
+
+    def _allocate(self) -> int:
+        index = self._next_index
+        self._next_index += 1
+        return index
+
+    def _segment(self, channel: str) -> int:
+        if self._channel != channel:
+            self._channel = channel
+            self._channel_index = self._allocate()
+        return self._channel_index
 
     def map(self, chunk: dict[str, Any]) -> list[HubResponse]:
         choices = chunk.get("choices") or []
@@ -70,22 +79,27 @@ class _ToHub:
         reasoning = delta.get("reasoning") or delta.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
             blocks.append(
-                ThinkingBlock(thinking=reasoning, index=self.THINKING_INDEX, source=self._source)
+                ThinkingBlock(
+                    thinking=reasoning, index=self._segment("reasoning"), source=self._source
+                )
             )
 
         content = delta.get("content")
         if isinstance(content, str) and content:
-            blocks.append(TextBlock(text=content, index=self.TEXT_INDEX, source=self._source))
+            index = self._segment("content")
+            start = self._text_ranges.get(index, (self._text_length, self._text_length))[0]
+            self._text_length += len(content)
+            self._text_ranges[index] = (start, self._text_length)
+            blocks.append(TextBlock(text=content, index=index, source=self._source))
 
         # 거부도 사용자가 봐야 하는 본문이다. 다만 답변과 구분되게 표시를 붙인다.
         refusal = delta.get("refusal")
         if isinstance(refusal, str) and refusal:
-            prefix = "" if self._refusal_started else REFUSAL_PREFIX
-            self._refusal_started = True
+            prefix = "" if self._channel == "refusal" else REFUSAL_PREFIX
             blocks.append(
                 TextBlock(
                     text=prefix + refusal,
-                    index=self.REFUSAL_INDEX,
+                    index=self._segment("refusal"),
                     source=self._source,
                 )
             )
@@ -94,7 +108,7 @@ class _ToHub:
         if isinstance(audio, dict):
             blocks.append(
                 AudioBlock(
-                    index=self.AUDIO_INDEX,
+                    index=self._segment("audio"),
                     source=self._source,
                     native=dict(audio),
                     file_id=audio.get("id"),
@@ -108,10 +122,10 @@ class _ToHub:
             if isinstance(annotation, dict):
                 blocks.append(self._annotation(annotation))
 
-        for call in delta.get("tool_calls") or []:
+        for position, call in enumerate(delta.get("tool_calls") or []):
             if not isinstance(call, dict):
                 continue
-            blocks.append(self._tool_block(call))
+            blocks.append(self._tool_block(call, position))
 
         usage = self._usage(chunk.get("usage"))
         finish = head.get("finish_reason")
@@ -129,7 +143,7 @@ class _ToHub:
     def flush(self) -> list[HubResponse]:
         return []
 
-    def _tool_block(self, call: dict[str, Any]) -> ToolUseBlock:
+    def _tool_block(self, call: dict[str, Any], position: int) -> ToolUseBlock:
         """도구 호출 조각 하나를 블록으로.
 
         벤더가 보내지 않은 필드는 넣지 않는다. 빈 문자열로 채워 넣으면 병합기가 그것을
@@ -139,8 +153,12 @@ class _ToHub:
         kind = call.get("type")
         fn = call.get("function") or call.get("custom") or {}
         raw_index = call.get("index")
+        key = raw_index if isinstance(raw_index, int) else position
+        if key not in self._tool_indices:
+            self._tool_indices[key] = self._allocate()
+        self._channel = None
         fields: dict[str, Any] = {
-            "index": self.TOOL_INDEX_BASE + (raw_index if isinstance(raw_index, int) else 0),
+            "index": self._tool_indices[key],
             "source": self._source,
             "native": dict(call),
         }
@@ -162,9 +180,9 @@ class _ToHub:
         annotation_index = self._next_annotation
         self._next_annotation += 1
         fields: dict[str, Any] = {
+            "index": self._allocate(),
             "source": self._source,
             "annotation_index": annotation_index,
-            "target_index": self.TEXT_INDEX,
             "kind": str(annotation.get("type") or "annotation"),
             "native": dict(annotation),
         }
@@ -182,6 +200,17 @@ class _ToHub:
         for key in ("start_index", "end_index"):
             if isinstance(detail.get(key), int):
                 fields[key] = detail[key]
+        # Wire offsets address concatenated content; hub offsets address the target block.
+        start, end = fields.get("start_index"), fields.get("end_index")
+        if isinstance(start, int) and isinstance(end, int):
+            for index, (left, right) in self._text_ranges.items():
+                if left <= start < end <= right:
+                    fields.update(
+                        target_index=index, start_index=start - left, end_index=end - left
+                    )
+                    break
+        elif len(self._text_ranges) == 1:
+            fields["target_index"] = next(iter(self._text_ranges))
         return AnnotationBlock(**fields)
 
     @staticmethod
@@ -259,7 +288,11 @@ class ChatCompletionsAdapter:
         out: list[dict[str, Any]] = []
         for message in messages:
             pending: list[ContentBlock] = []
-            for block in message.content:
+            blocks = list(message.content)
+            # Only dense order indices are sortable; vocabulary/vendor keys are opaque.
+            if blocks and {block.index for block in blocks} == set(range(len(blocks))):
+                blocks.sort(key=lambda block: block.index if block.index is not None else 0)
+            for block in blocks:
                 if not isinstance(block, ToolResultBlock):
                     pending.append(block)
                     continue
@@ -343,8 +376,10 @@ class ChatCompletionsAdapter:
             return None
         wire: dict[str, Any] = {"role": role}
         if parts:
-            if len(parts) == 1 and parts[0].get("type") == "text":
-                wire["content"] = parts[0]["text"]
+            if all(part.get("type") == "text" for part in parts) and (
+                role == "assistant" or len(parts) == 1
+            ):
+                wire["content"] = "".join(part["text"] for part in parts)
             else:
                 wire["content"] = parts
         elif tool_calls:
