@@ -114,8 +114,8 @@ class TestNested:
 class TestHubResponse:
     def test_text_blocks_accumulate_into_one_block(self) -> None:
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
-        merger.apply(HubResponse(role="assistant", content=[TextBlock(text="Hel", index=0)]))
-        merger.apply(HubResponse(content=[TextBlock(text="lo", index=0)]))
+        merger.apply(HubResponse(role="assistant", content=[TextBlock(text="Hel", seq=(0, 0))]))
+        merger.apply(HubResponse(content=[TextBlock(text="lo", seq=(0, 0))]))
         built = merger.build()
         assert built.role == "assistant"
         assert built.text == "Hello"
@@ -124,14 +124,14 @@ class TestHubResponse:
     def test_block_type_is_not_concatenated(self) -> None:
         """type이 'texttext'가 되면 유니온 조회가 깨진다."""
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
-        merger.apply(HubResponse(content=[TextBlock(text="a", index=0)]))
-        merger.apply(HubResponse(content=[TextBlock(text="b", index=0)]))
+        merger.apply(HubResponse(content=[TextBlock(text="a", seq=(0, 0))]))
+        merger.apply(HubResponse(content=[TextBlock(text="b", seq=(0, 0))]))
         assert merger.build().content[0].type == "text"
 
     def test_thinking_and_text_stay_separate(self) -> None:
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
-        merger.apply(HubResponse(content=[ThinkingBlock(thinking="why", index=-1)]))
-        merger.apply(HubResponse(content=[TextBlock(text="because", index=0)]))
+        merger.apply(HubResponse(content=[ThinkingBlock(thinking="why", seq=(-1, 0))]))
+        merger.apply(HubResponse(content=[TextBlock(text="because", seq=(0, 0))]))
         built = merger.build()
         assert [b.type for b in built.content] == ["thinking", "text"]
         assert built.text == "because"
@@ -139,9 +139,9 @@ class TestHubResponse:
     def test_tool_arguments_accumulate(self) -> None:
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
         merger.apply(
-            HubResponse(content=[ToolUseBlock(id="c1", name="get", input_json='{"q', index=1)])
+            HubResponse(content=[ToolUseBlock(id="c1", name="get", input_json='{"q', seq=(1, 0))])
         )
-        merger.apply(HubResponse(content=[ToolUseBlock(input_json='":2}', index=1)]))
+        merger.apply(HubResponse(content=[ToolUseBlock(input_json='":2}', seq=(1, 0))]))
         block = merger.build().content[0]
         assert isinstance(block, ToolUseBlock)
         assert block.id == "c1"
@@ -156,7 +156,7 @@ class TestHubResponse:
         """
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
         for fragment in ('{"term', '":"', '하이비"}'):
-            merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, index=0)]))
+            merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, seq=(0, 0))]))
         block = merger.build().content[0]
         assert isinstance(block, ToolUseBlock)
         assert block.input_json == '{"term":"하이비"}'
@@ -166,7 +166,7 @@ class TestHubResponse:
         """스트림이 인수 중간에 끊기면 ``input``은 ``None``으로 남는다."""
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
         for fragment in ('{"term', '":"'):
-            merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, index=0)]))
+            merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, seq=(0, 0))]))
         block = merger.build().content[0]
         assert isinstance(block, ToolUseBlock)
         assert block.input_json == '{"term":"'
@@ -174,5 +174,5 @@ class TestHubResponse:
 
     def test_build_is_repeatable(self) -> None:
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
-        merger.apply(HubResponse(content=[TextBlock(text="x", index=0)]))
+        merger.apply(HubResponse(content=[TextBlock(text="x", seq=(0, 0))]))
         assert merger.build().text == merger.build().text == "x"

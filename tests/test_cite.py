@@ -9,17 +9,20 @@ import pytest
 import respx
 
 from completion_bridge import (
+    AnnotationBlock,
     Bridge,
     Citation,
     CitationBlock,
     CiteVocabulary,
     HubMessage,
     HubResponse,
+    MappingError,
     StreamMerger,
     SyncBridge,
     TextBlock,
     ThinkingBlock,
 )
+from completion_bridge.seq import finalize
 from completion_bridge.vendors import chat_completions
 
 BASE = "http://llm.test"
@@ -375,11 +378,11 @@ class TestVocabularyContract:
 
     def test_merger_attaches_nested_citation_delta_to_text_slot(self) -> None:
         result = merge(
-            HubResponse(content=[TextBlock(text="답", index=0)]),
+            HubResponse(content=[TextBlock(text="답", seq=(0, 0))]),
             HubResponse(
                 content=[
                     TextBlock(
-                        index=0,
+                        seq=(0, 0),
                         citations=[Citation(source="messages", id="d1")],
                     )
                 ]
@@ -389,3 +392,81 @@ class TestVocabularyContract:
         assert isinstance(text, TextBlock)
         assert text.text == "답"
         assert [(c.source, c.id) for c in text.citations] == [("messages", "d1")]
+
+
+class TestSegmentSeq:
+    """인용 조각은 원래 블록의 seq 끝에 조각 번호를 추가한 seq를 받는다."""
+
+    @respx.mock
+    async def test_segments_get_consecutive_safe_indices(self) -> None:
+        """조각마다 서로 다른 seq를 받고 최종 index는 0부터 연속한 안전 정수다."""
+        respx.post(URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=sse(
+                    '<cite id="a">서울</cite>과 <cite id="b">부산</cite>과 ',
+                    '<cite id="c">대구</cite>이다.',
+                ),
+            )
+        )
+        stream = bridge().stream(["도시?"])
+        deltas = [delta async for delta in stream]
+        blocks = [block for delta in deltas for block in delta.content]
+        assert all(block.index is None for block in blocks)
+        assert {block.seq for block in blocks} == {(0, 0, piece) for piece in range(6)}
+
+        result = stream.result
+        assert [block.index for block in result.content] == list(range(6))
+        assert all(block.seq is None for block in result.content)
+        assert [block.text for block in result.content if isinstance(block, TextBlock)] == [
+            "서울",
+            "과 ",
+            "부산",
+            "과 ",
+            "대구",
+            "이다.",
+        ]
+        assert [b.citations[0].id for b in cited_blocks(result)] == ["a", "b", "c"]
+
+    @respx.mock
+    async def test_segments_stay_inside_their_original_block(self) -> None:
+        """text가 아닌 블록의 seq에도 성분이 추가되어 다른 블록의 조각과 겹치지 않는다."""
+        payload = (
+            'data: {"choices":[{"delta":{"content":"앞 <cite id=\\"d1\\">A</cite>"}}]}\n\n'
+            'data: {"choices":[{"delta":{"reasoning":"생각"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":" 뒤"}}]}\n\n'
+            "data: [DONE]\n\n"
+        ).encode()
+        respx.post(URL).mock(return_value=httpx.Response(200, content=payload))
+        result = await bridge().complete(["x"])
+        assert [(block.type, getattr(block, "text", "")) for block in result.content] == [
+            ("text", "앞 "),
+            ("text", "A"),
+            ("thinking", ""),
+            ("text", " 뒤"),
+        ]
+        assert [block.index for block in result.content] == [0, 1, 2, 3]
+
+    def test_annotation_target_points_at_the_first_segment(self) -> None:
+        mapper = CiteVocabulary().lift_mapper()
+        deltas = [
+            *mapper.map(
+                HubResponse(
+                    content=[
+                        TextBlock(text='<cite id="d1">수도</cite>입니다', seq=(0, 0)),
+                        AnnotationBlock(id="u", seq=(0, 1), target_seq=(0, 0)),
+                    ]
+                )
+            ),
+            *mapper.flush(),
+        ]
+        result = finalize(merge(*deltas))
+        assert [block.type for block in result.content] == ["text", "text", "annotation"]
+        annotation = result.content[2]
+        assert isinstance(annotation, AnnotationBlock)
+        assert annotation.target_index == 0
+
+    def test_block_without_seq_is_rejected(self) -> None:
+        mapper = CiteVocabulary().lift_mapper()
+        with pytest.raises(MappingError, match="has no seq"):
+            mapper.map(HubResponse(content=[TextBlock(text="답")]))

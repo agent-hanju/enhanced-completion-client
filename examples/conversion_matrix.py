@@ -16,6 +16,7 @@ from completion_bridge import (
     ToolDefinition,
     ToolResultBlock,
 )
+from completion_bridge.seq import finalize
 from completion_bridge.vendors import (
     ChatCompletionsAdapter,
     GenerateContentAdapter,
@@ -250,7 +251,7 @@ def merge_response(scenario: Scenario) -> HubResponse:
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return merger.build()
+    return finalize(merger.build())
 
 
 def bridge(adapter: VendorAdapter) -> SyncBridge:

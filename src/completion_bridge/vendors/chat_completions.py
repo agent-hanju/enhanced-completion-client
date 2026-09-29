@@ -37,6 +37,7 @@ from ..hub import (
     Usage,
 )
 from ..mapper import StreamMapper
+from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
 from .base import JsonCall, Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_chat
@@ -53,30 +54,33 @@ _RESERVED = frozenset({"model", "messages", "tools", "stream"})
 class _ToHub:
     """Chat Completions chunk를 허브 델타로 바꾼다.
 
-    블록 최초 등장 순서로 0부터 번호를 부여한다. 연속 채널은 같은 블록에 누적하고
-    채널이 바뀌면 새 블록을 만든다. 도구 호출은 원본 index별로 같은 블록을 유지한다.
+    블록 최초 등장 순서로 0부터 번호 n을 부여하고 ``seq=(n, 0)``을 쓴다. 연속 채널은 같은
+    블록에 누적하고 채널이 바뀌면 새 블록을 만든다. 도구 호출은 원본 index별로 같은 블록을
+    유지한다. annotation은 대상 text 블록 바로 뒤의 seq를 받는다.
     """
 
     def __init__(self, source: str) -> None:
         self._source = source
-        self._next_annotation = 0
+        self._seqs = SeqAllocator(1)
         self._next_index = 0
         self._channel: str | None = None
-        self._channel_index = 0
-        self._tool_indices: dict[int, int] = {}
-        self._text_ranges: dict[int, tuple[int, int]] = {}
+        self._channel_seq: Seq = ()
+        self._tool_seqs: dict[int, Seq] = {}
+        self._text_ranges: dict[Seq, tuple[int, int]] = {}
         self._text_length = 0
 
-    def _allocate(self) -> int:
+    def _allocate(self) -> Seq:
+        """다음 블록 번호로 seq를 발급한다."""
         index = self._next_index
         self._next_index += 1
-        return index
+        return self._seqs.coord((index,))
 
-    def _segment(self, channel: str) -> int:
+    def _segment(self, channel: str) -> Seq:
+        """채널이 바뀌었으면 새 seq를, 같은 채널이면 이어 쓰는 블록의 seq를 돌려준다."""
         if self._channel != channel:
             self._channel = channel
-            self._channel_index = self._allocate()
-        return self._channel_index
+            self._channel_seq = self._allocate()
+        return self._channel_seq
 
     def map(self, chunk: dict[str, Any]) -> list[HubResponse]:
         choices = chunk.get("choices") or []
@@ -89,17 +93,17 @@ class _ToHub:
         if isinstance(reasoning, str) and reasoning:
             blocks.append(
                 ThinkingBlock(
-                    thinking=reasoning, index=self._segment("reasoning"), source=self._source
+                    thinking=reasoning, seq=self._segment("reasoning"), source=self._source
                 )
             )
 
         content = delta.get("content")
         if isinstance(content, str) and content:
-            index = self._segment("content")
-            start = self._text_ranges.get(index, (self._text_length, self._text_length))[0]
+            seq = self._segment("content")
+            start = self._text_ranges.get(seq, (self._text_length, self._text_length))[0]
             self._text_length += len(content)
-            self._text_ranges[index] = (start, self._text_length)
-            blocks.append(TextBlock(text=content, index=index, source=self._source))
+            self._text_ranges[seq] = (start, self._text_length)
+            blocks.append(TextBlock(text=content, seq=seq, source=self._source))
 
         # 거부도 사용자가 봐야 하는 본문이다. 다만 답변과 구분되게 표시를 붙인다.
         refusal = delta.get("refusal")
@@ -108,7 +112,7 @@ class _ToHub:
             blocks.append(
                 TextBlock(
                     text=prefix + refusal,
-                    index=self._segment("refusal"),
+                    seq=self._segment("refusal"),
                     source=self._source,
                 )
             )
@@ -117,7 +121,7 @@ class _ToHub:
         if isinstance(audio, dict):
             blocks.append(
                 AudioBlock(
-                    index=self._segment("audio"),
+                    seq=self._segment("audio"),
                     source=self._source,
                     native=dict(audio),
                     file_id=audio.get("id"),
@@ -163,11 +167,11 @@ class _ToHub:
         fn = call.get("function") or call.get("custom") or {}
         raw_index = call.get("index")
         key = raw_index if isinstance(raw_index, int) else position
-        if key not in self._tool_indices:
-            self._tool_indices[key] = self._allocate()
+        if key not in self._tool_seqs:
+            self._tool_seqs[key] = self._allocate()
         self._channel = None
         fields: dict[str, Any] = {
-            "index": self._tool_indices[key],
+            "seq": self._tool_seqs[key],
             "source": self._source,
             "native": dict(call),
         }
@@ -183,15 +187,17 @@ class _ToHub:
         return ToolUseBlock(**fields)
 
     def _annotation(self, annotation: dict[str, Any]) -> AnnotationBlock:
+        """annotation 하나를 대상 text 블록 뒤에 올 블록으로 만든다.
+
+        wire의 문자 범위가 이미 받은 text 블록 하나 안에 있으면 그 블록을 대상으로 삼고 범위를
+        블록 기준 오프셋으로 바꾼다. 받은 text 블록이 하나뿐이고 범위가 없으면 그 블록을
+        대상으로 삼는다. 대상이 없으면 지금까지 받은 블록 중 맨 끝 블록 뒤에 둔다.
+        """
         detail = annotation.get("url_citation")
         if not isinstance(detail, dict):
             detail = annotation
-        annotation_index = self._next_annotation
-        self._next_annotation += 1
         fields: dict[str, Any] = {
-            "index": self._allocate(),
             "source": self._source,
-            "annotation_index": annotation_index,
             "kind": str(annotation.get("type") or "annotation"),
             "native": dict(annotation),
         }
@@ -212,14 +218,13 @@ class _ToHub:
         # Wire offsets address concatenated content; hub offsets address the target block.
         start, end = fields.get("start_index"), fields.get("end_index")
         if isinstance(start, int) and isinstance(end, int):
-            for index, (left, right) in self._text_ranges.items():
+            for seq, (left, right) in self._text_ranges.items():
                 if left <= start < end <= right:
-                    fields.update(
-                        target_index=index, start_index=start - left, end_index=end - left
-                    )
+                    fields.update(target_seq=seq, start_index=start - left, end_index=end - left)
                     break
         elif len(self._text_ranges) == 1:
-            fields["target_index"] = next(iter(self._text_ranges))
+            fields["target_seq"] = next(iter(self._text_ranges))
+        fields["seq"] = self._seqs.after(fields.get("target_seq"))
         return AnnotationBlock(**fields)
 
     @staticmethod

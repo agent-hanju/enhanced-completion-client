@@ -1350,7 +1350,7 @@ class TestDenseLowering:
 
         mapper = vocabulary.lift_mapper()
         deltas = [
-            *mapper.map(HubResponse(content=[TextBlock(text=answer, index=0)])),
+            *mapper.map(HubResponse(content=[TextBlock(text=answer, seq=(0, 0))])),
             *mapper.flush(),
         ]
         merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)

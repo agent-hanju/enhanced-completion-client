@@ -35,6 +35,7 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
+from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
 from .base import JsonCall, Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_responses
@@ -48,13 +49,10 @@ TERMINAL_EVENTS = frozenset(
     {"response.completed", "response.failed", "response.incomplete", "error"}
 )
 
-# 한 item 안의 여러 content part를 구분하려면 두 축이 필요하다.
-_CONTENT_STRIDE = 1 << 32
-_REASONING_TEXT_OFFSET = 1 << 31
-# 현재 audio stream event에는 output/content index가 없다. 첫 message part(0)와 합쳐지지 않도록
-# 독립 슬롯을 쓴다. 구형/호환 서버가 index를 주면 그 좌표를 우선한다.
-_GLOBAL_AUDIO_INDEX = -1
-_ANNOTATION_STRIDE = 1 << 16
+# seq 좌표는 (output_index, part_kind, part_index)다. reasoning item의 원문 추론 part는 같은
+# item의 summary part와 구분되도록 part_kind 1을 쓰고, 나머지 part와 item 수준 블록은 0을 쓴다.
+_PART = 0
+_REASONING_TEXT = 1
 
 _CLIENT_TOOL_ITEMS = frozenset(
     {
@@ -88,40 +86,51 @@ _TOOL_RESULT_ITEMS = frozenset(
 )
 
 
-def _slot(event: dict[str, Any]) -> int:
-    """``output_index``와 ``content_index``를 하나의 블록 키로 접는다."""
+def _slot(event: dict[str, Any]) -> Seq:
+    """``output_index``와 ``content_index``로 part 좌표를 만든다. 없는 값은 0이다."""
     output = event.get("output_index")
     content = event.get("content_index")
-    base = output * _CONTENT_STRIDE if isinstance(output, int) else 0
-    return base + (content if isinstance(content, int) else 0)
+    return (
+        output if isinstance(output, int) else 0,
+        _PART,
+        content if isinstance(content, int) else 0,
+    )
 
 
-def _item_slot(event: dict[str, Any]) -> int:
+def _item_slot(event: dict[str, Any]) -> Seq:
+    """``output_index``로 item 수준 좌표를 만든다. 없는 값은 0이다."""
     output = event.get("output_index")
-    return output * _CONTENT_STRIDE if isinstance(output, int) else 0
+    return (output if isinstance(output, int) else 0, _PART, 0)
 
 
-def _summary_slot(event: dict[str, Any]) -> int:
-    """Reasoning summary has ``summary_index`` rather than ``content_index``."""
+def _summary_slot(event: dict[str, Any]) -> Seq:
+    """reasoning summary part의 좌표.
+
+    이 이벤트는 ``content_index`` 대신 ``summary_index``를 준다. 없는 값은 0이다.
+    """
     output = event.get("output_index")
     summary = event.get("summary_index")
-    base = output * _CONTENT_STRIDE if isinstance(output, int) else 0
-    return base + (summary if isinstance(summary, int) else 0)
+    return (
+        output if isinstance(output, int) else 0,
+        _PART,
+        summary if isinstance(summary, int) else 0,
+    )
 
 
 class _ToHub:
     """Responses 이벤트를 허브 델타로 바꾼다."""
 
     def __init__(self) -> None:
+        self._seqs = SeqAllocator(3)
         self._refusal_started = False
-        self._text_streamed: set[int] = set()
-        self._refusal_streamed: set[int] = set()
-        self._reasoning_streamed: set[int] = set()
-        self._reasoning_item_slots: dict[int, int] = {}
-        self._arguments_streamed: set[int] = set()
-        self._audio_streamed: set[int] = set()
-        self._audio_transcript_streamed: set[int] = set()
-        self._annotations_seen: set[tuple[int, int]] = set()
+        self._text_streamed: set[Seq] = set()
+        self._refusal_streamed: set[Seq] = set()
+        self._reasoning_streamed: set[Seq] = set()
+        self._reasoning_item_slots: dict[Seq, Seq] = {}
+        self._arguments_streamed: set[Seq] = set()
+        self._audio_streamed: set[Seq] = set()
+        self._audio_transcript_streamed: set[Seq] = set()
+        self._annotations_seen: set[tuple[Seq, int]] = set()
         self._done_items: set[int] = set()
 
     def map(self, event: dict[str, Any]) -> list[HubResponse]:
@@ -131,50 +140,50 @@ class _ToHub:
 
         # 본문
         if name == "response.output_text.delta":
-            index = _slot(event)
-            self._text_streamed.add(index)
-            return self._one(TextBlock(text=event.get("delta") or "", index=index))
+            seq = self._seqs.coord(_slot(event))
+            self._text_streamed.add(seq)
+            return self._one(TextBlock(text=event.get("delta") or "", seq=seq))
         if name == "response.refusal.delta":
-            index = _slot(event)
-            self._refusal_streamed.add(index)
+            seq = self._seqs.coord(_slot(event))
+            self._refusal_streamed.add(seq)
             prefix = "" if self._refusal_started else REFUSAL_PREFIX
             self._refusal_started = True
-            return self._one(TextBlock(text=prefix + (event.get("delta") or ""), index=index))
+            return self._one(TextBlock(text=prefix + (event.get("delta") or ""), seq=seq))
 
         # 추론 요약. 원문 추론은 암호화되어 오므로 요약만 텍스트로 쓸 수 있다.
         if name == "response.reasoning_summary_text.delta":
-            index = _summary_slot(event)
-            self._reasoning_streamed.add(index)
-            self._reasoning_item_slots.setdefault(_item_slot(event), index)
-            return self._one(ThinkingBlock(thinking=event.get("delta") or "", index=index))
+            seq = self._seqs.coord(_summary_slot(event))
+            self._reasoning_streamed.add(seq)
+            self._reasoning_item_slots.setdefault(_item_slot(event), seq)
+            return self._one(ThinkingBlock(thinking=event.get("delta") or "", seq=seq))
         if name == "response.reasoning_text.delta":
-            item_index = _slot(event)
-            index = item_index + _REASONING_TEXT_OFFSET
-            self._reasoning_streamed.add(index)
-            self._reasoning_item_slots.setdefault(_item_slot(event), index)
-            return self._one(ThinkingBlock(thinking=event.get("delta") or "", index=index))
+            output, _, part = _slot(event)
+            seq = self._seqs.coord((output, _REASONING_TEXT, part))
+            self._reasoning_streamed.add(seq)
+            self._reasoning_item_slots.setdefault(_item_slot(event), seq)
+            return self._one(ThinkingBlock(thinking=event.get("delta") or "", seq=seq))
 
         if name == "response.audio.delta":
-            index = self._audio_slot(event)
-            self._audio_streamed.add(index)
-            return self._one(AudioBlock(data=event.get("delta") or "", index=index))
+            seq = self._audio_seq(event)
+            self._audio_streamed.add(seq)
+            return self._one(AudioBlock(data=event.get("delta") or "", seq=seq))
         if name in ("response.audio.transcript.delta", "response.audio_transcript.delta"):
-            index = self._audio_slot(event)
-            self._audio_transcript_streamed.add(index)
-            return self._one(AudioBlock(transcript=event.get("delta") or "", index=index))
+            seq = self._audio_seq(event)
+            self._audio_transcript_streamed.add(seq)
+            return self._one(AudioBlock(transcript=event.get("delta") or "", seq=seq))
 
         # 도구 인수
         if name in (
             "response.function_call_arguments.delta",
             "response.custom_tool_call_input.delta",
         ):
-            index = _slot(event)
-            self._arguments_streamed.add(index)
+            seq = self._seqs.coord(_slot(event))
+            self._arguments_streamed.add(seq)
             kind = "custom" if ".custom_tool_" in name else "function"
             return self._one(
                 ToolUseBlock(
                     input_json=event.get("delta") or "",
-                    index=index,
+                    seq=seq,
                     kind=kind,
                 )
             )
@@ -183,7 +192,7 @@ class _ToHub:
                 ServerToolBlock(
                     name="mcp_call",
                     input_json=event.get("delta") or "",
-                    index=_slot(event),
+                    seq=self._seqs.coord(_slot(event)),
                 )
             )
 
@@ -215,7 +224,7 @@ class _ToHub:
                 ServerToolBlock(
                     name=family,
                     status=stage,
-                    index=_slot(event),
+                    seq=self._seqs.coord(_slot(event)),
                     raw=dict(event),
                 )
             )
@@ -229,13 +238,18 @@ class _ToHub:
         block.source = SOURCE
         return [HubResponse(content=[block])]
 
-    @staticmethod
-    def _audio_slot(event: dict[str, Any]) -> int:
+    def _audio_seq(self, event: dict[str, Any]) -> Seq:
+        """audio 이벤트의 seq.
+
+        이벤트에 ``output_index``나 ``content_index``가 있으면 그 part의 seq를 쓴다. 현재 audio
+        stream 이벤트에는 두 값이 없으므로, 처음 받은 시점의 맨 끝 블록 바로 뒤에 seq를 한 번
+        발급하고 이후의 audio/transcript 조각에도 같은 seq를 쓴다.
+        """
         if isinstance(event.get("output_index"), int) or isinstance(
             event.get("content_index"), int
         ):
-            return _slot(event)
-        return _GLOBAL_AUDIO_INDEX
+            return self._seqs.coord(_slot(event))
+        return self._seqs.after(key=("audio",))
 
     def _annotation(self, event: dict[str, Any]) -> list[HubResponse]:
         """output text annotation을 독립 허브 블록으로.
@@ -249,9 +263,13 @@ class _ToHub:
 
         ``.added`` 접미를 일괄 무시하면 이 이벤트가 함께 사라진다. 그래서 위에서 먼저 걸러야
         한다.
+
+        블록은 대상 part 블록 바로 뒤의 seq를 받는다. 대상 part와 벤더 ``annotation_index``가
+        같은 annotation을 다시 받으면 아무것도 만들지 않는다.
         """
         annotation = event.get("annotation") or {}
         kind = annotation.get("type")
+        target_seq = self._seqs.coord(_slot(event))
         if kind == "file_path":
             # 인용이 아니라 산출물 경로다. 원본을 보존한다.
             return self._one(
@@ -259,22 +277,22 @@ class _ToHub:
                     type="responses_file_path",
                     raw=dict(annotation),
                     native={"level": "annotation"},
+                    seq=self._seqs.after(target_seq),
                 )
             )
 
-        target_index = _slot(event)
         raw_annotation_index = event.get("annotation_index")
         annotation_index = (
             raw_annotation_index if isinstance(raw_annotation_index, int) else 0
         )
-        seen_key = (target_index, annotation_index)
+        seen_key = (target_seq, annotation_index)
         if seen_key in self._annotations_seen:
             return []
         self._annotations_seen.add(seen_key)
         fields: dict[str, Any] = {
             "source": SOURCE,
-            "annotation_index": target_index * _ANNOTATION_STRIDE + annotation_index,
-            "target_index": target_index,
+            "seq": self._seqs.after(target_seq),
+            "target_seq": target_seq,
             "kind": kind or "annotation",
             "native": dict(annotation),
         }
@@ -315,10 +333,11 @@ class _ToHub:
         final: bool,
     ) -> list[HubResponse]:
         kind = item.get("type")
-        index = _slot(event)
+        coords = _slot(event)
         if kind in _CLIENT_TOOL_ITEMS:
+            seq = self._seqs.coord(coords)
             fields: dict[str, Any] = {
-                "index": index,
+                "seq": seq,
                 "source": SOURCE,
                 "kind": "custom" if kind == "custom_tool_call" else str(kind).removesuffix("_call"),
                 "native": dict(item),
@@ -333,13 +352,13 @@ class _ToHub:
                 raw_input = item.get("input")
             if raw_input is None:
                 raw_input = item.get("action")
-            if index not in self._arguments_streamed and raw_input not in (None, "", {}):
+            if seq not in self._arguments_streamed and raw_input not in (None, "", {}):
                 fields["input_json"] = (
                     raw_input
                     if isinstance(raw_input, str)
                     else json.dumps(raw_input, ensure_ascii=False)
                 )
-                self._arguments_streamed.add(index)
+                self._arguments_streamed.add(seq)
             return [HubResponse(content=[ToolUseBlock(**fields)])]
         if kind == "mcp_approval_request":
             return self._one(
@@ -348,7 +367,7 @@ class _ToHub:
                     name=str(item.get("name") or "mcp_approval"),
                     kind="mcp_approval",
                     input=item,
-                    index=index,
+                    seq=self._seqs.coord(coords),
                     native=dict(item),
                 )
             )
@@ -366,13 +385,13 @@ class _ToHub:
                     content=content,
                     structured_content=structured,
                     native=dict(item),
-                    index=index,
+                    seq=self._seqs.coord(coords),
                 )
             )
         if kind == "message":
             return self._message_item(item, event, final=final)
         if kind == "reasoning":
-            return self._reasoning_item(item, index)
+            return self._reasoning_item(item, coords)
         if kind in _SERVER_TOOL_ITEMS:
             raw = dict(item)
             return self._one(
@@ -384,7 +403,7 @@ class _ToHub:
                     if isinstance(item.get("arguments"), str)
                     else "",
                     output=str(item.get("output") or item.get("result") or ""),
-                    index=index,
+                    seq=self._seqs.coord(coords),
                     native=raw,
                     raw=raw,
                 )
@@ -395,7 +414,7 @@ class _ToHub:
                     type=f"responses_{kind}",
                     raw=dict(item),
                     native={"level": "item"},
-                    index=index,
+                    seq=self._seqs.coord(coords),
                 )
             )
         return []
@@ -415,14 +434,14 @@ class _ToHub:
                 continue
             part_event = dict(event)
             part_event["content_index"] = content_index
-            index = _slot(part_event)
+            seq = self._seqs.coord(_slot(part_event))
             native = {"item": item_meta, "part": dict(part)}
             kind = part.get("type")
             if kind == "output_text":
-                fields: dict[str, Any] = {"index": index, "native": native}
-                if index not in self._text_streamed and isinstance(part.get("text"), str):
+                fields: dict[str, Any] = {"seq": seq, "native": native}
+                if seq not in self._text_streamed and isinstance(part.get("text"), str):
                     fields["text"] = part["text"]
-                    self._text_streamed.add(index)
+                    self._text_streamed.add(seq)
                 blocks.append(TextBlock(source=SOURCE, **fields))
                 for annotation_index, annotation in enumerate(part.get("annotations") or []):
                     if not isinstance(annotation, dict):
@@ -437,22 +456,22 @@ class _ToHub:
                     for delta in self._annotation(annotation_event):
                         blocks.extend(delta.content)
             elif kind == "refusal":
-                fields = {"index": index, "native": native}
-                if index not in self._refusal_streamed and isinstance(part.get("refusal"), str):
+                fields = {"seq": seq, "native": native}
+                if seq not in self._refusal_streamed and isinstance(part.get("refusal"), str):
                     prefix = "" if self._refusal_started else REFUSAL_PREFIX
                     self._refusal_started = True
                     fields["text"] = prefix + part["refusal"]
-                    self._refusal_streamed.add(index)
+                    self._refusal_streamed.add(seq)
                 blocks.append(TextBlock(source=SOURCE, **fields))
             elif kind in ("output_audio", "audio"):
-                fields = {"index": index, "native": native}
-                if index not in self._audio_streamed and isinstance(part.get("data"), str):
+                fields = {"seq": seq, "native": native}
+                if seq not in self._audio_streamed and isinstance(part.get("data"), str):
                     fields["data"] = part["data"]
-                    self._audio_streamed.add(index)
+                    self._audio_streamed.add(seq)
                 transcript = part.get("transcript")
-                if index not in self._audio_transcript_streamed and isinstance(transcript, str):
+                if seq not in self._audio_transcript_streamed and isinstance(transcript, str):
                     fields["transcript"] = transcript
-                    self._audio_transcript_streamed.add(index)
+                    self._audio_transcript_streamed.add(seq)
                 blocks.append(AudioBlock(source=SOURCE, **fields))
             else:
                 blocks.append(
@@ -461,7 +480,7 @@ class _ToHub:
                         raw=dict(part),
                         native=native,
                         source=SOURCE,
-                        index=index,
+                        seq=seq,
                     )
                 )
         if not blocks and final and isinstance(output_index, int):
@@ -470,31 +489,43 @@ class _ToHub:
                     type="responses_message",
                     raw=dict(item),
                     source=SOURCE,
-                    index=output_index * _CONTENT_STRIDE,
+                    seq=self._seqs.coord(_item_slot(event)),
                 )
             )
         return [HubResponse(content=blocks)] if blocks else []
 
-    def _reasoning_item(self, item: dict[str, Any], index: int) -> list[HubResponse]:
+    def _reasoning_item(self, item: dict[str, Any], coords: Seq) -> list[HubResponse]:
+        """reasoning item을 summary part와 원문 추론 part별 thinking 블록으로 바꾼다.
+
+        part마다 ``(output_index, part_kind, part_index)`` 좌표의 seq를 쓴다. 이미 스트리밍한
+        part는 본문을 다시 싣지 않는다. 첫 블록에만 item 원본과 ``encrypted_content``를 둔다.
+        part가 하나도 없으면 이 item에서 처음 스트리밍한 추론 블록, 없으면 item 좌표의 블록 하나에
+        item 원본을 둔다.
+
+        Args:
+            item: ``output_item.added``/``done`` 이벤트의 reasoning item.
+            coords: item 수준 좌표 ``(output_index, 0, 0)``.
+        """
         blocks: list[ContentBlock] = []
         native_pending = True
         encrypted = item.get("encrypted_content")
+        output = coords[0]
 
-        def append_parts(entries: Any, *, offset: int) -> None:
+        def append_parts(entries: Any, *, part_kind: int) -> None:
             nonlocal native_pending
             if not isinstance(entries, list):
                 return
             for part_index, entry in enumerate(entries):
                 if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
                     continue
-                target_index = index + offset + part_index
+                seq = self._seqs.coord((output, part_kind, part_index))
                 fields: dict[str, Any] = {
-                    "index": target_index,
+                    "seq": seq,
                     "source": SOURCE,
                 }
-                if target_index not in self._reasoning_streamed:
+                if seq not in self._reasoning_streamed:
                     fields["thinking"] = entry["text"]
-                    self._reasoning_streamed.add(target_index)
+                    self._reasoning_streamed.add(seq)
                 if native_pending:
                     fields["native"] = dict(item)
                     if isinstance(encrypted, str) and encrypted:
@@ -502,12 +533,12 @@ class _ToHub:
                     native_pending = False
                 blocks.append(ThinkingBlock(**fields))
 
-        append_parts(item.get("summary"), offset=0)
-        append_parts(item.get("content"), offset=_REASONING_TEXT_OFFSET)
+        append_parts(item.get("summary"), part_kind=_PART)
+        append_parts(item.get("content"), part_kind=_REASONING_TEXT)
         if not blocks:
-            target_index = self._reasoning_item_slots.get(index, index)
+            streamed = self._reasoning_item_slots.get(coords)
             fields: dict[str, Any] = {
-                "index": target_index,
+                "seq": streamed if streamed is not None else self._seqs.coord(coords),
                 "source": SOURCE,
                 "native": dict(item),
             }
@@ -537,13 +568,13 @@ class _ToHub:
             if output_index in self._done_items or not isinstance(item, dict):
                 continue
             out.extend(self._item_done({"output_index": output_index, "item": item}))
-        for citation_index, citation in enumerate(response.get("citations") or []):
+        for citation in response.get("citations") or []:
             if isinstance(citation, str):
                 out.append(
                     HubResponse(
                         content=[
                             AnnotationBlock(
-                                annotation_index=-(citation_index + 1),
+                                seq=self._seqs.after(),
                                 id=citation,
                                 uri=citation,
                                 kind="response_citation",
@@ -559,7 +590,7 @@ class _ToHub:
                     HubResponse(
                         content=[
                             AnnotationBlock(
-                                annotation_index=-(citation_index + 1),
+                                seq=self._seqs.after(),
                                 id=str(identifier),
                                 uri=citation.get("url"),
                                 title=citation.get("title"),

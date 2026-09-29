@@ -27,6 +27,7 @@ from .hub import HubMessage, HubRequest, HubResponse, TokenCount, ToolDefinition
 from .mapper import StreamMapper, compose
 from .merge import StreamMerger
 from .parameters import Hyperparameters
+from .seq import finalize
 from .transport.http import apost_json, astream_sse, post_json, stream_sse
 from .transport.sse import SseEvent
 from .vendors.base import VendorAdapter
@@ -258,15 +259,21 @@ class _StreamBase:
 
     @property
     def result(self) -> HubResponse:
-        """병합된 최종 결과. 스트림이 끝나기 전에 읽으면 예외."""
+        """병합된 최종 결과. 스트림이 끝나기 전에 읽으면 예외.
+
+        블록은 ``seq`` 순서로 놓이고 ``index``가 0부터 채워진다. ``seq``는 비워진다.
+        """
         if not self._finished:
             raise StreamNotFinished("stream is still running; iterate it to completion first")
-        return self._merger.build()
+        return finalize(self._merger.build())
 
     @property
     def partial(self) -> HubResponse:
-        """지금까지 접힌 부분 결과. 취소 후 남은 것을 읽는 통로."""
-        return self._merger.build()
+        """지금까지 받은 delta의 병합 결과. 취소 후 남은 것을 읽는 통로.
+
+        :attr:`result`와 같은 방식으로 블록 순서와 ``index``를 확정한다.
+        """
+        return finalize(self._merger.build())
 
     def _process(self, frame: SseEvent) -> tuple[list[HubResponse], bool]:
         """프레임 하나를 델타 리스트와 종료 여부로 바꾼다.

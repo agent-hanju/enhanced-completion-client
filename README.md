@@ -676,10 +676,13 @@ Bridge가 시스템 프롬프트에 자동 삽입하지 않는다. 등록되지 
 
 ### Chat Completions 블록 인덱스
 
-Chat Completions 응답은 블록 최초 등장 순서대로 0부터 index를 부여한다. 같은 채널의
-연속 delta는 누적하지만, `content → reasoning → content`는 서로 다른 세 블록으로
-유지한다. 도구 호출은 원본 호출 index별로 조립하며 허브 index에 타입별 특수값을 쓰지 않는다.
-이 규칙은 Chat Completions 어댑터 출력 기준이며 다른 벤더와 vocabulary의 식별 규칙은 유지한다.
+Chat Completions 응답은 블록 최초 등장 순서대로 번호 n을 0부터 부여하고 `seq=(n, 0)`을 쓴다.
+같은 채널의 연속 delta는 누적하지만, `content → reasoning → content`는 서로 다른 세 블록으로
+유지한다. 도구 호출은 원본 호출 index별로 조립하며 타입별 특수값을 쓰지 않는다.
+
+모든 벤더에서 delta의 블록은 `seq`로 병합되고, 최종 결과는 `seq` 순서로 블록을 늘어놓아
+`index`를 0부터 1씩 매긴다. delta에는 `index`가 없고 최종 결과에는 `seq`가 없다. 규칙은
+[블록 index와 seq 튜플](docs/block_index_and_key_tuple.md)에 있다.
 
 Chat Completions 요청으로 되돌릴 때는 블록 순서에 따라 assistant content와 설정된
 reasoning 필드에 각각 concat한다. 공개 index는 숨기지 않는다. 동시 필드 처리 순서,

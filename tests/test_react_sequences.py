@@ -24,6 +24,7 @@ from completion_bridge import (
     ToolUseBlock,
     VendorBlock,
 )
+from completion_bridge.seq import finalize
 from completion_bridge.vendors import (
     GenerateContentAdapter,
     MessagesAdapter,
@@ -44,7 +45,7 @@ def merge(adapter: VendorAdapter, events: list[dict[str, Any]]) -> HubResponse:
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return merger.build()
+    return finalize(merger.build())
 
 
 def build(adapter: VendorAdapter, messages: list[HubMessage]) -> dict[str, Any]:
@@ -53,28 +54,31 @@ def build(adapter: VendorAdapter, messages: list[HubMessage]) -> dict[str, Any]:
     return SyncBridge(vendor=adapter, base_url=BASE, model="test").build_request(messages)
 
 
-def test_same_type_blocks_with_distinct_indexes_never_merge() -> None:
+def test_same_type_blocks_with_distinct_seqs_never_merge() -> None:
     pairs = [
-        (TextBlock(text="a", index=0), TextBlock(text="b", index=1)),
-        (ThinkingBlock(thinking="a", index=0), ThinkingBlock(thinking="b", index=1)),
-        (ToolUseBlock(id="a", index=0), ToolUseBlock(id="b", index=1)),
-        (ToolResultBlock(tool_use_id="a", index=0), ToolResultBlock(tool_use_id="b", index=1)),
-        (ImageBlock(url="https://a", index=0), ImageBlock(url="https://b", index=1)),
-        (AudioBlock(data="a", index=0), AudioBlock(data="b", index=1)),
-        (DocumentBlock(id="a", index=0), DocumentBlock(id="b", index=1)),
-        (CitationBlock(id="a", index=0), CitationBlock(id="b", index=1)),
+        (TextBlock(text="a", seq=(0, 0)), TextBlock(text="b", seq=(1, 0))),
+        (ThinkingBlock(thinking="a", seq=(0, 0)), ThinkingBlock(thinking="b", seq=(1, 0))),
+        (ToolUseBlock(id="a", seq=(0, 0)), ToolUseBlock(id="b", seq=(1, 0))),
         (
-            AnnotationBlock(id="a", index=0, annotation_index=0),
-            AnnotationBlock(id="b", index=1, annotation_index=1),
+            ToolResultBlock(tool_use_id="a", seq=(0, 0)),
+            ToolResultBlock(tool_use_id="b", seq=(1, 0)),
+        ),
+        (ImageBlock(url="https://a", seq=(0, 0)), ImageBlock(url="https://b", seq=(1, 0))),
+        (AudioBlock(data="a", seq=(0, 0)), AudioBlock(data="b", seq=(1, 0))),
+        (DocumentBlock(id="a", seq=(0, 0)), DocumentBlock(id="b", seq=(1, 0))),
+        (CitationBlock(id="a", seq=(0, 0)), CitationBlock(id="b", seq=(1, 0))),
+        (
+            AnnotationBlock(id="a", seq=(0, 0)),
+            AnnotationBlock(id="b", seq=(1, 0)),
         ),
         (
-            GroundingBlock(index=0, candidate_index=0),
-            GroundingBlock(index=1, candidate_index=1),
+            GroundingBlock(seq=(0, 0)),
+            GroundingBlock(seq=(1, 0)),
         ),
-        (ServerToolBlock(id="a", index=0), ServerToolBlock(id="b", index=1)),
+        (ServerToolBlock(id="a", seq=(0, 0)), ServerToolBlock(id="b", seq=(1, 0))),
         (
-            VendorBlock(type="future", raw={"id": "a"}, index=0),
-            VendorBlock(type="future", raw={"id": "b"}, index=1),
+            VendorBlock(type="future", raw={"id": "a"}, seq=(0, 0)),
+            VendorBlock(type="future", raw={"id": "b"}, seq=(1, 0)),
         ),
     ]
     for first, second in pairs:
@@ -83,7 +87,7 @@ def test_same_type_blocks_with_distinct_indexes_never_merge() -> None:
         merger.apply(HubResponse(content=[second]))
         result = merger.build()
         assert len(result.content) == 2
-        assert [block.index for block in result.content] == [0, 1]
+        assert [block.seq for block in result.content] == [(0, 0), (1, 0)]
 
 
 def test_same_type_complete_blocks_without_indexes_are_appended() -> None:
@@ -765,3 +769,45 @@ def test_chat_refusal_audio_and_metadata_keep_dense_indices() -> None:
     assert result.content[0].text.endswith("no thanks")
     assert result.content[1].data == "ab"
     assert result.content[2].text.endswith("again")
+
+def responses_text(output_index: int, delta: str) -> dict[str, Any]:
+    """Responses의 본문 delta 이벤트. part는 item의 첫 content part다."""
+    return {
+        "type": "response.output_text.delta",
+        "output_index": output_index,
+        "content_index": 0,
+        "delta": delta,
+    }
+
+
+def test_responses_final_order_follows_output_index_not_arrival() -> None:
+    """뒤 item의 이벤트가 먼저 와도 최종 결과는 벤더 좌표 순서다."""
+    result = merge(ResponsesAdapter(), [responses_text(1, "B"), responses_text(0, "A")])
+    assert [block.text for block in result.content] == ["A", "B"]
+    assert [block.index for block in result.content] == [0, 1]
+
+
+def test_responses_item_seen_only_at_completion_keeps_its_output_position() -> None:
+    output = [
+        {"type": "message", "content": [{"type": "output_text", "text": "A"}]},
+        {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+        {"type": "message", "content": [{"type": "output_text", "text": "C"}]},
+    ]
+    completed = {
+        "type": "response.completed",
+        "response": {"status": "completed", "output": output},
+    }
+    result = merge(
+        ResponsesAdapter(),
+        [responses_text(0, "A"), responses_text(2, "C"), completed],
+    )
+    assert [block.type for block in result.content] == ["text", "tool_use", "text"]
+    assert [block.index for block in result.content] == [0, 1, 2]
+    assert [getattr(block, "text", "") for block in result.content] == ["A", "", "C"]
+
+
+def test_messages_block_event_without_index_is_rejected() -> None:
+    mapper = MessagesAdapter().to_hub()
+    event = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x"}}
+    with pytest.raises(MappingError, match="no integer index"):
+        mapper.map(event)

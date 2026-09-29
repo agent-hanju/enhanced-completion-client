@@ -175,8 +175,10 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 
 ### 4.1 Content block
 
-공통 필드는 `type: str`, `index: int | None = None`, `source: str | None = None`,
-`native: dict = {}`이다. `source`는 원본 벤더, `native`는 원형 보존 정보다.
+공통 필드는 `type: str`, `seq: tuple[int, ...] | None = None`, `index: int | None = None`,
+`source: str | None = None`, `native: dict = {}`이다. `source`는 원본 벤더, `native`는 원형
+보존 정보다. `seq`는 delta에만 있는 병합·순서 키이고 `index`는 최종 결과에만 있는 위치다.
+규칙은 [블록 index와 seq 튜플](block_index_and_key_tuple.md)에 있다.
 
 | `type` | 주요 필드 / 의미 |
 |---|---|
@@ -188,7 +190,7 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 | `image` | `media_type`, `data`, `url`, `file_id`: 이미지 |
 | `audio` | `data`, `uri`, `format`, `media_type`, `transcript`: 음성 |
 | `document` | `id`, `title`, `text`, `data`, `uri`, `media_type`: 문서, 주로 요청 방향 |
-| `annotation` | `target_index`, `start_index`, `end_index`, `uri`, `title`: 본문 범위 주석 |
+| `annotation` | `target_seq`(delta) / `target_index`(최종 결과), `start_index`, `end_index`, `uri`, `title`: 본문 범위 주석 |
 | `grounding` | `sources`, `supports`, `search_queries`: 근거 관계 |
 | `citation` | 구 저장 데이터 호환용. 새 인용은 `text.citations` 또는 `annotation` 사용 |
 | 기타 | 등록된 사용자 블록 또는 원형을 보존하는 `VendorBlock` |
@@ -216,24 +218,36 @@ mapper가 버퍼링한 내용은 종료 시 `flush()`에서 추가 delta로 나�
 | `None` | 변경 없음. 기존 값을 지우지 않음 |
 | 명시하지 않은 기본값 | 처음 상태를 채울 때 사용, 기존 값을 덮지 않음 |
 | 일반 문자열 | 이어 붙이기: 본문, 추론, `input_json`, 음성 data/transcript 등 |
-| overwrite 표시 / Literal / index 필드 | 최신 값으로 덮기 |
+| overwrite 표시 / Literal / 병합 키 필드 | 최신 값으로 교체 |
 | 일반 숫자 | 합산. 단, usage처럼 overwrite 표시가 있으면 덮기 |
 | 모델 | 필드별 재귀 병합 |
 | 일반 dict | 키 단위 갱신. overwrite 표시 dict는 통째로 덮기 |
-| 모델 리스트 | 명시된 index 메타 필드, 없으면 `index` 값으로 같은 슬롯 병합 |
+| 모델 리스트 | 병합 키 표시 필드(content block은 `seq`), 없으면 `index` 값으로 같은 슬롯 병합 |
 | 키 없는 모델 / 원시값 리스트 | 도착 순서로 추가 |
 | 선언 외 확장 필드 | 최신 값으로 교체 |
 
-일반 content block은 같은 `index`를 가진 조각을 합치며 배열 위치나 `type`만으로
-짝짓지 않는다. 일부 블록은 별도 index 메타 필드를 사용한다. 최종 블록 순서는 최초
-등장 순서이고 숫자 index순 정렬이 아니다. `index=None` 블록은 독립 항목으로 추가한다.
+content block은 같은 `seq`를 가진 조각을 합치며 배열 위치나 `type`만으로 짝짓지 않는다.
+모든 벤더 어댑터는 응답의 모든 content block에 `seq`를 채운다. 병합이 끝난 최종 결과
+(`result`, `partial`, `complete()`)는 블록을 `seq` 사전식 순서로 늘어놓고 `index`를 0부터
+1씩 매긴 뒤 `seq`를 비운다. 따라서 최종 결과에서는 `content[i].index == i`이고, 도착 순서가
+아니라 벤더 좌표 순서를 따른다. `seq`가 없는 블록이 최종 결과에 있으면 `MappingError`다.
+
+`seq`는 `(API 좌표..., after)` 뒤에 블록을 나누는 vocabulary의 성분이 이어지는 정수
+튜플이다. 좌표가 없는 블록(annotation, 메타데이터 등)은 대상 블록이나 그 시점의 맨 끝 블록
+바로 뒤의 seq를 받는다. API별 좌표와 after 규칙은
+[블록 index와 seq 튜플](block_index_and_key_tuple.md)에 있다.
+
+#### delta를 직접 병합하는 소비자
+
+- delta 블록은 `seq`가 같은 것끼리 병합한다. JSON에서는 정수 배열이므로 원소를 차례로 비교한다.
+- 화면 순서는 `seq`의 사전식 비교로 정한다. 새 `seq`가 오면 그 순서에 맞는 위치에 삽입한다.
+- delta에는 `index`가 없다. `index`는 최종 결과에만 있다.
+- 스트림이 끝나면 최종 결과로 교체하고, 저장도 최종 결과로 한다.
 
 #### Chat Completions의 블록 순서
 
-Chat Completions 어댑터는 블록 최초 등장 순서대로 `index=0, 1, 2, …`를 부여한다.
-타입별 음수나 `tool index + 1` 규칙은 사용하지 않는다. vocabulary 적용 전 어댑터의
-최종 결과는 `content[i].index == i`이며, delta의 index는 delta 배열 위치가 아니라
-누적 결과의 블록 위치다. 다른 벤더 및 vocabulary의 기존 식별 규칙은 변경하지 않는다.
+Chat Completions 어댑터는 블록 최초 등장 순서대로 번호 `n=0, 1, 2, …`를 부여하고
+`seq=(n, 0)`을 쓴다. 타입별 음수나 `tool index + 1` 규칙은 사용하지 않는다.
 
 - 같은 채널의 연속 조각은 같은 블록에 누적한다. role/usage/빈 delta는 구간을 끊지 않는다.
 - content/reasoning/refusal/audio 채널이 바뀌거나 도구 호출이 끼면 다음 채널 조각은 새 블록이다.
@@ -241,16 +255,18 @@ Chat Completions 어댑터는 블록 최초 등장 순서대로 `index=0, 1, 2, 
   원본 index가 없는 완성 응답은 tool_calls 배열 위치를 사용한다.
 - 한 이벤트에 여러 필드가 있으면 reasoning → content → refusal → audio → annotations →
   tool_calls 순서로 처리한다. 이는 어댑터 처리 순서이며 실제 생성 선후를 뜻하지 않는다.
-- annotation도 새 순번을 받지만 텍스트 채널을 끊지는 않는다. 전체 content 문자열의 인용
-  범위가 이미 수신한 한 텍스트 블록 안에 있으면 target_index와 블록 상대 오프셋으로 변환한다.
-  여러 블록에 걸치거나 아직 대상을 결정할 수 없으면 target_index는 None이고 원본 범위를
-  유지한다. 원본 annotation은 native에도 보존한다.
+- annotation은 텍스트 채널을 끊지 않는다. 전체 content 문자열의 인용 범위가 이미 수신한 한
+  텍스트 블록 안에 있으면 그 블록을 `target_seq`로 두고 범위를 블록 상대 오프셋으로 변환하며,
+  annotation 자체는 그 블록 바로 뒤의 seq를 받는다. 여러 블록에 걸치거나 아직 대상을 결정할 수
+  없으면 `target_seq`는 None이고 원본 범위를 유지하며, 그 시점의 맨 끝 블록 바로 뒤에 온다.
+  최종 결과에서 `target_seq`는 대상 블록의 `target_index`로 바뀐다. 원본 annotation은 native에도
+  보존한다.
 
 예: `content A → reasoning B → content C`는 `text #0(A), thinking #1(B), text #2(C)`다.
 채널 전환 없는 같은 필드 내부의 원래 경계는 복원하지 않는다.
 
 요청 변환에서는 0부터 연속한 순서 index가 모두 있는 HubMessage를 index순으로 순회한다.
-미지정 index나 다른 벤더/vocabulary의 비연속 식별자가 있으면 기존 배열 순서를 유지한다.
+미지정 index가 있거나 index가 연속하지 않으면 기존 배열 순서를 유지한다.
 assistant의 text-only content는 순서대로 concat하고, thinking은 기존 동일 벤더 및
 reasoning_input_field 설정에 따라 해당 필드로 concat한다. 도구 호출은 각각 tool_calls
 항목으로 변환하며 허브 index를 요청에 보내지 않는다. 위 예는 content="AC", 설정된
@@ -265,13 +281,13 @@ reasoning 필드="B"로 내려간다. 멀티모달 content 배열의 기존 변�
 ```json
 [
   {"id": "resp-1", "model": "your-model", "role": "assistant"},
-  {"content": [{"type": "text", "index": 0, "text": "안녕"}]},
-  {"content": [{"type": "text", "index": 0, "text": "하세요"}]},
+  {"content": [{"type": "text", "seq": [0, 0], "text": "안녕"}]},
+  {"content": [{"type": "text", "seq": [0, 0], "text": "하세요"}]},
   {"stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 2}}
 ]
 ```
 
-병합 결과(`model_dump(exclude_none=True)`)는 다음과 같다.
+최종 결과(`stream.result.model_dump(exclude_none=True)`)는 다음과 같다.
 
 ```json
 {
@@ -288,8 +304,8 @@ reasoning 필드="B"로 내려간다. 멀티모달 content 배열의 기존 변�
 
 ```json
 [
-  {"content": [{"type": "tool_use", "index": 1, "id": "call-1", "name": "get_weather", "input_json": "{\"city\":"}]},
-  {"content": [{"type": "tool_use", "index": 1, "input_json": "\"서울\"}"}]},
+  {"content": [{"type": "tool_use", "seq": [1, 0], "id": "call-1", "name": "get_weather", "input_json": "{\"city\":"}]},
+  {"content": [{"type": "tool_use", "seq": [1, 0], "input_json": "\"서울\"}"}]},
   {"stop_reason": "tool_use"}
 ]
 ```
@@ -305,6 +321,8 @@ reasoning 필드="B"로 내려간다. 멀티모달 content 배열의 기존 변�
 
 객체를 외부로 전송하려면 `delta.model_dump(mode="json", exclude_none=True)` 또는
 `delta.model_dump_json(exclude_none=True)`로 직렬화할 수 있다. 기본값도 출력될 수 있다.
+`exclude_unset=True`나 `exclude_none=True`를 쓰면 delta에는 `index` 키가, 최종 결과에는
+`seq`와 `target_seq` 키가 남지 않는다.
 `exclude_unset=True`는 명시되지 않은 `type` 판별자까지 생략할 수 있으므로 이 옵션만으로
 독립적인 블록 JSON 계약을 만들지 않는다. 이 라이브러리는 외부 delta 재전송용 envelope,
 완료 알림, 재개 ID를 제공하지 않으며 필요한 경우 소비 앱에서 별도로 정의해야 한다.

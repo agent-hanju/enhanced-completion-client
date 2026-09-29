@@ -644,7 +644,7 @@
     },
     {
       "type": "tool_use",
-      "index": 4294967296,
+      "index": 1,
       "source": "responses",
       "native": {
         "type": "function_call",
@@ -1933,8 +1933,29 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "citations": []
     },
     {
-      "type": "audio",
+      "type": "annotation",
       "index": 2,
+      "source": "chat_completions",
+      "native": {
+        "type": "url_citation",
+        "url_citation": {
+          "start_index": 0,
+          "end_index": 2,
+          "url": "https://weather.example/seoul",
+          "title": "서울 관측"
+        }
+      },
+      "target_index": 1,
+      "kind": "url_citation",
+      "id": "https://weather.example/seoul",
+      "start_index": 0,
+      "end_index": 2,
+      "title": "서울 관측",
+      "uri": "https://weather.example/seoul"
+    },
+    {
+      "type": "audio",
+      "index": 3,
       "source": "chat_completions",
       "native": {
         "id": "audio-1",
@@ -1947,28 +1968,6 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "file_id": "audio-1",
       "transcript": "서울은 25도다.",
       "expires_at": 1893456000
-    },
-    {
-      "type": "annotation",
-      "index": 3,
-      "source": "chat_completions",
-      "native": {
-        "type": "url_citation",
-        "url_citation": {
-          "start_index": 0,
-          "end_index": 2,
-          "url": "https://weather.example/seoul",
-          "title": "서울 관측"
-        }
-      },
-      "annotation_index": 0,
-      "target_index": 1,
-      "kind": "url_citation",
-      "id": "https://weather.example/seoul",
-      "start_index": 0,
-      "end_index": 2,
-      "title": "서울 관측",
-      "uri": "https://weather.example/seoul"
     }
   ],
   "stop_reason": "end_turn",
@@ -2842,7 +2841,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "text",
-      "index": 4294967296,
+      "index": 1,
       "source": "responses",
       "native": {
         "item": {
@@ -2870,6 +2869,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "annotation",
+      "index": 2,
       "source": "responses",
       "native": {
         "type": "url_citation",
@@ -2878,8 +2878,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         "url": "https://weather.example/seoul",
         "title": "서울 관측"
       },
-      "annotation_index": 281474976710656,
-      "target_index": 4294967296,
+      "target_index": 1,
       "kind": "url_citation",
       "id": "https://weather.example/seoul",
       "start_index": 0,
@@ -2889,7 +2888,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "audio",
-      "index": -1,
+      "index": 3,
       "source": "responses",
       "native": {},
       "serialize": false,
@@ -2898,7 +2897,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "server_tool",
-      "index": 8589934592,
+      "index": 4,
       "source": "responses",
       "native": {
         "type": "web_search_call",
@@ -2926,7 +2925,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "server_tool",
-      "index": 12884901888,
+      "index": 5,
       "source": "responses",
       "native": {
         "type": "code_interpreter_call",
@@ -3359,8 +3358,25 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "citations": []
     },
     {
-      "type": "image",
+      "type": "annotation",
       "index": 2,
+      "source": "generate_content",
+      "native": {
+        "startIndex": 0,
+        "endIndex": 2,
+        "uri": "https://weather.example/seoul",
+        "license": "example"
+      },
+      "target_index": 1,
+      "kind": "citation_source",
+      "id": "https://weather.example/seoul",
+      "start_index": 0,
+      "end_index": 2,
+      "uri": "https://weather.example/seoul"
+    },
+    {
+      "type": "image",
+      "index": 3,
       "source": "generate_content",
       "native": {
         "inlineData": {
@@ -3374,7 +3390,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "document",
-      "index": 3,
+      "index": 4,
       "source": "generate_content",
       "native": {
         "fileData": {
@@ -3391,7 +3407,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "server_tool",
-      "index": 4,
+      "index": 5,
       "source": "generate_content",
       "native": {
         "executableCode": {
@@ -3410,7 +3426,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "server_tool",
-      "index": 5,
+      "index": 6,
       "source": "generate_content",
       "native": {
         "codeExecutionResult": {
@@ -3428,24 +3444,8 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       }
     },
     {
-      "type": "annotation",
-      "source": "generate_content",
-      "native": {
-        "startIndex": 0,
-        "endIndex": 2,
-        "uri": "https://weather.example/seoul",
-        "license": "example"
-      },
-      "annotation_index": 0,
-      "target_index": 1,
-      "kind": "citation_source",
-      "id": "https://weather.example/seoul",
-      "start_index": 0,
-      "end_index": 2,
-      "uri": "https://weather.example/seoul"
-    },
-    {
       "type": "grounding",
+      "index": 7,
       "source": "generate_content",
       "native": {
         "webSearchQueries": [
@@ -3475,7 +3475,6 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
           }
         ]
       },
-      "candidate_index": 0,
       "sources": [
         {
           "index": 0,
@@ -3523,6 +3522,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "type": "server_tool",
+      "index": 8,
       "source": "generate_content",
       "native": {},
       "id": "",
@@ -3589,10 +3589,10 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "role": "assistant",
-      "content": "서울은 25도다.",
+      "content": "서울은 25도다.\n\n&lt;references&gt;\n&lt;reference kind=\"citation_source\" uri=\"https://weather.example/seoul\"/&gt;\n&lt;/references&gt;",
       "tool_calls": [
         {
-          "id": "executableCode_4",
+          "id": "executableCode_5",
           "type": "function",
           "function": {
             "name": "gemini_executableCode",
@@ -3603,7 +3603,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "role": "tool",
-      "tool_call_id": "executableCode_4",
+      "tool_call_id": "executableCode_5",
       "content": ""
     },
     {
@@ -3611,7 +3611,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "content": null,
       "tool_calls": [
         {
-          "id": "codeExecutionResult_5",
+          "id": "codeExecutionResult_6",
           "type": "function",
           "function": {
             "name": "gemini_codeExecutionResult",
@@ -3622,12 +3622,12 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     },
     {
       "role": "tool",
-      "tool_call_id": "codeExecutionResult_5",
+      "tool_call_id": "codeExecutionResult_6",
       "content": "25\n"
     },
     {
       "role": "assistant",
-      "content": "&lt;references&gt;\n&lt;reference kind=\"citation_source\" uri=\"https://weather.example/seoul\"/&gt;\n&lt;source index=\"0\" uri=\"https://weather.example/seoul\" title=\"서울 관측\"/&gt;\n&lt;support sources=\"0\" start=\"0\" end=\"9\"&gt;서울은 25도다.&lt;/support&gt;\n&lt;query&gt;서울 현재 기온&lt;/query&gt;\n&lt;/references&gt;"
+      "content": "&lt;references&gt;\n&lt;source index=\"0\" uri=\"https://weather.example/seoul\" title=\"서울 관측\"/&gt;\n&lt;support sources=\"0\" start=\"0\" end=\"9\"&gt;서울은 25도다.&lt;/support&gt;\n&lt;query&gt;서울 현재 기온&lt;/query&gt;\n&lt;/references&gt;"
     },
     {
       "role": "user",
@@ -3687,7 +3687,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "content": [
         {
           "type": "text",
-          "text": "서울은 25도다."
+          "text": "서울은 25도다.\n\n&lt;references&gt;\n&lt;reference kind=\"citation_source\" uri=\"https://weather.example/seoul\"/&gt;\n&lt;/references&gt;"
         },
         {
           "type": "image",
@@ -3699,7 +3699,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         },
         {
           "type": "tool_use",
-          "id": "executableCode_4",
+          "id": "executableCode_5",
           "name": "gemini_executableCode",
           "input": {
             "language": "PYTHON",
@@ -3713,7 +3713,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "content": [
         {
           "type": "tool_result",
-          "tool_use_id": "executableCode_4",
+          "tool_use_id": "executableCode_5",
           "content": ""
         }
       ]
@@ -3723,7 +3723,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "content": [
         {
           "type": "tool_use",
-          "id": "codeExecutionResult_5",
+          "id": "codeExecutionResult_6",
           "name": "gemini_codeExecutionResult",
           "input": {}
         }
@@ -3734,14 +3734,14 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "content": [
         {
           "type": "tool_result",
-          "tool_use_id": "codeExecutionResult_5",
+          "tool_use_id": "codeExecutionResult_6",
           "content": "25\n"
         }
       ]
     },
     {
       "role": "assistant",
-      "content": "&lt;references&gt;\n&lt;reference kind=\"citation_source\" uri=\"https://weather.example/seoul\"/&gt;\n&lt;source index=\"0\" uri=\"https://weather.example/seoul\" title=\"서울 관측\"/&gt;\n&lt;support sources=\"0\" start=\"0\" end=\"9\"&gt;서울은 25도다.&lt;/support&gt;\n&lt;query&gt;서울 현재 기온&lt;/query&gt;\n&lt;/references&gt;"
+      "content": "&lt;references&gt;\n&lt;source index=\"0\" uri=\"https://weather.example/seoul\" title=\"서울 관측\"/&gt;\n&lt;support sources=\"0\" start=\"0\" end=\"9\"&gt;서울은 25도다.&lt;/support&gt;\n&lt;query&gt;서울 현재 기온&lt;/query&gt;\n&lt;/references&gt;"
     },
     {
       "role": "user",
@@ -3781,34 +3781,34 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "message",
       "role": "assistant",
-      "content": "&lt;documents&gt;\n&lt;document id=\"\"&gt;\n&lt;content media-type=\"application/pdf\"&gt;gs://example/result.pdf&lt;/content&gt;\n&lt;/document&gt;\n&lt;/documents&gt;\n\n서울은 25도다."
+      "content": "&lt;documents&gt;\n&lt;document id=\"\"&gt;\n&lt;content media-type=\"application/pdf\"&gt;gs://example/result.pdf&lt;/content&gt;\n&lt;/document&gt;\n&lt;/documents&gt;\n\n서울은 25도다.\n\n&lt;references&gt;\n&lt;reference kind=\"citation_source\" uri=\"https://weather.example/seoul\"/&gt;\n&lt;/references&gt;"
     },
     {
       "type": "function_call",
-      "call_id": "executableCode_4",
+      "call_id": "executableCode_5",
       "name": "gemini_executableCode",
       "arguments": "{\"language\": \"PYTHON\", \"code\": \"print(25)\"}"
     },
     {
       "type": "function_call_output",
-      "call_id": "executableCode_4",
+      "call_id": "executableCode_5",
       "output": ""
     },
     {
       "type": "function_call",
-      "call_id": "codeExecutionResult_5",
+      "call_id": "codeExecutionResult_6",
       "name": "gemini_codeExecutionResult",
       "arguments": "{}"
     },
     {
       "type": "function_call_output",
-      "call_id": "codeExecutionResult_5",
+      "call_id": "codeExecutionResult_6",
       "output": "25\n"
     },
     {
       "type": "message",
       "role": "assistant",
-      "content": "&lt;references&gt;\n&lt;reference kind=\"citation_source\" uri=\"https://weather.example/seoul\"/&gt;\n&lt;source index=\"0\" uri=\"https://weather.example/seoul\" title=\"서울 관측\"/&gt;\n&lt;support sources=\"0\" start=\"0\" end=\"9\"&gt;서울은 25도다.&lt;/support&gt;\n&lt;query&gt;서울 현재 기온&lt;/query&gt;\n&lt;/references&gt;"
+      "content": "&lt;references&gt;\n&lt;source index=\"0\" uri=\"https://weather.example/seoul\" title=\"서울 관측\"/&gt;\n&lt;support sources=\"0\" start=\"0\" end=\"9\"&gt;서울은 25도다.&lt;/support&gt;\n&lt;query&gt;서울 현재 기온&lt;/query&gt;\n&lt;/references&gt;"
     },
     {
       "type": "message",
@@ -4075,8 +4075,8 @@ Bridge는 내장 도구를 자동 등록하지 않는다. `tools`를 생략한 �
 올리고 네 요청 형식의 text content로 다시 내린 결과다.
 
 `notice`는 입력 alias이고 직렬화는 canonical `badge` 태그만 사용한다. 속성과 본문은 
-escape/unescape하며, 하나의 wire text를 여러 의미 block으로 나눌 때는 파생 block을 
-unindexed로 만들어 최종 병합에서 순서를 보존한다.
+escape/unescape하며, 하나의 wire text를 여러 의미 block으로 나눌 때는 파생 block이 
+원래 block의 `seq` 끝에 조각 번호를 추가한 seq를 받아 최종 결과에서 순서가 정해진다.
 
 <table>
 <tr><th>분할된 Chat delta</th><td><pre>[
@@ -4115,6 +4115,7 @@ unindexed로 만들어 최종 병합에서 순서를 보존한다.
   "content": [
     {
       "type": "text",
+      "index": 0,
       "source": "chat_completions",
       "native": {},
       "text": "앞 ",
@@ -4122,6 +4123,7 @@ unindexed로 만들어 최종 병합에서 순서를 보존한다.
     },
     {
       "type": "badge",
+      "index": 1,
       "source": "chat_completions",
       "native": {},
       "level": "warning",
@@ -4129,6 +4131,7 @@ unindexed로 만들어 최종 병합에서 순서를 보존한다.
     },
     {
       "type": "text",
+      "index": 2,
       "source": "chat_completions",
       "native": {},
       "text": " 뒤",

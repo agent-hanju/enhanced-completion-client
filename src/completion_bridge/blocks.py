@@ -72,7 +72,18 @@ class ContentBlock(BaseModel):
     """블록 판별자. 리스트 짝짓기와 레지스트리 조회에 쓴다."""
 
     index: int | None = Field(default=None, json_schema_extra=_overwrite())
-    """스트리밍 중 같은 블록의 조각을 짝지을 키."""
+    """최종 결과에서 이 블록의 위치. 0부터 1씩 증가한다.
+
+    :func:`~completion_bridge.seq.finalize`가 ``seq`` 순서로 채운다. delta에는 값이 없다.
+    """
+
+    seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=_index())
+    """delta에서 같은 블록의 조각을 짝짓고 블록 순서를 정하는 키.
+
+    ``(API 좌표..., after)`` 뒤에 블록을 나누는 vocabulary의 성분이 이어진다. 순서는 튜플
+    사전식 비교다. 최종 결과에서는 ``None``이다. 규칙은 ``docs/block_index_and_key_tuple.md``에
+    있다.
+    """
 
     source: str | None = Field(default=None, json_schema_extra=_overwrite())
     """이 블록을 만들어낸 벤더 이름.
@@ -279,8 +290,10 @@ class AnnotationBlock(ContentBlock):
     """
 
     type: Literal["annotation"] = "annotation"
-    annotation_index: int | None = Field(default=None, json_schema_extra=_index())
     target_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    """최종 결과에서 이 annotation이 가리키는 text block의 ``index``. 정할 수 없으면 ``None``."""
+    target_seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=_overwrite())
+    """delta에서 이 annotation이 가리키는 text block의 ``seq``. 최종 결과에서는 ``None``."""
     kind: str = Field(default="annotation", json_schema_extra=_overwrite())
     id: str = Field(default="", json_schema_extra=_overwrite())
     text: str | None = Field(default=None, json_schema_extra=_overwrite())
@@ -325,7 +338,6 @@ class GroundingBlock(ContentBlock):
     """
 
     type: Literal["grounding"] = "grounding"
-    candidate_index: int = Field(default=0, json_schema_extra=_index())
     sources: list[GroundingSource] = Field(default_factory=list)
     supports: list[GroundingSupport] = Field(default_factory=list)
     search_queries: list[str] = Field(default_factory=list, json_schema_extra=_overwrite())
@@ -482,7 +494,7 @@ def resolve_block(value: Any) -> Any:
     cls = _REGISTRY.get(tag)
     if cls is None:
         # 알 수 없는 타입은 버리지 않고 원본째로 보존한다.
-        known = {"type", "index", "source", "native", "raw"}
+        known = {"type", "index", "seq", "source", "native", "raw"}
         raw = value.get("raw")
         if not isinstance(raw, dict):
             raw = {k: v for k, v in value.items() if k not in known}
@@ -492,6 +504,7 @@ def resolve_block(value: Any) -> Any:
         return VendorBlock(
             type=tag,
             index=value.get("index"),
+            seq=value.get("seq"),
             source=value.get("source"),
             native=native,
             raw=raw,

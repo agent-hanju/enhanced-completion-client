@@ -4,8 +4,7 @@
 시험대이기도 하다. 여기서 억지가 필요하면 허브 모양이 잘못 잡힌 것이다.
 
 **이 벤더의 특별한 점은 블록 인덱스를 서버가 준다는 것이다.** ``content_block_start``에
-``index``가 실려 오고 이후 델타가 그것을 참조한다. 다른 벤더에서는 어댑터가 인덱스를 만들어
-붙여야 하는데 여기서는 그대로 옮기면 된다.
+``index``가 있고 이후 델타가 그것을 참조한다. 허브 블록의 ``seq``는 ``(index, 0)``이다.
 
 이름 붙은 SSE 이벤트를 쓴다. 종료 표지가 ``[DONE]``이 아니라 ``message_stop`` 이벤트다.
 """
@@ -32,6 +31,7 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
+from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
 from .base import JsonCall, Lowerer
 from .normalize import INSTRUCTION_ROLES
@@ -72,11 +72,12 @@ DEFAULT_VERSION = "2023-06-01"
 class _ToHub:
     """Anthropic 이벤트를 허브 델타로 바꾼다.
 
-    서버가 준 ``index``를 그대로 블록 인덱스로 쓴다. 병합기가 그 키로 조각을 짝짓는다.
+    서버가 준 ``index``를 좌표로 ``seq=(index, 0)``을 만든다. 병합기가 그 키로 조각을 짝짓는다.
     """
 
     def __init__(self) -> None:
         self._kinds: dict[int, str] = {}
+        self._seqs = SeqAllocator(1)
 
     def map(self, event: dict[str, Any]) -> list[HubResponse]:
         name = event.get("type")
@@ -110,17 +111,28 @@ class _ToHub:
             )
         ]
 
-    def _block_start(self, event: dict[str, Any]) -> list[HubResponse]:
+    def _block_seq(self, event: dict[str, Any]) -> Seq:
+        """블록 이벤트의 ``index``로 seq를 만든다.
+
+        Raises:
+            MappingError: 이벤트에 정수 ``index``가 없을 때. 이 벤더는 모든 블록 이벤트에
+                ``index``를 준다.
+        """
         index = event.get("index")
+        if not isinstance(index, int):
+            raise MappingError(f"messages {event.get('type')} event has no integer index")
+        return self._seqs.coord((index,))
+
+    def _block_start(self, event: dict[str, Any]) -> list[HubResponse]:
+        seq = self._block_seq(event)
         block = event.get("content_block") or {}
         kind = block.get("type") or ""
-        if isinstance(index, int):
-            self._kinds[index] = kind
-        return [HubResponse(content=[self._seed(kind, block, index)])]
+        self._kinds[seq[0]] = kind
+        return [HubResponse(content=[self._seed(kind, block, seq)])]
 
-    def _seed(self, kind: str, block: dict[str, Any], index: Any) -> ContentBlock:
+    def _seed(self, kind: str, block: dict[str, Any], seq: Seq) -> ContentBlock:
         common: dict[str, Any] = {
-            "index": index,
+            "seq": seq,
             "source": SOURCE,
             "native": dict(block),
         }
@@ -185,10 +197,10 @@ class _ToHub:
         return VendorBlock(type=kind or "unknown", raw=dict(block), **common)
 
     def _block_delta(self, event: dict[str, Any]) -> list[HubResponse]:
-        index = event.get("index")
+        seq = self._block_seq(event)
         delta = event.get("delta") or {}
         kind = delta.get("type")
-        common: dict[str, Any] = {"index": index, "source": SOURCE}
+        common: dict[str, Any] = {"seq": seq, "source": SOURCE}
 
         if kind == "text_delta":
             return self._one(TextBlock(text=delta.get("text") or "", **common))
@@ -201,21 +213,19 @@ class _ToHub:
             fragment = delta.get("partial_json") or ""
             return self._one(ToolUseBlock(input_json=fragment, **common))
         if kind == "citations_delta":
-            return self._citation(delta.get("citation") or {}, index)
+            return self._citation(delta.get("citation") or {}, seq)
         return []
 
-    def _citation(self, citation: dict[str, Any], block_index: Any) -> list[HubResponse]:
+    def _citation(self, citation: dict[str, Any], seq: Seq) -> list[HubResponse]:
         """네이티브 인용을 해당 허브 text block에 붙인다.
 
         이 벤더는 인용을 본문 태그가 아니라 구조 채널로 준다. beta 헤더도 필요 없다. 그래서
         어휘의 태그 올림을 거치지 않는다. 좌표는 근거 문서 안의 위치이고 citation이 붙은
         ``TextBlock`` 전체가 생성 답변의 인용 구간이다.
         """
-        if not isinstance(block_index, int):
-            return []
         return self._one(
             TextBlock(
-                index=block_index,
+                seq=seq,
                 source=SOURCE,
                 citations=[self._citation_model(citation)],
             )

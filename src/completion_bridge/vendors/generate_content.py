@@ -39,6 +39,7 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
+from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
 from .base import JsonCall, Lowerer
 from .normalize import INSTRUCTION_ROLES, normalize_role, stop_reason_from_gemini
@@ -93,11 +94,13 @@ def _parse_args(raw: str) -> dict[str, Any]:
 class _ToHub:
     """GenerateContent 응답을 허브 델타로 바꾼다.
 
-    본문과 추론에 고정 인덱스를 주고 도구 호출은 도착 순서대로 자리를 잡는다. 이 API는
-    part 인덱스를 주지 않으므로 어댑터가 만들어야 한다.
+    이 API는 part 인덱스를 주지 않으므로 어댑터가 part 번호 n을 만들고 ``seq=(n, 0)``을 쓴다.
+    candidate 메타데이터에서 만든 블록은 대상 text 블록이나 그 시점의 맨 끝 블록 바로 뒤의
+    seq를 받는다.
     """
 
     def __init__(self) -> None:
+        self._seqs = SeqAllocator(1)
         self._next_index = 0
         self._last_stream_key: str | None = None
         self._last_stream_index: int | None = None
@@ -112,20 +115,28 @@ class _ToHub:
         if isinstance(feedback, dict) and feedback.get("blockReason"):
             # 입력이 차단되면 candidates가 아예 오지 않는다. 여기서 잡지 않으면 빈 응답과
             # 구분되지 않는다.
-            blocks.append(VendorBlock(type="promptFeedback", raw=dict(feedback), source=SOURCE))
+            blocks.append(
+                VendorBlock(
+                    type="promptFeedback",
+                    raw=dict(feedback),
+                    source=SOURCE,
+                    seq=self._seqs.after(),
+                )
+            )
         for position, part in enumerate(content.get("parts") or []):
             if isinstance(part, dict):
-                block = self._part(part, self._part_index(part, position=position))
+                seq = self._seqs.coord((self._part_index(part, position=position),))
+                block = self._part(part, seq)
                 if block is not None:
                     blocks.append(block)
 
-        text_indices = [
-            block.index
+        text_seqs = [
+            block.seq
             for block in blocks
-            if isinstance(block, TextBlock) and isinstance(block.index, int)
+            if isinstance(block, TextBlock) and block.seq is not None
         ]
-        target_index = text_indices[0] if len(set(text_indices)) == 1 else None
-        blocks.extend(self._citations(head.get("citationMetadata"), target_index))
+        target_seq = text_seqs[0] if len(set(text_seqs)) == 1 else None
+        blocks.extend(self._citations(head.get("citationMetadata"), target_seq))
         grounding = self._grounding(head.get("groundingMetadata"))
         if grounding is not None:
             blocks.append(grounding)
@@ -156,24 +167,28 @@ class _ToHub:
     def flush(self) -> list[HubResponse]:
         return []
 
-    def _citations(self, metadata: Any, target_index: int | None) -> list[ContentBlock]:
+    def _citations(self, metadata: Any, target_seq: Seq | None) -> list[ContentBlock]:
         """``citationMetadata``의 출력 범위를 annotation으로 보존한다.
 
         이 벤더의 ``citationSources``는 ``startIndex``/``endIndex``가 **답변 문자열 안의
         위치**다. Anthropic이 원문 좌표를 주는 것과 축이 반대이므로 이쪽은 답변 좌표를 채운다.
 
         인용이 part가 아니라 candidate 메타데이터에 실린다. part만 훑으면 통째로 놓친다.
+
+        ``citationSources``의 배열 위치가 같은 annotation은 chunk가 달라도 같은 seq를 받아 한
+        블록으로 병합된다. seq는 그 위치가 처음 나온 chunk에서 ``target_seq`` 블록, 없으면 그
+        시점의 맨 끝 블록 바로 뒤로 정해진다.
         """
         if not isinstance(metadata, dict):
             return []
         out: list[ContentBlock] = []
-        for annotation_index, source in enumerate(metadata.get("citationSources") or []):
+        for position, source in enumerate(metadata.get("citationSources") or []):
             if not isinstance(source, dict):
                 continue
             fields: dict[str, Any] = {
                 "source": SOURCE,
-                "annotation_index": annotation_index,
-                "target_index": target_index,
+                "seq": self._seqs.after(target_seq, key=("citation", position)),
+                "target_seq": target_seq,
                 "kind": "citation_source",
                 "native": dict(source),
             }
@@ -191,9 +206,12 @@ class _ToHub:
             out.append(AnnotationBlock(**fields))
         return out
 
-    @staticmethod
-    def _grounding(metadata: Any) -> GroundingBlock | None:
-        """검색 source와 답변 support의 관계를 평탄화하지 않고 보존한다."""
+    def _grounding(self, metadata: Any) -> GroundingBlock | None:
+        """검색 source와 답변 support의 관계를 평탄화하지 않고 보존한다.
+
+        스트림의 모든 grounding 조각은 같은 seq를 받아 블록 하나로 병합된다. seq는 처음 나온
+        시점의 맨 끝 블록 바로 뒤로 정해진다.
+        """
         if not isinstance(metadata, dict):
             return None
 
@@ -260,7 +278,7 @@ class _ToHub:
         retrieval = metadata.get("retrievalMetadata")
         return GroundingBlock(
             source=SOURCE,
-            candidate_index=0,
+            seq=self._seqs.after(key=("grounding",)),
             sources=sources,
             supports=supports,
             search_queries=queries,
@@ -273,17 +291,27 @@ class _ToHub:
         """허브에 대응물이 없는 candidate 메타데이터를 보존한다.
 
         grounding은 별도 공통 블록으로 처리한다. 여기에는 URL 조회 결과와 안전 등급처럼
-        정규화하지 않는 candidate 메타데이터만 남긴다.
+        정규화하지 않는 candidate 메타데이터만 남긴다. 각 블록은 만들 때마다 그 시점의 맨 끝
+        블록 바로 뒤의 새 seq를 받는다.
         """
         out: list[ContentBlock] = []
         for key in ("urlContextMetadata",):
             value = candidate.get(key)
             if isinstance(value, dict):
                 # 서버가 검색을 돌린 결과다. 다른 벤더의 서버 도구와 같은 자리다.
-                out.append(ServerToolBlock(name=key, raw=value, source=SOURCE))
+                out.append(
+                    ServerToolBlock(name=key, raw=value, source=SOURCE, seq=self._seqs.after())
+                )
         ratings = candidate.get("safetyRatings")
         if isinstance(ratings, list) and ratings:
-            out.append(VendorBlock(type="safetyRatings", raw={"ratings": ratings}, source=SOURCE))
+            out.append(
+                VendorBlock(
+                    type="safetyRatings",
+                    raw={"ratings": ratings},
+                    source=SOURCE,
+                    seq=self._seqs.after(),
+                )
+            )
         return out
 
     def _part_index(self, part: dict[str, Any], *, position: int) -> int:
@@ -313,7 +341,7 @@ class _ToHub:
         self._last_stream_index = index
         return index
 
-    def _part(self, part: dict[str, Any], index: int) -> ContentBlock | None:
+    def _part(self, part: dict[str, Any], seq: Seq) -> ContentBlock | None:
         """채워진 필드로 종류를 알아낸다. 판별자가 없어 순서가 계약이다."""
         text = part.get(_TEXT)
         # 빈 문자열도 블록을 만든다. 확립된 규칙이 ``text != null``이다.
@@ -322,14 +350,14 @@ class _ToHub:
             if part.get("thought"):
                 fields: dict[str, Any] = {
                     "thinking": text,
-                    "index": index,
+                    "seq": seq,
                     "native": dict(part),
                 }
                 signature = part.get("thoughtSignature")
                 if isinstance(signature, str) and signature:
                     fields["signature"] = signature
                 return ThinkingBlock(source=SOURCE, **fields)
-            fields = {"text": text, "index": index, "native": dict(part)}
+            fields = {"text": text, "seq": seq, "native": dict(part)}
             signature = part.get("thoughtSignature")
             if isinstance(signature, str) and signature:
                 fields["signature"] = signature
@@ -337,7 +365,7 @@ class _ToHub:
 
         call = part.get(_FUNCTION_CALL)
         if isinstance(call, dict):
-            return self._call(call, part, index)
+            return self._call(call, part, seq)
 
         response = part.get(_FUNCTION_RESPONSE)
         if isinstance(response, dict):
@@ -358,7 +386,7 @@ class _ToHub:
                 structured_content=payload,
                 blocks=nested,
                 native=dict(part),
-                index=index,
+                seq=seq,
                 source=SOURCE,
             )
 
@@ -368,7 +396,7 @@ class _ToHub:
             return AudioBlock(
                 transcript=text if isinstance(text, str) else None,
                 native=dict(part),
-                index=index,
+                seq=seq,
                 source=SOURCE,
             )
 
@@ -382,7 +410,7 @@ class _ToHub:
                     media_type=mime,
                     data=data,
                     native=dict(part),
-                    index=index,
+                    seq=seq,
                     source=SOURCE,
                 )
             if mime.startswith("image/"):
@@ -390,14 +418,14 @@ class _ToHub:
                     media_type=mime,
                     data=data,
                     native=dict(part),
-                    index=index,
+                    seq=seq,
                     source=SOURCE,
                 )
             return DocumentBlock(
                 media_type=mime or "application/octet-stream",
                 data=data,
                 native=dict(part),
-                index=index,
+                seq=seq,
                 source=SOURCE,
             )
 
@@ -410,7 +438,7 @@ class _ToHub:
                     media_type=mime,
                     url=uri,
                     native=dict(part),
-                    index=index,
+                    seq=seq,
                     source=SOURCE,
                 )
             if mime.startswith("audio/"):
@@ -418,14 +446,14 @@ class _ToHub:
                     media_type=mime,
                     uri=uri,
                     native=dict(part),
-                    index=index,
+                    seq=seq,
                     source=SOURCE,
                 )
             return DocumentBlock(
                 media_type=mime or "application/octet-stream",
                 uri=uri,
                 native=dict(part),
-                index=index,
+                seq=seq,
                 source=SOURCE,
             )
 
@@ -440,14 +468,14 @@ class _ToHub:
                     output=str(value.get("output", "")) if field == "codeExecutionResult" else "",
                     raw=value,
                     native=dict(part),
-                    index=index,
+                    seq=seq,
                     source=SOURCE,
                 )
         return VendorBlock(
             type="gemini_part",
             raw=dict(part),
             native=dict(part),
-            index=index,
+            seq=seq,
             source=SOURCE,
         )
 
@@ -455,10 +483,10 @@ class _ToHub:
         self,
         call: dict[str, Any],
         part: dict[str, Any],
-        index: int,
+        seq: Seq,
     ) -> ToolUseBlock:
         fields: dict[str, Any] = {
-            "index": index,
+            "seq": seq,
             "source": SOURCE,
             "native": dict(part),
         }

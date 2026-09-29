@@ -81,9 +81,11 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 
 `prompt_hint()`는 편의 관례일 뿐 Bridge가 시스템 프롬프트에 자동 삽입하지 않는다. 모델에게
 태그 출력을 요구할지는 사용하는 애플리케이션이 결정한다. 한 wire text block을
-`text → custom → text`처럼 여러 의미 block으로 분할할 때 파생 block에 원래 transport index를
-그대로 복사하면 병합기가 같은 슬롯으로 판단한다. 이 경우 `index=None` 또는 충돌하지 않는
-synthetic index를 사용해야 한다.
+`text → custom → text`처럼 여러 의미 block으로 분할할 때 파생 block에 원래 block의 `seq`를
+그대로 복사하면 병합기가 같은 슬롯으로 판단한다. 파생 block은 원래 `seq` 끝에 조각 번호
+0, 1, 2, …를 추가한 seq를 쓰고, 나누지 않는 block의 seq에도 0을 추가해야 한다. `seq`가 없는
+block은 최종 결과에서 `MappingError`가 된다. 규칙은
+[블록 index와 seq 튜플](block_index_and_key_tuple.md)에 있다.
 
 [실행 가능한 비인용 예제](../examples/custom_vocabulary.py)는 `BadgeBlock`을 등록하고,
 `<badge>`가 세 SSE delta에 걸쳐 잘린 응답을 JSON block으로 올린 뒤 네 벤더의 text part로 다시
@@ -396,9 +398,9 @@ mount, 설치 패키지, 권한, 이전 명령의 side effect를 옮길 수 없�
 ## Content block의 반복과 식별
 
 ReAct 여부와 무관하게 `text → image → text → text → tool → text`처럼 어떤 타입도 여러 번 나타날
-수 있다는 전제로 Hub와 병합기를 설계했다. 병합 규칙은 타입이 아니라 `index`다. 같은 index의
-delta는 한 블록에 누적하고, 다른 index는 타입이 같아도 독립 블록으로 유지한다. index가 없는
-완성 블록도 각각 append한다.
+수 있다는 전제로 Hub와 병합기를 설계했다. 병합 규칙은 타입이 아니라 `seq`다. 같은 seq의
+delta는 한 블록에 누적하고, 다른 seq는 타입이 같아도 독립 블록으로 유지한다. 최종 결과는 seq
+순서로 블록을 늘어놓고 `index`를 0부터 매긴다.
 
 다만 수신 wire가 독립 블록의 경계를 제공하지 않으면 브리지가 그 경계를 추측해서 복원할 수는
 없다.
@@ -438,7 +440,7 @@ assistant(thinking, tool_use A)
 | Chat의 반복 reasoning delta + 병렬 tool call | 연속 reasoning은 누적하고 도구 호출 뒤의 reasoning은 새 블록; 각 tool index별 인수와 ID는 독립 병합 |
 | Anthropic의 thinking → server tool/result → thinking → client tool | content block index와 도착 순서 보존, signature 포함 동일 벤더 재생 |
 | Anthropic server loop 제한 도달 | `pause_turn`을 그대로 노출하므로 소비 앱이 반환 content로 다음 요청을 결정 가능 |
-| Responses의 reasoning → server tool → reasoning → client tool | `output_index`와 `content_index`/`summary_index`를 합성한 key로 순서 보존 |
+| Responses의 reasoning → server tool → reasoning → client tool | `(output_index, part_kind, part_index)` seq 좌표로 구분하고 최종 결과를 좌표 순서로 확정 |
 | Gemini의 thought → code/result → thought → functionCall | 여러 Part의 도착 순서와 `thoughtSignature` 보존 |
 | Chat의 reasoning/text/tool 간 세밀한 interleave | 관찰한 채널 전환 순서로 블록 분리; 요청 재생은 블록 순서대로 content와 설정된 reasoning 필드에 각각 concat |
 | 환경 의존 server tool block | 한 응답 안의 순서는 보존하지만 실행·후속 세션 연결은 Bridge 지원 범위가 아님 |

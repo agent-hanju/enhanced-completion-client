@@ -23,6 +23,7 @@ from completion_bridge import (
     ToolUseBlock,
 )
 from completion_bridge.errors import MappingError
+from completion_bridge.seq import finalize
 from completion_bridge.vendors.base import VendorAdapter
 
 
@@ -509,7 +510,7 @@ def merge_response(scenario: Scenario) -> HubResponse:
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return merger.build()
+    return finalize(merger.build())
 
 
 def _request_rows(history: list[HubMessage]) -> list[tuple[str, dict[str, Any]]]:

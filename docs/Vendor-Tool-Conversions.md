@@ -465,7 +465,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       },
       {
         "type": "server_tool",
-        "index": 4294967296,
+        "index": 1,
         "source": "responses",
         "native": {
           "type": "code_interpreter_call",
@@ -489,7 +489,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       },
       {
         "type": "responses_video_generation_call",
-        "index": 8589934592,
+        "index": 2,
         "source": "responses",
         "native": {
           "level": "item"
@@ -503,7 +503,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       },
       {
         "type": "text",
-        "index": 12884901888,
+        "index": 3,
         "source": "responses",
         "native": {
           "item": {
