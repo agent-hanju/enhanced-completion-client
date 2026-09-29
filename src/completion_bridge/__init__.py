@@ -46,7 +46,15 @@ from .errors import (
     StreamNotFinished,
     TransportError,
 )
-from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition, Usage
+from .hub import (
+    HubMessage,
+    HubRequest,
+    HubResponse,
+    TokenCount,
+    TokenizedPrompt,
+    ToolDefinition,
+    Usage,
+)
 from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
 from .parameters import (
@@ -99,6 +107,8 @@ __all__ = [
     "TextBlock",
     "TextRun",
     "ThinkingBlock",
+    "TokenCount",
+    "TokenizedPrompt",
     "ToolDefinition",
     "ToolResultBlock",
     "ToolUseBlock",

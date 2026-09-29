@@ -23,11 +23,11 @@ from .blocks import (
     VendorBlock,
 )
 from .errors import ExtractionError, MappingError, StreamNotFinished
-from .hub import HubMessage, HubRequest, HubResponse, ToolDefinition
+from .hub import HubMessage, HubRequest, HubResponse, TokenCount, ToolDefinition
 from .mapper import StreamMapper, compose
 from .merge import StreamMerger
 from .parameters import Hyperparameters
-from .transport.http import astream_sse, stream_sse
+from .transport.http import apost_json, astream_sse, post_json, stream_sse
 from .transport.sse import SseEvent
 from .vendors.base import VendorAdapter
 from .vendors.tool_policy import to_portable
@@ -442,15 +442,18 @@ class _BridgeBase:
         )
         return self._vendor.build_body(request, self._lowerer)
 
-    def _request_headers(self) -> dict[str, str]:
+    def _request_headers(self, *, accept: str = "text/event-stream") -> dict[str, str]:
         """전송 헤더를 조립한다.
 
         우선순위가 셋이다. 기본값, 어댑터가 요구하는 것, 호출자가 준 것 순으로 덮인다.
         Anthropic의 ``anthropic-version``처럼 벤더가 요구하는 헤더가 있고, 사내 게이트웨이의
         CSRF 토큰처럼 호출자만 아는 것이 있다.
+
+        ``accept``는 ``Accept``의 기본값이다. 스트리밍 요청은 ``text/event-stream``, 토큰 수
+        측정 요청은 ``application/json``을 쓴다.
         """
         headers = {
-            "Accept": "text/event-stream",
+            "Accept": accept,
             "Content-Type": "application/json",
         }
         vendor_headers = getattr(self._vendor, "request_headers", None)
@@ -553,6 +556,46 @@ class Bridge(_BridgeBase):
             pass
         return stream.result
 
+    async def count_tokens(
+        self,
+        messages: Sequence[MessageInput],
+        *,
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
+        **params: Any,
+    ) -> TokenCount:
+        """생성 요청과 같은 입력으로 입력 토큰 수를 잰다. 텍스트는 생성하지 않는다.
+
+        :meth:`build_request`로 만든 생성 body를 어댑터의 ``token_count_calls``에 넘기고,
+        어댑터가 내놓는 요청을 순서대로 보낸다. ``chat_completions``(vLLM)는 chat template
+        적용 결과를 ``tokenized``에 채우고, 다른 어댑터는 ``None``으로 둔다.
+
+        Raises:
+            TransportError: 토큰 수 엔드포인트가 2xx가 아닌 상태를 돌려줄 때.
+            MappingError: 응답이 JSON 객체가 아니거나 어댑터가 기대한 필드가 없을 때.
+        """
+        body = self.build_request(
+            messages,
+            tools=tools,
+            model=model,
+            hyperparameters=hyperparameters,
+            **params,
+        )
+        client = self._get_client()
+        headers = self._request_headers(accept="application/json")
+        calls = self._vendor.token_count_calls(body)
+        try:
+            call = next(calls)
+            while True:
+                payload = await apost_json(
+                    client, f"{self._base_url}{call.path}", json=call.body, headers=headers
+                )
+                call = calls.send(payload)
+        except StopIteration as finished:
+            result: TokenCount = finished.value
+            return result
+
     async def aclose(self) -> None:
         """직접 만든 클라이언트만 닫는다. 주입받은 것은 호출자 소관이다."""
         if self._owns_client and self._client is not None:
@@ -645,6 +688,37 @@ class SyncBridge(_BridgeBase):
         for _ in stream:
             pass
         return stream.result
+
+    def count_tokens(
+        self,
+        messages: Sequence[MessageInput],
+        *,
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+        hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
+        **params: Any,
+    ) -> TokenCount:
+        """:meth:`Bridge.count_tokens`의 동기판."""
+        body = self.build_request(
+            messages,
+            tools=tools,
+            model=model,
+            hyperparameters=hyperparameters,
+            **params,
+        )
+        client = self._get_client()
+        headers = self._request_headers(accept="application/json")
+        calls = self._vendor.token_count_calls(body)
+        try:
+            call = next(calls)
+            while True:
+                payload = post_json(
+                    client, f"{self._base_url}{call.path}", json=call.body, headers=headers
+                )
+                call = calls.send(payload)
+        except StopIteration as finished:
+            result: TokenCount = finished.value
+            return result
 
     def close(self) -> None:
         if self._owns_client and self._client is not None:

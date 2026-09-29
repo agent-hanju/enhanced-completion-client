@@ -514,3 +514,74 @@ class TestDenseInput:
                 dense_history(), tools=[DENSE_TOOL], max_output_tokens=SHORT
             )
         _report_dense("responses", result)
+
+
+COUNT_HISTORY: list[HubMessage | str] = [HubMessage.system("짧게 답해"), "서울 날씨 알려줘"]
+
+
+class TestTokenCount:
+    """생성 전용 필드가 섞인 요청으로 토큰 수를 잰다. 제외 목록이 맞으면 400이 나지 않는다."""
+
+    @skip_anthropic
+    async def test_messages_count_applies_thinking(self) -> None:
+        assert ANTHROPIC is not None
+        base, model, key = ANTHROPIC
+        hyperparameters = Hyperparameters(max_tokens=2048, temperature=1.0, top_k=5)
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            bridge = Bridge(
+                vendor=messages,
+                base_url=base,
+                model=model,
+                http_client=client,
+                headers={"x-api-key": key},
+            )
+            plain = await bridge.count_tokens(
+                COUNT_HISTORY, tools=[WEATHER_TOOL], hyperparameters=hyperparameters
+            )
+            thinking = await bridge.count_tokens(
+                COUNT_HISTORY,
+                tools=[WEATHER_TOOL],
+                hyperparameters=hyperparameters.merged(
+                    {"thinking": {"type": "enabled", "budget_tokens": 1024}}
+                ),
+            )
+        print(f"\n[messages] count plain={plain.input_tokens} thinking={thinking.input_tokens}")
+        assert plain.tokenized is None
+        assert 0 < plain.input_tokens < thinking.input_tokens
+
+    @skip_responses
+    async def test_responses_count_accepts_generation_body(self) -> None:
+        assert RESPONSES is not None
+        base, model, key = RESPONSES
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            bridge = Bridge(
+                vendor=responses, base_url=base, model=model, api_key=key, http_client=client
+            )
+            result = await bridge.count_tokens(
+                COUNT_HISTORY,
+                tools=[WEATHER_TOOL],
+                hyperparameters=Hyperparameters(
+                    max_output_tokens=SHORT, temperature=0.2, store=False
+                ),
+            )
+        print(f"\n[responses] count={result.input_tokens}")
+        assert result.input_tokens > 0
+        assert result.tokenized is None
+
+    @skip_gemini
+    async def test_gemini_count_wraps_generation_body(self) -> None:
+        assert GEMINI is not None
+        base, model, key = GEMINI
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            bridge = Bridge(
+                vendor=generate_content.for_model(model, api_key=key),
+                base_url=base,
+                model=model,
+                http_client=client,
+            )
+            result = await bridge.count_tokens(
+                COUNT_HISTORY, tools=[WEATHER_TOOL], hyperparameters=budget(SHORT)
+            )
+        print(f"\n[gemini] count={result.input_tokens}")
+        assert result.input_tokens > 0
+        assert result.tokenized is None

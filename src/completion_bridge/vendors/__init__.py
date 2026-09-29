@@ -11,7 +11,7 @@
 | ``generate_content`` | Gemini | content part에 판별자가 없다 |
 """
 
-from .base import Lowerer, VendorAdapter
+from .base import JsonCall, Lowerer, VendorAdapter
 from .chat_completions import ChatCompletionsAdapter, chat_completions
 from .generate_content import GenerateContentAdapter, generate_content
 from .messages import MessagesAdapter, messages
@@ -20,6 +20,7 @@ from .responses import ResponsesAdapter, responses
 __all__ = [
     "ChatCompletionsAdapter",
     "GenerateContentAdapter",
+    "JsonCall",
     "Lowerer",
     "MessagesAdapter",
     "ResponsesAdapter",

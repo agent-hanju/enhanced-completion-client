@@ -327,3 +327,19 @@ class TestLiveStreaming:
         assert result.text.strip()
         assert all(isinstance(b, TextBlock) for b in result.content if b.type == "text")
         print(f"\n[live] sync text={result.text!r}")
+
+
+class TestLiveTokenCount:
+    async def test_count_tokens_returns_rendered_prompt(self) -> None:
+        """vLLM이 chat template을 적용한 결과를 돌려준다.
+
+        생성 전용 필드가 섞인 body를 ``/tokenize``가 거부하지 않는지도 함께 확인한다.
+        """
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            result = await _bridge(client).count_tokens(
+                ["안녕 세계"], max_completion_tokens=SHORT, temperature=0.2, **NO_THINKING
+            )
+        assert result.tokenized is not None
+        assert result.input_tokens == len(result.tokenized.token_ids)
+        assert "안녕 세계" in result.tokenized.text
+        print(f"\n[live] count={result.input_tokens} prompt={result.tokenized.text!r}")

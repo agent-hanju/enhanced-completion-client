@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from typing import Any
 
 from ..blocks import (
@@ -32,10 +33,10 @@ from ..blocks import (
     VendorBlock,
 )
 from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
+from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseEvent
-from .base import Lowerer
+from .base import JsonCall, Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_responses
 from .parts import as_responses_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -968,6 +969,51 @@ class ResponsesAdapter:
 
     def to_hub(self) -> StreamMapper[Any, Any]:
         return _ToHub()
+
+    def token_count_calls(
+        self, body: dict[str, Any]
+    ) -> Generator[JsonCall, dict[str, Any], TokenCount]:
+        """``POST /v1/responses/input_tokens``로 입력 토큰 수를 얻는다.
+
+        생성 body에서 이 엔드포인트가 받지 않는 필드만 빼고 보낸다. 나머지 필드는 그대로
+        보내므로 ``instructions``, ``tools``, ``reasoning``처럼 토큰 수에 영향을 주는 설정이
+        반영된다.
+
+        Raises:
+            MappingError: 응답에 정수 ``input_tokens``가 없을 때.
+        """
+        # 토큰 수 측정에서만 쓰는 제외 목록이다. 생성 body에 들어갈 수 있지만 input_tokens가
+        # "Unknown parameter"로 거부하는 필드다.
+        # 각 어댑터 별로 특수한 사정 때문에 제한적으로 추가했다. 적용할 스키마가 다르기 때문에
+        # 공통화시킬 수요가 낮다.
+        excluded = frozenset(
+            {
+                "stream",
+                "stream_options",
+                "temperature",
+                "top_p",
+                "top_logprobs",
+                "max_output_tokens",
+                "max_tool_calls",
+                "background",
+                "include",
+                "store",
+                "metadata",
+                "service_tier",
+                "safety_identifier",
+                "prompt_cache_key",
+                "prompt_cache_options",
+                "moderation",
+            }
+        )
+        payload = yield JsonCall(
+            "/v1/responses/input_tokens",
+            {key: value for key, value in body.items() if key not in excluded},
+        )
+        input_tokens = payload.get("input_tokens")
+        if not isinstance(input_tokens, int):
+            raise MappingError("responses input_tokens response must have an integer input_tokens")
+        return TokenCount(input_tokens=input_tokens, tokenized=None)
 
 
 responses = ResponsesAdapter()

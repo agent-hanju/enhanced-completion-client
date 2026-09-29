@@ -92,6 +92,35 @@ with SyncBridge(
     print(result.text)
 ```
 
+### 토큰 수 측정
+
+`count_tokens()`는 `complete()`와 같은 인자를 받아 입력 토큰 수를 잰다. 텍스트는 생성하지 않는다.
+결과는 `TokenCount`이고, `tokenized`는 `chat_completions`(vLLM)에서만 채워진다.
+
+```python
+with SyncBridge(vendor=chat_completions, base_url="http://127.0.0.1:8000", model="qwen3-8b") as bridge:
+    count = bridge.count_tokens(
+        ["안녕 세계"],
+        hyperparameters=Hyperparameters(chat_template_kwargs={"enable_thinking": False}),
+    )
+    print(count.input_tokens)
+    print(count.tokenized.text)     # chat template이 적용된 프롬프트. 특수 토큰 포함
+    print(count.tokenized.token_ids)
+```
+
+| 어댑터 | 호출하는 엔드포인트 | 생성 body 처리 | `tokenized` |
+|---|---|---|---|
+| `chat_completions` | `POST /tokenize` → `POST /detokenize` | 그대로 전송 | `text`, `token_ids` |
+| `messages` | `POST /v1/messages/count_tokens` | 엔드포인트가 거부하는 생성 전용 필드를 제외 | `None` |
+| `responses` | `POST /v1/responses/input_tokens` | 엔드포인트가 거부하는 생성 전용 필드를 제외 | `None` |
+| `generate_content` | `POST /{version}/models/{model}:countTokens` | `generateContentRequest`로 감싸고 `model` 추가 | `None` |
+
+생성 body를 기준으로 하므로 `chat_template_kwargs`, `thinking`, `reasoning`, `tools`처럼 프롬프트를
+바꾸는 설정이 토큰 수에 반영된다. Messages와 Responses의 토큰 수 엔드포인트는 스키마에 없는 필드를
+400으로 거부한다. 그래서 두 어댑터는 `stream`, `max_tokens`/`max_output_tokens`, `temperature` 같은
+생성 전용 필드만 제외하고 나머지는 그대로 보낸다. 제외 목록은 각 어댑터의 `token_count_calls()`
+안에만 있고 토큰 수 측정에서만 쓴다.
+
 ## 요청 옵션과 Hyperparameters
 
 대화 이외의 생성 옵션은 `Hyperparameters` 객체에 둔다. 각 필드는 각 API와 사용 모델에 사용

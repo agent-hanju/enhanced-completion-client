@@ -14,7 +14,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .blocks import Block, ContentBlock, TextBlock
 from .parameters import Hyperparameters
 
-__all__ = ["HubMessage", "HubRequest", "HubResponse", "ToolDefinition", "Usage"]
+__all__ = [
+    "HubMessage",
+    "HubRequest",
+    "HubResponse",
+    "TokenCount",
+    "TokenizedPrompt",
+    "ToolDefinition",
+    "Usage",
+]
 
 
 def _overwrite() -> dict[str, Any]:
@@ -151,3 +159,30 @@ class HubRequest(BaseModel):
         rendered = self.hyperparameters.for_vendor(family, name=vendor_name)
         rendered.update(self.params)
         return rendered
+
+
+class TokenizedPrompt(BaseModel):
+    """vLLM 서버가 chat template을 적용해 토큰화한 프롬프트.
+
+    ``text``는 ``/detokenize``가 돌려준 문자열이며 ``<bos>`` 같은 특수 토큰을 포함한다.
+    ``token_ids``는 ``/tokenize``가 돌려준 토큰 ID 목록이다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    token_ids: list[int]
+
+
+class TokenCount(BaseModel):
+    """토큰 수 측정 결과.
+
+    ``input_tokens``는 대상 API의 토큰 수 엔드포인트가 돌려준 입력 토큰 수다.
+    ``tokenized``는 ``chat_completions``(vLLM) 어댑터에서만 채워지고 다른 어댑터에서는
+    ``None``이다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    input_tokens: int
+    tokenized: TokenizedPrompt | None

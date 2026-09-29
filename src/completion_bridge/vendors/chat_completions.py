@@ -10,6 +10,7 @@ vLLM이 이 규약을 쓴다. 첫 번째로 구현하는 스포크다.
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from typing import Any
 
 from ..blocks import (
@@ -26,10 +27,18 @@ from ..blocks import (
     VendorBlock,
 )
 from ..errors import MappingError
-from ..hub import HubMessage, HubRequest, HubResponse, ToolDefinition, Usage
+from ..hub import (
+    HubMessage,
+    HubRequest,
+    HubResponse,
+    TokenCount,
+    TokenizedPrompt,
+    ToolDefinition,
+    Usage,
+)
 from ..mapper import StreamMapper
 from ..transport.sse import SseEvent
-from .base import Lowerer
+from .base import JsonCall, Lowerer
 from .normalize import REFUSAL_PREFIX, stop_reason_from_chat
 from .parts import as_chat_completions_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -275,6 +284,36 @@ class ChatCompletionsAdapter:
 
     def to_hub(self) -> StreamMapper[Any, Any]:
         return _ToHub(self.name)
+
+    def token_count_calls(
+        self, body: dict[str, Any]
+    ) -> Generator[JsonCall, dict[str, Any], TokenCount]:
+        """vLLM ``/tokenize``와 ``/detokenize``로 토큰 수와 chat template 적용 결과를 얻는다.
+
+        ``/tokenize``는 생성 전용 필드를 무시하므로 생성 body를 그대로 보낸다. 서버가 chat
+        template을 적용해 토큰화한 ``count``와 ``tokens``를 받고, 그 ``tokens``를
+        ``/detokenize``로 보내 특수 토큰을 포함한 프롬프트 문자열을 받는다.
+
+        Raises:
+            MappingError: ``/tokenize`` 응답에 정수 ``count``와 목록 ``tokens``가 없거나,
+                ``/detokenize`` 응답에 문자열 ``prompt``가 없을 때.
+        """
+        tokenized = yield JsonCall("/tokenize", body)
+        count = tokenized.get("count")
+        tokens = tokenized.get("tokens")
+        if not isinstance(count, int) or not isinstance(tokens, list):
+            raise MappingError(
+                "vLLM /tokenize response must have an integer count and a tokens list"
+            )
+
+        detokenized = yield JsonCall("/detokenize", {"model": body["model"], "tokens": tokens})
+        prompt = detokenized.get("prompt")
+        if not isinstance(prompt, str):
+            raise MappingError("vLLM /detokenize response must have a string prompt")
+        return TokenCount(
+            input_tokens=count,
+            tokenized=TokenizedPrompt(text=prompt, token_ids=tokens),
+        )
 
     # ---- 요청 쪽 내림 ----
 

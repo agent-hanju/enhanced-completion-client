@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from typing import Any
 
 from ..blocks import (
@@ -36,10 +37,10 @@ from ..blocks import (
     VendorBlock,
 )
 from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, ToolDefinition, Usage
+from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..transport.sse import SseEvent
-from .base import Lowerer
+from .base import JsonCall, Lowerer
 from .normalize import INSTRUCTION_ROLES, normalize_role, stop_reason_from_gemini
 from .parts import as_gemini_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -750,6 +751,30 @@ class GenerateContentAdapter:
 
     def to_hub(self) -> StreamMapper[Any, Any]:
         return _ToHub()
+
+    def token_count_calls(
+        self, body: dict[str, Any]
+    ) -> Generator[JsonCall, dict[str, Any], TokenCount]:
+        """``POST /{version}/models/{model}:countTokens``로 입력 토큰 수를 얻는다.
+
+        생성 body 전체를 ``generateContentRequest``로 감싸고 그 안에 ``models/{model}``을
+        넣는다. countTokens는 감싸지 않은 ``systemInstruction``, ``generationConfig``와
+        ``model``이 없는 ``generateContentRequest``를 거부한다.
+
+        Raises:
+            ValueError: 어댑터에 모델이 없을 때. :meth:`for_model`로 만든 어댑터를 쓴다.
+            MappingError: 응답에 정수 ``totalTokens``가 없을 때.
+        """
+        if not self.model:
+            raise ValueError("generate_content token count needs a model; use for_model(model)")
+        payload = yield JsonCall(
+            f"/{self.version}/models/{self.model}:countTokens",
+            {"generateContentRequest": {"model": f"models/{self.model}", **body}},
+        )
+        total_tokens = payload.get("totalTokens")
+        if not isinstance(total_tokens, int):
+            raise MappingError("gemini countTokens response must have an integer totalTokens")
+        return TokenCount(input_tokens=total_tokens, tokenized=None)
 
 
 generate_content = GenerateContentAdapter()

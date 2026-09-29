@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from ..hub import HubRequest
+from ..hub import HubRequest, TokenCount
 from ..mapper import StreamMapper
 from ..transport.sse import SseEvent
 
-__all__ = ["Lowerer", "VendorAdapter"]
+__all__ = ["JsonCall", "Lowerer", "VendorAdapter"]
+
+
+@dataclass(frozen=True)
+class JsonCall:
+    """토큰 수 측정 중 보낼 JSON POST 요청 한 건."""
+
+    path: str
+    """base_url에 붙일 경로."""
+
+    body: dict[str, Any]
+    """전송할 JSON body."""
 
 
 @runtime_checkable
@@ -63,5 +76,16 @@ class VendorAdapter(Protocol):
 
         ``map`` 외에 ``flush``가 필요해서 iterator가 아니다. 태그 파서가 청크 경계에 걸린
         잔여를 배출하는 시점을 ``compose``가 순서대로 제어해야 한다.
+        """
+        ...
+
+    def token_count_calls(
+        self, body: dict[str, Any]
+    ) -> Generator[JsonCall, dict[str, Any], TokenCount]:
+        """:meth:`build_body`가 만든 생성 body로 입력 토큰 수를 재는 요청 순서.
+
+        보낼 요청을 :class:`JsonCall`로 ``yield``한다. 호출자는 그 요청을 보내고 응답 JSON
+        객체를 ``send``로 돌려준다. 요청이 끝나면 :class:`~completion_bridge.hub.TokenCount`를
+        반환한다. 이 메서드는 I/O를 하지 않는다.
         """
         ...
