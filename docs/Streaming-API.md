@@ -1,7 +1,7 @@
 # API 스트리밍 명세
 
 이 문서는 현재 `completion_bridge` Python 구현의 공개 호출 방식과 요청·응답 모델,
-스트리밍 delta 및 최종 결과 계약을 설명한다. 기준은 저장소의 0.2.0 코드다.
+스트리밍 delta 및 최종 결과 계약을 설명한다. 기준은 저장소의 0.3.0 코드다.
 벤더 API의 전체 스키마와 지원 범위는 [지원표](Support-Matrix.md), 실제 변환 JSON은
 [변환 예제](Conversion-Examples.md)를 함께 참고한다.
 

@@ -1,6 +1,6 @@
 [project]
 name = "completion-bridge"
-version = "0.2.0"
+version = "0.3.0"
 description = "LLM streaming bridge: one hub response model across vendor APIs, with extensible content blocks"
 readme = "README.md"
 requires-python = ">=3.12"
