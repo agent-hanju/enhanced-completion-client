@@ -76,6 +76,11 @@ class VendorAdapter(Protocol):
 
         ``map`` 외에 ``flush``가 필요해서 iterator가 아니다. 태그 파서가 청크 경계에 걸린
         잔여를 배출하는 시점을 ``compose``가 순서대로 제어해야 한다.
+
+        매퍼가 내보내는 모든 content block에는 ``seq``가 있어야 한다. 같은 블록의 조각은 같은
+        seq를, 다른 블록은 다른 seq를 쓴다. seq가 없는 블록은 최종 결과를 만들 때
+        :class:`~completion_bridge.errors.MappingError`가 된다. ``index``는 채우지 않는다.
+        규칙은 ``docs/block_index_and_key_tuple.md``에 있다.
         """
         ...
 

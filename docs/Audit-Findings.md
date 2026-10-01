@@ -226,6 +226,36 @@ Built-in tools with Function calling`. 두 종류 중 하나만 있으면 정상
 
 wire 수준 재현과 오류 문구는 외부 보고에 근거한다. 라이브 호출로 직접 확인하지 못했다.
 
+### A-15. 인용 조각의 block index가 JavaScript 안전 정수 범위를 넘는다
+
+`해결` · `seq.py`, `blocks.py`, `vocabularies/cite.py`, 어댑터 4곳
+
+`_CiteMapper`가 인용 때문에 나뉜 text 조각에 `-(1 << 60)`부터 1씩 줄인 index를 매겼다. JSON을
+JavaScript로 읽으면 2^60 근처의 정수는 256 간격으로만 표현되므로, 화면의 `Number.isSafeInteger`
+검사에서 두 번째 조각부터 거절되었다. 검사를 빼도 서로 다른 조각이 같은 숫자가 되어 블록 하나로
+병합되었다. Responses 어댑터의 곱셈 번호도 `output_index`가 32 이상이면 `annotation_index`가 2^53을
+넘었다.
+
+블록 식별을 delta의 `seq` 정수 튜플과 최종 결과의 `index`로 나눴다. 어댑터는 벤더 좌표로 seq를
+만들고, 최종 결과는 seq 순서로 블록을 늘어놓아 `index`를 0부터 매긴다. 규칙과 결정 근거는
+[블록 index와 seq 튜플](block_index_and_key_tuple.md)에 있다. delta에 `index`가 없어지고
+`AnnotationBlock.annotation_index`, `GroundingBlock.candidate_index`를 삭제했으므로 스트림을 직접
+병합하는 소비자와 사용자 정의 어댑터·vocabulary는 seq 계약을 따라야 한다.
+
+화면 쪽 재현은 외부 보고에 근거한다. 라이브 호출로 직접 확인하지 못했다.
+
+### A-16. 저장용 직렬화에 `"seq": null`이 남는다
+
+`해결` · `seq.py` `finalize()`
+
+A-15 수정 직후 외부 보고로 드러났다. 소비 앱은 최종 결과를 `exclude_unset=True`로 저장한다.
+병합 결과 블록은 delta에서 온 `seq`가 이미 "값을 준 필드"이고 `model_copy(update=...)`도 갱신한
+필드를 그렇게 표시하므로, `finalize()`가 값을 `None`으로 비워도 저장 JSON에 `"seq": null`과
+`"target_seq": null`이 남았다. 대상이 없는 annotation에는 `"target_index": null`도 남았다.
+
+`finalize()`가 두 필드를 `model_fields_set`에서 제거하고, `target_index`는 대상을 찾았을 때만
+채운다. `exclude_unset=True` 직렬화에 두 키가 없는지 `test_seq.py`가 확인한다.
+
 ## B. 새 설계가 요구하는 미구현 항목
 
 README 표가 기술하지만 코드에 아직 없는 것이다.

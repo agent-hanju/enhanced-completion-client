@@ -43,6 +43,10 @@ class HubResponse(BaseModel):
 
     스트리밍 중에는 조각만 채워진 델타로 흐르고, :class:`~completion_bridge.merge.StreamMerger`
     가 그것들을 접어 같은 타입의 최종 결과를 만든다. 소비자가 두 타입을 구분할 필요가 없다.
+
+    단, content block의 식별 필드는 다르다. 델타의 블록은 ``seq``를 갖고 ``index``가 없으며,
+    스트림의 ``result``/``partial``은 블록을 ``seq`` 순서로 늘어놓고 ``index``를 0부터 채운 뒤
+    ``seq``를 비운다.
     """
 
     model_config = ConfigDict(extra="allow")
