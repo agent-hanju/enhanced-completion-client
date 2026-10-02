@@ -1,5 +1,7 @@
 # Python 라이브러리 전환 범위 조사
 
+> Java → Python 이식 전 조사 기록이다. 현재 Python 공개 계약은 [Streaming-API.md](Streaming-API.md)를 따른다.
+
 작성일 2026-09-04. 대상 커밋 `92d5a2d`, 브랜치 `agent-hanju/scorpionfish`.
 
 목표 세 가지를 전제로 현행 Java 구현을 해부하고, Python 라이브러리로 옮길 때 새로 써야 하는
@@ -225,8 +227,8 @@ content에 실리는 XML-like 구조를 바꾼다"인데, 구현이 그 절반�
 **Python 포트의 설계 원칙은 여기서 나온다. 요청 직렬화와 응답 파싱을 한 쌍으로 묶어 함께
 교체하게 한다.** 어휘를 한 곳에 선언하고 양쪽이 그것을 참조하는 구조가 맞다.
 
-```python
-class CiteVocabulary:
+```text
+class CiteVocabulary:  # 이식 전 설계 의사 코드
     """요청 직렬화와 응답 파싱이 공유하는 어휘."""
     def schema(self) -> ContentSchema: ...      # 응답: 인식할 태그
     def render(self, citation) -> str: ...      # 요청: 태그로 되쓰기

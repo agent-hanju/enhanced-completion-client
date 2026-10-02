@@ -1,7 +1,7 @@
 # API 스트리밍 명세
 
 이 문서는 현재 `completion_bridge` Python 구현의 공개 호출 방식과 요청·응답 모델,
-스트리밍 delta 및 최종 결과 계약을 설명한다. 기준은 저장소의 0.3.0 코드다.
+스트리밍 delta 및 최종 결과 계약을 설명한다. 기준은 저장소의 0.3.1 코드다.
 벤더 API의 전체 스키마와 지원 범위는 [지원표](Support-Matrix.md), 실제 변환 JSON은
 [변환 예제](Conversion-Examples.md)를 함께 참고한다.
 
@@ -30,6 +30,7 @@ Bridge / SyncBridge 생성
 | `stream.partial` | 현재 병합 상태 `HubResponse` | 동일 |
 | `stream.result` | 정상 순회 완료 후 최종 `HubResponse` | 동일 |
 | `complete(messages, ...)` | `await`하여 최종 `HubResponse` 수신 | 최종 `HubResponse` 반환 |
+| `count_tokens(messages, ...)` | `await`하여 `TokenCount` 수신 | `TokenCount` 반환 |
 | 스트림 닫기 | `await stream.aclose()` | `stream.close()` |
 | 브리지 닫기 | `await bridge.aclose()` | `bridge.close()` |
 
@@ -77,7 +78,7 @@ bridge = Bridge(
 
 ### 3.1 공개 메서드 입력
 
-세 메서드 `build_request`, `stream`, `complete`는 다음 인자를 공유한다.
+네 메서드 `build_request`, `stream`, `complete`, `count_tokens`는 다음 인자를 공유한다.
 
 ```python
 bridge.stream(
@@ -145,6 +146,22 @@ Gemini는 명시적인 synthetic 메시지의 미서명 함수 호출에만 특�
 요청 첨부의 원격 `file_id` / `container_id` 참조는 공통 요청 경로에서 거부될 수 있다.
 URL 또는 inline data를 사용한다. 벤더별 변환·생략 정책은 지원표를 따른다.
 
+### 3.4 토큰 수 측정
+
+`count_tokens()`는 동일한 `build_request()` 경로로 생성 body를 만든 뒤 어댑터의
+`token_count_calls()`를 실행한다. SSE나 생성 응답을 만들지 않고 JSON 응답을 읽는다.
+비동기는 `await bridge.count_tokens(...)`, 동기는 `bridge.count_tokens(...)`로 호출한다.
+
+결과는 `TokenCount(input_tokens: int, tokenized: TokenizedPrompt | None)`이다.
+vLLM Chat Completions는 `/tokenize` → `/detokenize`를 호출하고 `tokenized.text`와
+`tokenized.token_ids`를 채운다. 다른 어댑터의 `tokenized`는 `None`이다.
+Messages는 `/v1/messages/count_tokens`, Responses는 `/v1/responses/input_tokens`,
+Gemini는 모델의 `:countTokens` 경로를 사용한다. 엔드포인트별 생성 전용 필드 제외 및
+Gemini 요청 wrapping은 어댑터가 처리한다.
+
+HTTP 비성공 응답은 `TransportError`, 예상 JSON 객체·필드가 없는 응답은 `MappingError`다.
+실행 예제와 엔드포인트 표는 [README](../README.md#토큰-수-측정)에 있다.
+
 ## 4. HubResponse
 
 delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이번에 추가되거나 갱신된
@@ -180,6 +197,10 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 보존 정보다. `seq`는 delta에만 있는 병합·순서 키이고 `index`는 최종 결과에만 있는 위치다.
 규칙은 [블록 index와 seq 튜플](block_index_and_key_tuple.md)에 있다.
 
+0.3.1부터 블록의 벤더 식별 필드는 `source` 대신 `vendor`다. 이전 키의 자동 alias는 없다.
+`Citation.source`와 `SearchResultBlock.source`는 별개의 의미이므로 바꾸지 않는다.
+저장 데이터·호출 코드 적용 사항은 [0.3.1 변경 보고](Release-0.3.1-common-mcp-server.md)에 있다.
+
 | `type` | 주요 필드 / 의미 |
 |---|---|
 | `text` | `text`, `citations`, `signature`: 본문과 인용 |
@@ -198,7 +219,20 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 
 블록별 전체 필드·타입은 [blocks.py](../src/completion_bridge/blocks.py)에 정의되어 있다.
 
-`tool_result`에 `blocks`가 있으면 모델에는 `content`와 `blocks`를 보내고 `structured_content`는 보내지 않는다. `structured_content`는 `blocks`가 없을 때만 모델 입력이 된다. `blocks`는 JSON에서 읽을 때 `type`으로 등록된 블록 클래스로 복원되므로, 저장할 때 중첩 블록의 `type`이 남아 있어야 한다.
+`tool_result.blocks`는 `list[Block]`이다. JSON에서 읽을 때 `type`으로 등록된 블록 클래스로
+복원되므로 저장할 때 중첩 블록의 `type`이 남아 있어야 한다.
+
+검색 결과처럼 전달 가능한 블록이 있으면 그 본문을 사용하고 `structured_content`를 중복해서
+보내지 않는다. 다만 모든 어댑터에서 단순히 `blocks`의 유무만으로 결정되는 것은 아니다.
+
+| 어댑터 | 도구 결과 모델 입력 선택 |
+|---|---|
+| Chat Completions | 중첩 블록의 렌더링 문자열이 있으면 `content` 뒤에 추가. 없으면 `structured_content` JSON, 그마저 없으면 `content` |
+| Messages | 블록이 없으면 비어 있지 않은 `content` 우선, 그다음 `structured_content` JSON. 블록이 있으면 지원되는 part와 `content` 사용 |
+| Responses | 렌더링 part가 있고 중첩 블록도 있으면 part 목록. 그렇지 않으면 `structured_content` JSON을 우선하고 본문 또는 fallback 사용 |
+| Generate Content | 동일 벤더의 `native`가 있으면 원형 재생. 그 외에는 블록이 있을 때 본문·검색 텍스트와 지원 part, 없으면 `structured_content` 또는 본문 |
+
+따라서 `structured_content`를 항상 모델에 숨겨지는 저장 전용 필드로 취급하면 안 된다.
 
 `search_result`는 Anthropic에 네이티브 `search_result`로 보낸다. 이 API는 search result가 있는 `tool_result`의 모든 블록이 search result이기를 요구하므로, `content`나 다른 블록이 함께 있으면 `MappingError`다. 한 요청의 search result는 모두 같은 인용 설정이어야 하므로 하나라도 `citations_enabled`가 참이면 전부 켠다. 인용을 켠 document나 search result와 `output_config.format`을 함께 보내면 `MappingError`다. 다른 벤더에는 `SearchResultBlock.to_prompt()`의 `<document id="출처">` 텍스트로 보내며, 청크마다 `<content>`를 하나씩 쓴다.
 벤더마다 지원 블록이 다르고 vocabulary를 등록하면 출력 블록과 분할 경계가 달라질 수 있다.
@@ -449,4 +483,6 @@ partial = stream.partial
 - [transport/http.py](../src/completion_bridge/transport/http.py): HTTP 전송 및 오류
 - [test_bridge.py](../tests/test_bridge.py): EOF 완료, 부분 결과, usage, HTTP 오류
 - [test_merge.py](../tests/test_merge.py): 병합 규칙
+- [test_token_count.py](../tests/test_token_count.py): 토큰 수 요청·응답 및 오류
+- [test_search_results.py](../tests/test_search_results.py): 검색 결과 변환·인용·중첩 JSON 복원
 - [변환 예제](Conversion-Examples.md): 벤더별 요청·raw event·HubResponse JSON

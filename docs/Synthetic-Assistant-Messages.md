@@ -141,7 +141,7 @@ body = bridge.build_request([*history, restored])
 | OpenAI Responses | 기존 input item 변환 유지 |
 
 모든 대상에서 `synthetic` 자체는 벤더 요청에 넣지 않는다. 외부 프로젝트는 Gemini 전용
-특수 문자열을 알거나 `ToolUseBlock.source="generate_content"`로 출처를 위장할 필요가 없다.
+특수 문자열을 알거나 `ToolUseBlock.vendor="generate_content"`로 출처를 위장할 필요가 없다.
 일반 text-only synthetic 메시지도 같은 공개 인터페이스를 사용하며 함수 호출 특수 처리는
 적용되지 않는다.
 
@@ -149,7 +149,7 @@ Gemini 변환 규칙은 다음과 같다.
 
 1. 명시적으로 synthetic인 assistant 메시지의 미서명 함수 호출만 특수 처리한다.
 2. 같은 메시지에 실제 Gemini 서명이 있으면 그대로 보존한다. native에 보존된 서명도 확인한다.
-3. 특수 값은 출력 Part에만 적용한다. 입력 메시지·블록의 source/signature/native를 변경하지 않는다.
+3. 특수 값은 출력 Part에만 적용한다. 입력 메시지·블록의 vendor/signature/native를 변경하지 않는다.
 4. 일반 모델 응답의 서명 누락을 자동으로 보완하지 않는다.
 5. text·thinking 블록에 특수 서명을 생성하지 않는다.
 6. 기존 벤더 간 이력 변환은 메시지를 자동으로 synthetic으로 바꾸지 않는다.
@@ -172,7 +172,7 @@ Google 문서의 수동 구성 함수 호출용 처리는 Gemini 어댑터가 �
 - 직접 작성하거나 편집한 assistant 메시지가 `synthetic=True`로 브리지에 도착한다.
 - 저장 후 조회한 메시지도 해당 값을 유지한다.
 - 정상 모델 응답을 그대로 재사용할 때는 기존 동작과 서명이 유지된다.
-- 애플리케이션이 vendor source나 특수 서명 문자열을 직접 지정하지 않는다.
+- 애플리케이션이 블록의 vendor나 특수 서명 문자열을 직접 지정하지 않는다.
 - 함수 호출과 결과의 ID·이름·순서를 유지한다.
 - `build_request()` 결과에는 `synthetic` 키가 없고, Gemini의 가상 함수 호출에만 필요한 처리가 있다.
 

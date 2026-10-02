@@ -46,6 +46,20 @@ uv run pytest
 사용자 작성 assistant 이력의 `synthetic=False` 기본값과 사용법은
 [외부 연동 계약](docs/Synthetic-Assistant-Messages.md)에 정리되어 있다.
 
+문서·견본은 0.3.1 구현을 기준으로 한다. 0.3.0에서의 `source → vendor` 변경과 적용 사항은
+[0.3.1 변경 보고](docs/Release-0.3.1-common-mcp-server.md)를 참고한다.
+
+| 문서 | 내용 |
+|---|---|
+| [지원 범위](docs/Support-Matrix.md) | 블록·도구·옵션 변환과 외부 애플리케이션의 책임 |
+| [변환 견본](docs/Conversion-Examples.md) | 실제 어댑터로 생성한 JSON, 검색 결과를 포함한 4개 API 비교 |
+| [벤더 도구 견본](docs/Vendor-Tool-Conversions.md) | 여러 벤더의 도구 이력을 이어 보내는 요청 JSON |
+| [블록 식별 계약](docs/block_index_and_key_tuple.md) | 스트림 `seq`와 최종 `index` 설계 |
+
+견본을 갱신할 때는 `uv run python examples/render_conversion_examples.py`를 실행한다.
+`tests/test_conversion_examples.py`가 생성 결과와 문서의 일치를 검사한다. Java 이식 조사,
+ReflectiveAssembler 설계와 Audit Findings는 이전 설계·감사 기록이다.
+
 ### 비동기 API
 
 ```python
@@ -77,7 +91,7 @@ async with Bridge(
 ### 동기 API
 
 ```python
-from completion_bridge import SyncBridge
+from completion_bridge import Hyperparameters, SyncBridge
 from completion_bridge.vendors import chat_completions
 
 with SyncBridge(
@@ -98,6 +112,9 @@ with SyncBridge(
 결과는 `TokenCount`이고, `tokenized`는 `chat_completions`(vLLM)에서만 채워진다.
 
 ```python
+from completion_bridge import Hyperparameters, SyncBridge
+from completion_bridge.vendors import chat_completions
+
 with SyncBridge(vendor=chat_completions, base_url="http://127.0.0.1:8000", model="qwen3-8b") as bridge:
     count = bridge.count_tokens(
         ["안녕 세계"],
@@ -248,13 +265,10 @@ Responses에는 top-level `logprobs`가 없다. `include`에 `message.output_tex
 
 #### Messages의 모델 의존 필드
 
-Anthropic은 최신 모델에서 샘플링 파라미터를 **제거**했다. Opus 5, Sonnet 5, Opus 4.8/4.7,
-Fable 5/5.1에 `temperature`/`top_p`/`top_k`를 보내면 **400**이다. Opus 4.6/Sonnet 4.6과 그 이전
-모델(Haiku 4.5 등)에서만 받는다. 어댑터가 모델을 보고 생략해야 한다.
-
-추론 깊이는 샘플링이 아니라 `output_config.effort`(`low`~`max`)와
-`thinking={"type": "adaptive"}`로 조절한다. `thinking.budget_tokens`도 최신 모델에서 제거되어
-400이다.
+어댑터는 모델 이름으로 샘플링·추론 옵션을 걸러내지 않는다. `temperature`, `top_p`, `top_k`,
+`thinking`, `output_config` 등은 사용자가 지정하면 API 투영 규칙대로 전달한다.
+선택한 모델의 허용 필드·값과 beta 요구사항은 호출자가 확인한다. 서버가 거절하면
+`TransportError.detail`에서 오류 본문을 확인할 수 있다.
 
 #### Messages의 beta 게이트 필드
 
@@ -549,8 +563,8 @@ except ExtractionError as error:
 
 ### 응답 멀티모달
 
-대상 API가 이미지나 오디오를 생성하면 해당 블록으로 수집한다. 파일로 꺼낼 때는 블록의 저장
-메서드를 쓴다.
+대상 API가 이미지나 오디오를 생성하면 해당 블록으로 수집한다. 아래처럼 inline base64를
+디코딩한 뒤 호출자가 파일로 저장한다. 블록 자체에는 파일 저장 메서드가 없다.
 
 ```python
 import base64
@@ -597,7 +611,8 @@ print(audio.transcript)
 | 사용자 정의 XML | `<cite id="...">답변 구간</cite>` | `TextBlock.citations`, `source="cite"` |
 
 Anthropic의 위치 종류는 `char_location`(평문), `page_location`(PDF, 1-indexed),
-`content_block_location`(custom content) 셋이다. 공통 `source_start`/`source_end`로 정규화하고
+`content_block_location`(custom content), `search_result_location`(검색 결과 청크)이다.
+공통 `source_start`/`source_end`로 정규화하고
 원본은 `native`에 남긴다.
 
 ### 교차 변환
@@ -620,9 +635,12 @@ Gemini의 `groundingMetadata`와 `citationMetadata`는 candidate 전용 응답 m
 
 ### 제약
 
-- Anthropic에서 **document citations와 구조화 출력(`output_config.format`)은 상호 배타**다.
-  함께 보내면 400이다.
-- `citations: {enabled: true}`는 요청의 모든 document에 걸거나 하나도 걸지 않는다. 섞을 수 없다.
+- Messages 어댑터는 document 또는 search result 인용이 켜진 요청에
+  `output_config.format`이 있으면 `MappingError`로 거절한다.
+- document와 search result는 각각 요청 안에서 하나라도 인용이 켜지면 같은 종류 전체에 켠다.
+  두 종류의 설정은 독립적이다.
+- 검색 결과가 든 tool result는 `content=""`와 검색 결과 블록만 사용한다. 다른 본문이나
+  블록을 섞으면 `MappingError`다. 실행 견본은 [변환 예제](docs/Conversion-Examples.md)에 있다.
 
 ## 사용자 정의 content type
 
@@ -642,9 +660,7 @@ bridge = Bridge(
     vocabularies=[cite],
 )
 
-prompt = cite.prompt_hint() + "
-
-문서와 질문..."
+prompt = cite.prompt_hint() + "\n\n문서와 질문..."
 result = await bridge.complete([prompt])
 ```
 

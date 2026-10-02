@@ -1,6 +1,6 @@
 # 지원 범위와 의도적 비지원
 
-확인일: 2026-09-05
+구현·문서 대조일: 2026-10-02 (`0.3.1`). 외부 API 전체의 최신성이나 라이브 실행을 재인증한 날짜는 아니다.
 
 이 문서는 `enhanced-completion-client`가 **wire JSON/SSE 변환기로서 보장하는 범위**와 벤더
 리소스·세션 수명주기처럼 의도적으로 소비 애플리케이션에 맡긴 범위를 구분한다. 다양한 content와
@@ -27,7 +27,7 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 | 주요 요청 serializer | 4/4 | Chat Completions, Messages, Responses, GenerateContent |
 | 주요 스트림 응답 mapper | 4/4 | 모두 `HubResponse`로 수렴 |
 | sync/async API | 2/2 | `SyncBridge`, `Bridge` |
-| 공통 Hub content | 10 blocks + nested citation + fallback | text, thinking, tool use/result, image, audio, document, annotation, grounding, server tool + vendor fallback |
+| 공통 Hub content | 11 blocks + nested citation + fallback | text, thinking, tool use/result, image, audio, document, search result, annotation, grounding, server tool + vendor fallback |
 | 공통 요청 옵션 투영 | 4/4 | `Hyperparameters`를 API별 wire 이름과 중첩으로 변환 |
 | API 고유 요청 옵션 | 지원 | 평평한 필드 중 활성 API가 지원하는 것만 선택, 나머지는 생략 |
 | 사용자 정의 block/vocabulary 확장 | 지원 | 런타임 등록, stream lifting, request lowering 왕복 테스트 |
@@ -57,8 +57,9 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 | `ToolUseBlock` | assistant `tool_calls` | `tool_use` | function/custom/computer/shell 계열 Item | `functionCall` |
 | `ToolResultBlock` | `role: tool` message | user `tool_result`, 중첩 block 지원 | 각 `_call_output` Item, 중첩 content part 지원 | user `functionResponse`, 구조 JSON/parts 지원 |
 | `ImageBlock` | URL/data URL 입력 | base64/URL | `input_image` URL/data | `inlineData`/URL 기반 `fileData` |
-| `AudioBlock` | inline `input_audio` | 비지원, 교차 변환 시 생략 | 전역 output audio stream 수집; 입력/이력 재생은 비지원 | audio MIME의 inline/URL data |
+| `AudioBlock` | inline `input_audio` | native 입력 없음, 추출 텍스트/전달 불가 표시 | 전역 output audio stream 수집; native 입력 없음, 텍스트 fallback | audio MIME의 inline/URL data |
 | `DocumentBlock` | `file` 입력, 평문은 XML-like text fallback | native `document`, citations 설정 | `input_file`, 평문 fallback | document MIME의 inline/file data, 평문 fallback |
+| `SearchResultBlock` | 문서 텍스트 | native `search_result`, 요청 단위 인용 설정 | 문서 텍스트 | 문서 텍스트 |
 | `TextBlock.citations` | `CiteVocabulary`의 XML-like cite 왕복 | native citation과 XML cite를 `source`로 구분, native는 동일 벤더 재생 | XML-like cite 왕복 | XML-like cite 왕복 |
 | `AnnotationBlock` | URL citation annotation 수집 | 해당 없음 | output annotation 수집·동일 벤더 재생 | `citationMetadata` 범위 수집 |
 | `GroundingBlock` | 해당 없음 | 해당 없음 | 해당 없음 | source/support graph, 검색 질의와 UI metadata 수집 |
@@ -283,17 +284,18 @@ Responses API에 재생한다.
 
 - text와 generic JSON-schema function call/result는 공통 의미로 변환한다.
 - computer, shell/Bash, apply-patch, browser처럼 실행 환경이나 세션에 묶인 client tool call/result는
-  수신 이력으로 파싱하되 공통 기능으로 활성화하지 않고, 다른 벤더의 평범한 function call로
-  바꾸지 않는다.
+  직접 재생할 수 없는 대상에서 브랜드 접두어가 붙은 function 이력으로 변환한다.
+  해당 도구를 `tools`에 자동 등록하거나 실행 환경을 옮기지는 않는다.
 - image/audio/document는 대상이 지원하는 입력 Part로 변환한다. 평문 문서는 native 문서 채널이
   없으면 `<documents>` 텍스트로 내린다.
 - thinking/reasoning은 서명·암호문 계약이 벤더마다 달라 다른 벤더로 옮기지 않는다.
-- server tool block을 client function call로 위조하지 않는다. 다른 벤더에서는 생략한다.
+- server tool block의 인수·결과가 있으면 다른 벤더의 가상 function 호출·결과 이력으로 옮긴다.
+  둘 다 없으면 생략한다. 같은 벤더의 원격 참조 재생은 별도 거부 규칙을 따른다.
 - Anthropic citation과 XML cite는 `TextBlock.citations`를 공유하되 `Citation.source`로 구분한다.
   OpenAI/Gemini의 답변 범위 annotation은 `AnnotationBlock`, Gemini의 관계형 grounding은
   `GroundingBlock`이므로 서로 오변환하지 않는다.
-- 응답 전용 annotation/grounding/safety metadata는 Hub에서 조회할 수 있지만, 원 API가 이력
-  표현을 제공하는 native annotation 외에는 요청 Part에 넣지 않는다.
+- annotation/grounding은 다른 벤더로 옮길 때 참고 목록 텍스트로 내린다.
+  Gemini의 같은 벤더 요청에서는 candidate 전용 metadata를 생략한다.
 
 ## 벤더 내장 도구와 서버 도구
 
@@ -472,7 +474,10 @@ SDK가 소유한다. 브리지는 요청 body 생성, SSE 해석, Hub block 보�
 
 ## 검증 근거
 
-2026-09-05 최종 실행 결과:
+2026-10-02 현재 코드와 문서를 대조했고, 변환 snapshot·스트림·seq·토큰 수·검색 결과
+관련 72개 오프라인 테스트가 통과했다. 검색 결과 견본도 문서 생성기에 포함한다.
+
+아래는 **2026-09-05 당시의 실행 기록**이다. 현재 릴리스의 라이브 검증 결과로 해석하지 않는다.
 
 | 검증 | 결과 | 비고 |
 |---|---:|---|

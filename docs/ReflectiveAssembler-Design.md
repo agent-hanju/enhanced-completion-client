@@ -1,5 +1,8 @@
 # ReflectiveAssembler 설계 문서
 
+> Java 병합기 설계 기록이다. 현재 Python의 `seq` 병합·최종 `index` 계약은
+> [Streaming-API.md](Streaming-API.md)와 [block_index_and_key_tuple.md](block_index_and_key_tuple.md)를 따른다.
+
 ## 1. 개요
 
 ### 1.1 배경
@@ -32,7 +35,7 @@ OpenAI 스트리밍 API의 delta 규칙:
 
 ### 2.1 실제 스트리밍 예시
 
-```json
+```text
 // Chunk 1: 메타데이터 + role
 {"id":"chatcmpl-123","choices":[{"index":0,"delta":{"role":"assistant"}}]}
 
@@ -46,7 +49,7 @@ OpenAI 스트리밍 API의 delta 규칙:
 
 ### 2.2 Tool Call 스트리밍 예시
 
-```json
+```text
 // Tool call도 index 기반으로 누적
 {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"get"}}]}}]}
 {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"_weather"}}]}}]}

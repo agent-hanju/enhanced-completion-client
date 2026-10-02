@@ -1082,15 +1082,16 @@
 |---|---|---|
 | text | native 메타데이터와 함께 복원 | text로 보존 |
 | thinking/reasoning | signature/encrypted payload까지 복원 | 생략 |
-| image/document 입력 | URL/inline data를 native part로 변환 | 미지원 채널은 생략 또는 text fallback |
-| audio 입력 | Chat/Gemini native part | Anthropic/Responses에서는 생략 |
-| output audio | data/transcript 수집; 원격 audio ID는 재생 거부 | 다른 벤더에서는 생략 |
+| image/document 입력 | URL/inline data를 native part로 변환 | 미지원 채널은 추출 텍스트 또는 전달 불가 표시 |
+| audio 입력 | Chat/Gemini native part | 미지원 채널은 추출 텍스트 또는 전달 불가 표시 |
+| output audio | data/transcript 수집; 원격 audio ID는 재생 거부 | 입력 지원 대상은 native part, 나머지는 text fallback |
 | generic function call/result | 원 형식 복원 | 대상의 tool call/result로 변환 |
-| 환경 의존 call/result | 수신 block을 파싱하되 자동 활성화하지 않음 | 생략 |
-| server tool block | 수신 결과와 순서 파싱; 활성화는 별도 `tools` 입력 | 생략 |
-| XML/Anthropic citation | `TextBlock.citations`에 원형 구분, 가능한 입력만 복원 | 명시적 XML 어휘가 없으면 생략 |
-| OpenAI/Gemini annotation | Responses native 이력만 복원 | 다른 요청에서는 생략 |
-| Gemini grounding graph | Hub에 source/support 관계 보존 | 모든 요청 이력에서 생략 |
+| 환경 의존 call/result | 수신 block을 파싱하되 자동 활성화하지 않음 | 직접 재생할 수 없으면 브랜드 접두어가 붙은 function 이력 |
+| server tool block | 수신 결과와 순서 파싱; 활성화는 별도 `tools` 입력 | 인수/결과가 있으면 가상 function 호출·결과, 없으면 생략 |
+| XML/Anthropic citation | `TextBlock.citations`에 원형 구분, 가능한 입력만 복원 | `<cite>` 텍스트 fallback |
+| OpenAI/Gemini annotation | Responses native 이력 재생, Gemini 요청에서는 생략 | 참고 목록 텍스트 |
+| Gemini grounding graph | Hub에 source/support 관계 보존; Gemini 요청에서는 생략 | 출처·구간 관계를 참고 목록 텍스트로 전달 |
+| search result 입력 | Messages native search_result | 다른 세 API는 문서 텍스트 |
 
 ## 1. 멀티모달 사용자 입력
 
@@ -4062,9 +4063,222 @@ Bridge는 내장 도구를 자동 등록하지 않는다. `tools`를 생략한 �
 }</pre></td></tr>
 </table>
 
-## 8. 견본 범위
+## 8. 검색 결과 tool result
 
-이 문서는 core Hub content 계열 전부(text, thinking, tool use/result, image, audio, document, nested citation, annotation, grounding, server tool, vendor fallback)와 요청 Hyperparameters의 변환 정책을 실제 adapter 또는 해당 adapter의 회귀 테스트에 통과시킨다. 각 서버 도구의 모든 버전 문자열을 반복하지는 않고 실행 주체와 변환 정책이 같은 계열별 대표 wire payload를 사용한다. 전체 subtype 목록은 [지원표](Support-Matrix.md)에 있다.
+검색 결과의 출처·제목·청크를 모델에 전달한다. Messages는 native search_result, 다른 세 API는 문서 텍스트를 사용한다. structured_content는 함께 저장하지만 이 견본의 모델 입력에는 중복 전송되지 않는다. Messages에서 혼합 결과를 거절하므로 content는 비우고 검색 결과 블록만 넣었다.
+
+<table>
+<tr><th>Hub history</th><td><pre>[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "native": {},
+        "text": "점검 주기를 찾아줘.",
+        "citations": []
+      }
+    ],
+    "synthetic": false
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "tool_use",
+        "native": {},
+        "id": "search-1",
+        "name": "search",
+        "kind": "function",
+        "input_json": "",
+        "input": {}
+      }
+    ],
+    "synthetic": false
+  },
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "native": {},
+        "tool_use_id": "search-1",
+        "name": "search",
+        "kind": "function",
+        "content": "",
+        "structured_content": {
+          "results": [
+            {
+              "id": "kb://inspection"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "type": "search_result",
+            "native": {},
+            "source": "kb://inspection",
+            "title": "점검 지침",
+            "content": [
+              "정기 점검은 500시간마다 수행한다.",
+              "점검 결과는 기록한다."
+            ],
+            "citations_enabled": true
+          }
+        ]
+      }
+    ],
+    "synthetic": false
+  }
+]</pre></td></tr>
+<tr><th>Chat Completions</th><td><pre>{
+  "messages": [
+    {
+      "role": "user",
+      "content": "점검 주기를 찾아줘."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "search-1",
+          "type": "function",
+          "function": {
+            "name": "search",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "search-1",
+      "content": "&lt;documents&gt;\n&lt;document id=\"kb://inspection\"&gt;\n&lt;title&gt;점검 지침&lt;/title&gt;\n&lt;content&gt;정기 점검은 500시간마다 수행한다.&lt;/content&gt;\n&lt;content&gt;점검 결과는 기록한다.&lt;/content&gt;\n&lt;/document&gt;\n&lt;/documents&gt;"
+    }
+  ]
+}</pre></td></tr>
+<tr><th>Anthropic Messages</th><td><pre>{
+  "messages": [
+    {
+      "role": "user",
+      "content": "점검 주기를 찾아줘."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "search-1",
+          "name": "search",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "search-1",
+          "content": [
+            {
+              "type": "search_result",
+              "source": "kb://inspection",
+              "title": "점검 지침",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "정기 점검은 500시간마다 수행한다."
+                },
+                {
+                  "type": "text",
+                  "text": "점검 결과는 기록한다."
+                }
+              ],
+              "citations": {
+                "enabled": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}</pre></td></tr>
+<tr><th>OpenAI Responses</th><td><pre>{
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "점검 주기를 찾아줘."
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "call_id": "search-1",
+      "name": "search",
+      "arguments": "{}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "search-1",
+      "output": [
+        {
+          "type": "input_text",
+          "text": "&lt;documents&gt;\n&lt;document id=\"kb://inspection\"&gt;\n&lt;title&gt;점검 지침&lt;/title&gt;\n&lt;content&gt;정기 점검은 500시간마다 수행한다.&lt;/content&gt;\n&lt;content&gt;점검 결과는 기록한다.&lt;/content&gt;\n&lt;/document&gt;\n&lt;/documents&gt;"
+        }
+      ]
+    }
+  ]
+}</pre></td></tr>
+<tr><th>Gemini GenerateContent</th><td><pre>{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "점검 주기를 찾아줘."
+        }
+      ]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "functionCall": {
+            "name": "search",
+            "args": {},
+            "id": "search-1"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "search",
+            "response": {
+              "result": "&lt;documents&gt;\n&lt;document id=\"kb://inspection\"&gt;\n&lt;title&gt;점검 지침&lt;/title&gt;\n&lt;content&gt;정기 점검은 500시간마다 수행한다.&lt;/content&gt;\n&lt;content&gt;점검 결과는 기록한다.&lt;/content&gt;\n&lt;/document&gt;\n&lt;/documents&gt;"
+            },
+            "id": "search-1"
+          }
+        }
+      ]
+    }
+  ]
+}</pre></td></tr>
+</table>
+
+## 9. 견본 범위
+
+이 문서는 core Hub content 계열 전부(text, thinking, tool use/result, image, audio, document, search result, nested citation, annotation, grounding, server tool, vendor fallback)와 요청 Hyperparameters의 변환 정책을 실제 adapter 또는 해당 adapter의 회귀 테스트에 통과시킨다. 각 서버 도구의 모든 버전 문자열을 반복하지는 않고 실행 주체와 변환 정책이 같은 계열별 대표 wire payload를 사용한다. 전체 subtype 목록은 [지원표](Support-Matrix.md)에 있다.
 
 ---
 
