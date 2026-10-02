@@ -359,7 +359,7 @@ tool call/result 블록은 대상에 따라 다음처럼 내려간다.
 
 | 결과 | 모양 | 조건 |
 |---|---|---|
-| **원본** | 벤더 native 블록을 그대로 재전송 | `source`가 대상과 같을 때. 항상 우선한다 |
+| **원본** | 벤더 native 블록을 그대로 재전송 | `vendor`가 대상과 같을 때. 항상 우선한다 |
 | **가상 도구** | assistant `벤더_도구명` tool call + user tool result 쌍 | 원본에 호출과 결과가 **쌍으로** 남아 있을 때 |
 | **직렬화** | content 안 XML-like 태그 | 쌍이 없을 때. 또는 결과가 대상의 tool result 모양에 담기지 않을 때 |
 | **생략** | 아무것도 내리지 않는다 | 결과가 **원격 참조에만 존재**할 때. 동일 벤더에서는 `MappingError` |
@@ -590,6 +590,7 @@ print(audio.transcript)
 | API | 원형 | 허브 |
 |---|---|---|
 | Anthropic Messages | document block에 `citations: {enabled: true}`. 응답이 여러 `text` 블록으로 갈리고 인용된 블록에 `citations` 배열 | `TextBlock.citations`, `source="messages"` |
+| Anthropic Messages | `search_result` 블록에 `citations: {enabled: true}`. 인용 위치는 `search_result_location` | `SearchResultBlock`(요청), `TextBlock.citations`(응답) |
 | OpenAI Responses | 출력 text의 `annotations` — `url_citation`, `file_citation`, `container_file_citation` | `AnnotationBlock` |
 | vLLM Chat Completions | `annotations` 파서는 유지하지만 vLLM은 이 계열을 생성하지 않는다 | `AnnotationBlock` |
 | Gemini | `citationMetadata.citationSources`(구간+URI)와 `groundingMetadata`(chunks·supports·검색 질의) | `AnnotationBlock`, `GroundingBlock` |
@@ -656,7 +657,7 @@ result = await bridge.complete([prompt])
    모두 연결한다.
 2. 벤더 native 표현과 교차 호환 규칙이 필요한 타입: 공통 의미를 가진 Hub block을 먼저 정의한
    뒤 각 `VendorAdapter.build_body()`와 `to_hub()`에 그 API의 Item/Part/Block 변환을 구현한다.
-   동일 벤더에서만 유효한 필드는 `source`와 `native`에 두고, 다른 벤더에는 공통 의미만 내리거나
+   동일 벤더에서만 유효한 필드는 `vendor`와 `native`에 두고, 다른 벤더에는 공통 의미만 내리거나
    명시적으로 생략한다. native 채널이 없는 대상에도 보존해야 한다면 같은 Hub block용
    `Vocabulary`를 text fallback으로 함께 등록한다.
 

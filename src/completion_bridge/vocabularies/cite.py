@@ -25,7 +25,7 @@ def cite_schema(*, tag: str = "cite", alias: Iterable[str] = ("rag",)) -> Conten
 
 
 _Key = tuple[str | None, Seq]
-"""원래 text 블록의 식별자. ``(source, seq)``다."""
+"""원래 text 블록의 식별자. ``(vendor, seq)``다."""
 
 
 class _CiteMapper:
@@ -64,7 +64,7 @@ class _CiteMapper:
             if block.seq is None:
                 raise MappingError(f"content block {block.type!r} has no seq")
             if isinstance(block, TextBlock):
-                key = (block.source, block.seq)
+                key = (block.vendor, block.seq)
                 self._last_key = key
                 blocks.extend(self._metadata(block, key))
                 if "text" in block.model_fields_set:
@@ -91,7 +91,7 @@ class _CiteMapper:
             blocks.append(self._close())
         for key in list(self._pending):
             segment, fields = self._new_segment(key)
-            blocks.append(TextBlock(seq=segment, source=key[0], **fields))
+            blocks.append(TextBlock(seq=segment, vendor=key[0], **fields))
         if not blocks:
             return []
         return [HubResponse(content=blocks)]
@@ -125,7 +125,7 @@ class _CiteMapper:
                 TextBlock(
                     text=event.content,
                     seq=self._active_segment,
-                    source=key[0],
+                    vendor=key[0],
                     **fields,
                 )
             ]
@@ -166,7 +166,7 @@ class _CiteMapper:
             fields = {}
         block = TextBlock(
             seq=self._active_segment,
-            source=key[0],
+            vendor=key[0],
             citations=[Citation(type="document", source="cite", id=self._open_id or "")],
             **fields,
         )
@@ -204,9 +204,9 @@ class _CiteMapper:
         metadata = {name: value for name, value in fields.items() if name != "citations"}
         for segment in segments:
             if metadata:
-                out.append(TextBlock(seq=segment, source=block.source, **metadata))
+                out.append(TextBlock(seq=segment, vendor=block.vendor, **metadata))
         if block.citations:
-            out.append(TextBlock(seq=segments[-1], source=block.source, citations=block.citations))
+            out.append(TextBlock(seq=segments[-1], vendor=block.vendor, citations=block.citations))
         return out
 
     def _new_segment(self, key: _Key) -> tuple[Seq, dict[str, Any]]:

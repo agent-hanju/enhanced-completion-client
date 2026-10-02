@@ -12,6 +12,7 @@ Pydantic의 판별 유니온은 두 방식 모두 정의 시점에 닫힌다. �
 
 from __future__ import annotations
 
+import html
 import json
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
@@ -31,6 +32,7 @@ __all__ = [
     "GroundingSource",
     "GroundingSupport",
     "ImageBlock",
+    "SearchResultBlock",
     "ServerToolBlock",
     "TextBlock",
     "ThinkingBlock",
@@ -85,7 +87,7 @@ class ContentBlock(BaseModel):
     있다.
     """
 
-    source: str | None = Field(default=None, json_schema_extra=_overwrite())
+    vendor: str | None = Field(default=None, json_schema_extra=_overwrite())
     """이 블록을 만들어낸 벤더 이름.
 
     추론 블록처럼 발급 벤더로만 되돌릴 수 있는 블록을 다른 벤더로 내릴 때 떨어뜨리는 판단에
@@ -203,6 +205,9 @@ class ToolResultBlock(ContentBlock):
 
     ``content``는 평문 결과를 담는 짧은 길이고 ``blocks``와 함께 쓸 수 있다. 벤더가 블록
     리스트를 받지 않으면 어댑터가 ``content``만 싣는다.
+
+    ``blocks``가 있으면 모델에는 ``content``와 ``blocks``를 보내고 ``structured_content``는
+    보내지 않는다. ``structured_content``는 ``blocks``가 없을 때만 모델 입력이 된다.
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -211,7 +216,8 @@ class ToolResultBlock(ContentBlock):
     kind: str = Field(default="function", json_schema_extra=_overwrite())
     content: str = ""
     structured_content: Any | None = Field(default=None, json_schema_extra=_overwrite())
-    blocks: list[Any] = Field(default_factory=list)
+    blocks: list[Block] = Field(default_factory=list)
+    """도구가 돌려준 블록. JSON에서 읽으면 ``type``으로 등록된 블록 클래스로 복원된다."""
     is_error: bool | None = Field(default=None, json_schema_extra=_overwrite())
 
 
@@ -341,12 +347,8 @@ class GroundingBlock(ContentBlock):
     sources: list[GroundingSource] = Field(default_factory=list)
     supports: list[GroundingSupport] = Field(default_factory=list)
     search_queries: list[str] = Field(default_factory=list, json_schema_extra=_overwrite())
-    search_entry_point: dict[str, Any] | None = Field(
-        default=None, json_schema_extra=_overwrite()
-    )
-    retrieval_metadata: dict[str, Any] | None = Field(
-        default=None, json_schema_extra=_overwrite()
-    )
+    search_entry_point: dict[str, Any] | None = Field(default=None, json_schema_extra=_overwrite())
+    retrieval_metadata: dict[str, Any] | None = Field(default=None, json_schema_extra=_overwrite())
 
 
 class DocumentBlock(ContentBlock):
@@ -404,6 +406,41 @@ class DocumentBlock(ContentBlock):
                     f'<content media-type="{self.media_type}" unavailable="true">'
                     f"{UNAVAILABLE}</content>"
                 )
+        parts.append("</document>")
+        return "\n".join(parts)
+
+
+class SearchResultBlock(ContentBlock):
+    """검색이 찾은 결과 하나. 요청 방향 블록이다.
+
+    Anthropic ``search_result``와 같은 모양이다. ``content``의 항목 하나가 청크 하나이고,
+    응답 인용의 블록 범위(``source_start``/``source_end``)는 이 목록의 위치를 가리킨다.
+    user 메시지 최상위나 :class:`ToolResultBlock` ``blocks``에 둔다.
+
+    Anthropic에는 네이티브 ``search_result``로 보내고, 다른 벤더에는 :meth:`to_prompt`의
+    텍스트로 보낸다.
+    """
+
+    type: Literal["search_result"] = "search_result"
+    source: str = Field(min_length=1, json_schema_extra=_overwrite())
+    """검색 결과의 출처 URL 또는 식별자."""
+    title: str = Field(min_length=1, json_schema_extra=_overwrite())
+    content: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+    """청크 본문 목록. 비어 있지 않은 문자열이 하나 이상 있어야 한다."""
+    citations_enabled: bool = Field(default=True, json_schema_extra=_overwrite())
+    """인용 허용 여부. Anthropic은 한 요청의 search result가 모두 같은 설정이어야 하므로,
+    하나라도 참이면 그 요청의 모든 search result에 인용을 켠다."""
+
+    def to_prompt(self) -> str:
+        """네이티브 ``search_result`` 채널이 없는 벤더에 보낼 문서 형식 텍스트.
+
+        :meth:`DocumentBlock.to_prompt`와 같은 ``<document>`` 모양이다. ``id``에 ``source``를
+        넣어 ``CiteVocabulary``의 ``<cite id="...">``가 이 결과를 가리킬 수 있게 하고, 청크마다
+        ``<content>``를 하나씩 쓴다.
+        """
+        parts = [f'<document id="{html.escape(self.source, quote=True)}">']
+        parts.append(f"<title>{self.title}</title>")
+        parts.extend(f"<content>{chunk}</content>" for chunk in self.content)
         parts.append("</document>")
         return "\n".join(parts)
 
@@ -494,7 +531,7 @@ def resolve_block(value: Any) -> Any:
     cls = _REGISTRY.get(tag)
     if cls is None:
         # 알 수 없는 타입은 버리지 않고 원본째로 보존한다.
-        known = {"type", "index", "seq", "source", "native", "raw"}
+        known = {"type", "index", "seq", "vendor", "native", "raw"}
         raw = value.get("raw")
         if not isinstance(raw, dict):
             raw = {k: v for k, v in value.items() if k not in known}
@@ -505,7 +542,7 @@ def resolve_block(value: Any) -> Any:
             type=tag,
             index=value.get("index"),
             seq=value.get("seq"),
-            source=value.get("source"),
+            vendor=value.get("vendor"),
             native=native,
             raw=raw,
         )
@@ -527,6 +564,10 @@ for _cls in (
     AnnotationBlock,
     GroundingBlock,
     DocumentBlock,
+    SearchResultBlock,
     ServerToolBlock,
 ):
     register_block(_cls)
+
+# ToolResultBlock.blocks는 위에서 정의한 Block 유니온을 쓰므로 정의가 끝난 뒤 다시 만든다.
+ToolResultBlock.model_rebuild()

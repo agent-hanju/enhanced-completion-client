@@ -363,7 +363,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "server_tool",
         "index": 0,
-        "source": "messages",
+        "vendor": "messages",
         "native": {
           "type": "server_tool_use",
           "id": "srvtoolu-1",
@@ -388,7 +388,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "server_tool",
         "index": 1,
-        "source": "messages",
+        "vendor": "messages",
         "native": {
           "type": "web_search_tool_result",
           "tool_use_id": "srvtoolu-1",
@@ -419,7 +419,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "text",
         "index": 2,
-        "source": "messages",
+        "vendor": "messages",
         "native": {
           "type": "text",
           "text": ""
@@ -448,7 +448,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "thinking",
         "index": 0,
-        "source": "responses",
+        "vendor": "responses",
         "native": {
           "type": "reasoning",
           "id": "rs-1",
@@ -466,7 +466,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "server_tool",
         "index": 1,
-        "source": "responses",
+        "vendor": "responses",
         "native": {
           "type": "code_interpreter_call",
           "id": "ci-1",
@@ -490,7 +490,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "responses_video_generation_call",
         "index": 2,
-        "source": "responses",
+        "vendor": "responses",
         "native": {
           "level": "item"
         },
@@ -504,7 +504,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "text",
         "index": 3,
-        "source": "responses",
+        "vendor": "responses",
         "native": {
           "item": {
             "type": "message",
@@ -540,7 +540,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "server_tool",
         "index": 0,
-        "source": "generate_content",
+        "vendor": "generate_content",
         "native": {
           "executableCode": {
             "language": "PYTHON",
@@ -559,7 +559,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "server_tool",
         "index": 1,
-        "source": "generate_content",
+        "vendor": "generate_content",
         "native": {
           "codeExecutionResult": {
             "outcome": "OUTCOME_OK",
@@ -578,7 +578,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "text",
         "index": 2,
-        "source": "generate_content",
+        "vendor": "generate_content",
         "native": {
           "text": "최근 추세는 상승이다."
         },
@@ -606,7 +606,7 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
       {
         "type": "tool_use",
         "index": 0,
-        "source": "chat_completions",
+        "vendor": "chat_completions",
         "native": {
           "index": 0,
           "id": "call-1",

@@ -71,16 +71,16 @@ def test_stored_mapping_reaches_gemini_without_mutation():
 
 def test_real_signatures_and_parallel_calls_are_preserved():
     blocks = [
-        call(source="generate_content", signature="real"),
+        call(vendor="generate_content", signature="real"),
         ToolUseBlock(
             id="c2",
             name="lookup",
-            source="generate_content",
+            vendor="generate_content",
             native={"thoughtSignature": "native-real"},
         ),
         ToolUseBlock(id="c3", name="lookup"),
         TextBlock(text="text"),
-        ThinkingBlock(thinking="thought", source="generate_content", signature="thinking-real"),
+        ThinkingBlock(thinking="thought", vendor="generate_content", signature="thinking-real"),
     ]
     message = HubMessage.assistant(synthetic=True, blocks=blocks)
     before = message.model_dump(mode="json")
@@ -95,9 +95,9 @@ def test_real_signatures_and_parallel_calls_are_preserved():
     assert message.model_dump(mode="json") == before
 
 
-@pytest.mark.parametrize("source", [None, "generate_content", "chat_completions"])
-def test_unsigned_normal_calls_are_not_inferred_synthetic(source):
-    parts = build([HubMessage.assistant(blocks=[call(source=source)])])["contents"][0]["parts"]
+@pytest.mark.parametrize("vendor", [None, "generate_content", "chat_completions"])
+def test_unsigned_normal_calls_are_not_inferred_synthetic(vendor):
+    parts = build([HubMessage.assistant(blocks=[call(vendor=vendor)])])["contents"][0]["parts"]
     assert "thoughtSignature" not in parts[0]
 
 

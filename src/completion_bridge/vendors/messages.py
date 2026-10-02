@@ -21,6 +21,7 @@ from ..blocks import (
     ContentBlock,
     DocumentBlock,
     ImageBlock,
+    SearchResultBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -29,7 +30,7 @@ from ..blocks import (
     VendorBlock,
 )
 from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
+from ..hub import HubMessage, HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
 from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
@@ -133,7 +134,7 @@ class _ToHub:
     def _seed(self, kind: str, block: dict[str, Any], seq: Seq) -> ContentBlock:
         common: dict[str, Any] = {
             "seq": seq,
-            "source": SOURCE,
+            "vendor": SOURCE,
             "native": dict(block),
         }
         if kind == "text":
@@ -200,7 +201,7 @@ class _ToHub:
         seq = self._block_seq(event)
         delta = event.get("delta") or {}
         kind = delta.get("type")
-        common: dict[str, Any] = {"seq": seq, "source": SOURCE}
+        common: dict[str, Any] = {"seq": seq, "vendor": SOURCE}
 
         if kind == "text_delta":
             return self._one(TextBlock(text=delta.get("text") or "", **common))
@@ -226,7 +227,7 @@ class _ToHub:
         return self._one(
             TextBlock(
                 seq=seq,
-                source=SOURCE,
+                vendor=SOURCE,
                 citations=[self._citation_model(citation)],
             )
         )
@@ -259,6 +260,18 @@ class _ToHub:
         if isinstance(file_id, str) and file_id:
             fields["file_id"] = file_id
             fields.setdefault("id", file_id)
+        if citation.get("type") == "search_result_location":
+            # search result의 출처를 uri와 id에, 제목과 요청 안 순번을 문서 필드에 둔다.
+            title = citation.get("title")
+            if isinstance(title, str) and title:
+                fields["document_title"] = title
+            result_index = citation.get("search_result_index")
+            if isinstance(result_index, int):
+                fields["document_index"] = result_index
+            source = citation.get("source")
+            if isinstance(source, str) and source:
+                fields["uri"] = source
+                fields["id"] = source
         encrypted_index = citation.get("encrypted_index")
         if isinstance(encrypted_index, str) and encrypted_index:
             fields["encrypted_index"] = encrypted_index
@@ -342,13 +355,23 @@ class MessagesAdapter:
             if isinstance(block, DocumentBlock)
         ]
         citations_enabled = any(document.citations_enabled for document in documents)
+        search_citations_enabled = any(
+            result.citations_enabled for result in self._search_results(request.messages)
+        )
         for message in request.messages:
             if message.role in INSTRUCTION_ROLES:
                 text = lowerer.lower_text(message.content)
                 if text:
                     system.append(text)
                 continue
-            turns.extend(self._message_turns(message, lowerer, citations_enabled=citations_enabled))
+            turns.extend(
+                self._message_turns(
+                    message,
+                    lowerer,
+                    citations_enabled=citations_enabled,
+                    search_citations_enabled=search_citations_enabled,
+                )
+            )
 
         params = request.parameters_for(self.parameter_family, vendor_name=self.name)
         body: dict[str, Any] = {
@@ -369,8 +392,26 @@ class MessagesAdapter:
         for key, value in params.items():
             if key not in ("model", "messages", "stream", "tools", "system"):
                 body[key] = value
-        self._reject_invalid_combinations(body, citations_enabled=citations_enabled)
+        self._reject_invalid_combinations(
+            body, citations_enabled=citations_enabled or search_citations_enabled
+        )
         return body
+
+    @staticmethod
+    def _search_results(messages: Sequence[HubMessage]) -> list[SearchResultBlock]:
+        """요청의 모든 search result. tool_result ``blocks`` 안에 있는 것도 포함한다.
+
+        Anthropic은 한 요청의 search result가 모두 같은 인용 설정이어야 하므로, 설정을 정할 때
+        위치와 관계없이 전부 본다.
+        """
+        found: list[SearchResultBlock] = []
+        for message in messages:
+            for block in message.content:
+                if isinstance(block, SearchResultBlock):
+                    found.append(block)
+                elif isinstance(block, ToolResultBlock):
+                    found.extend(b for b in block.blocks if isinstance(b, SearchResultBlock))
+        return found
 
     @staticmethod
     def _reject_invalid_combinations(body: dict[str, Any], *, citations_enabled: bool) -> None:
@@ -382,7 +423,8 @@ class MessagesAdapter:
         output_config = body.get("output_config")
         if citations_enabled and isinstance(output_config, Mapping) and "format" in output_config:
             raise MappingError(
-                "document citations and output_config.format cannot be used together"
+                "document or search_result citations and output_config.format cannot be used "
+                "together"
             )
 
         if body.get("mcp_servers"):
@@ -408,6 +450,7 @@ class MessagesAdapter:
         lowerer: Lowerer,
         *,
         citations_enabled: bool,
+        search_citations_enabled: bool,
     ) -> list[dict[str, Any]]:
         """블록이 요구하는 role을 지키며 한 허브 턴을 0..N wire 턴으로 펼친다."""
         turns: list[dict[str, Any]] = []
@@ -423,6 +466,7 @@ class MessagesAdapter:
                 pending,
                 lowerer,
                 citations_enabled=citations_enabled,
+                search_citations_enabled=search_citations_enabled,
             )
             pending = []
             if content is not None:
@@ -447,6 +491,7 @@ class MessagesAdapter:
         lowerer: Lowerer,
         *,
         citations_enabled: bool,
+        search_citations_enabled: bool,
     ) -> str | list[dict[str, Any]] | None:
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
@@ -464,7 +509,7 @@ class MessagesAdapter:
         for block in blocks:
             if has_opaque_media_reference(block):
                 continue
-            if isinstance(block, CitationBlock) and block.source == SOURCE and block.native:
+            if isinstance(block, CitationBlock) and block.vendor == SOURCE and block.native:
                 flush_plain()
                 native_citation = block.native.get("citation", block.native)
                 block_index = block.native.get("block_index")
@@ -478,7 +523,9 @@ class MessagesAdapter:
                 continue
             if isinstance(block, ToolResultBlock):
                 flush_plain()
-                parts.append(self._tool_result_part(block))
+                parts.append(
+                    self._tool_result_part(block, search_citations_enabled=search_citations_enabled)
+                )
                 continue
             part = as_anthropic_part(block)
             if part is None:
@@ -487,6 +534,8 @@ class MessagesAdapter:
             flush_plain()
             if isinstance(block, DocumentBlock):
                 part["citations"] = {"enabled": citations_enabled}
+            elif isinstance(block, SearchResultBlock):
+                part["citations"] = {"enabled": search_citations_enabled}
             parts.append(part)
             if part.get("type") == "text":
                 last_text_part = part
@@ -501,12 +550,35 @@ class MessagesAdapter:
         return parts
 
     @staticmethod
-    def _tool_result_part(block: ToolResultBlock) -> dict[str, Any]:
+    def _tool_result_part(
+        block: ToolResultBlock, *, search_citations_enabled: bool
+    ) -> dict[str, Any]:
         """``tool_result``의 ``content``는 블록 리스트다.
 
         이미지를 돌려주는 도구가 그 경로를 쓴다. 평문만 있으면 문자열로 싣는다.
+
+        ``blocks``에 :class:`SearchResultBlock`이 있으면 search result만 보낸다. 이 API는
+        search result가 있는 tool_result의 모든 블록이 search result이기를 요구한다.
+
+        Raises:
+            MappingError: search result와 ``content``나 다른 블록이 함께 있을 때.
         """
         part: dict[str, Any] = {"type": "tool_result", "tool_use_id": block.tool_use_id}
+        searches = [b for b in block.blocks if isinstance(b, SearchResultBlock)]
+        if searches:
+            if block.content or len(searches) != len(block.blocks):
+                raise MappingError(
+                    f"tool_result {block.tool_use_id!r} mixes search results with other "
+                    "content; messages requires every tool_result block to be a search_result"
+                )
+            rendered = [as_anthropic_part(result) for result in searches]
+            inner = [search for search in rendered if search is not None]
+            for search in inner:
+                search["citations"] = {"enabled": search_citations_enabled}
+            part["content"] = inner
+            if block.is_error:
+                part["is_error"] = True
+            return part
         if block.content and not block.blocks:
             part["content"] = block.content
             if block.is_error:

@@ -176,7 +176,7 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 ### 4.1 Content block
 
 공통 필드는 `type: str`, `seq: tuple[int, ...] | None = None`, `index: int | None = None`,
-`source: str | None = None`, `native: dict = {}`이다. `source`는 원본 벤더, `native`는 원형
+`vendor: str | None = None`, `native: dict = {}`이다. `vendor`는 원본 벤더, `native`는 원형
 보존 정보다. `seq`는 delta에만 있는 병합·순서 키이고 `index`는 최종 결과에만 있는 위치다.
 규칙은 [블록 index와 seq 튜플](block_index_and_key_tuple.md)에 있다.
 
@@ -190,12 +190,17 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 | `image` | `media_type`, `data`, `url`, `file_id`: 이미지 |
 | `audio` | `data`, `uri`, `format`, `media_type`, `transcript`: 음성 |
 | `document` | `id`, `title`, `text`, `data`, `uri`, `media_type`: 문서, 주로 요청 방향 |
+| `search_result` | `source`, `title`, `content`(청크 문자열 목록), `citations_enabled`: 검색 결과, 요청 방향 |
 | `annotation` | `target_seq`(delta) / `target_index`(최종 결과), `start_index`, `end_index`, `uri`, `title`: 본문 범위 주석 |
 | `grounding` | `sources`, `supports`, `search_queries`: 근거 관계 |
 | `citation` | 구 저장 데이터 호환용. 새 인용은 `text.citations` 또는 `annotation` 사용 |
 | 기타 | 등록된 사용자 블록 또는 원형을 보존하는 `VendorBlock` |
 
 블록별 전체 필드·타입은 [blocks.py](../src/completion_bridge/blocks.py)에 정의되어 있다.
+
+`tool_result`에 `blocks`가 있으면 모델에는 `content`와 `blocks`를 보내고 `structured_content`는 보내지 않는다. `structured_content`는 `blocks`가 없을 때만 모델 입력이 된다. `blocks`는 JSON에서 읽을 때 `type`으로 등록된 블록 클래스로 복원되므로, 저장할 때 중첩 블록의 `type`이 남아 있어야 한다.
+
+`search_result`는 Anthropic에 네이티브 `search_result`로 보낸다. 이 API는 search result가 있는 `tool_result`의 모든 블록이 search result이기를 요구하므로, `content`나 다른 블록이 함께 있으면 `MappingError`다. 한 요청의 search result는 모두 같은 인용 설정이어야 하므로 하나라도 `citations_enabled`가 참이면 전부 켠다. 인용을 켠 document나 search result와 `output_config.format`을 함께 보내면 `MappingError`다. 다른 벤더에는 `SearchResultBlock.to_prompt()`의 `<document id="출처">` 텍스트로 보내며, 청크마다 `<content>`를 하나씩 쓴다.
 벤더마다 지원 블록이 다르고 vocabulary를 등록하면 출력 블록과 분할 경계가 달라질 수 있다.
 
 ## 5. 스트리밍 출력 및 병합

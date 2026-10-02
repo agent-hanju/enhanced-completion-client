@@ -279,13 +279,13 @@ class TestResponsesReplay:
             content=[
                 TextBlock(
                     text="답",
-                    source="responses",
+                    vendor="responses",
                     native={
                         "item": native_item,
                         "part": {"type": "output_text", "text": "답", "annotations": []},
                     },
                 ),
-                AudioBlock(source="responses", data="WAV"),
+                AudioBlock(vendor="responses", data="WAV"),
             ],
         )
 
@@ -491,7 +491,7 @@ class TestResponsesReplay:
             role="assistant",
             content=[
                 ServerToolBlock(
-                    source="responses",
+                    vendor="responses",
                     name="web_search_call",
                     raw={
                         "type": "response.web_search_call.in_progress",
@@ -763,9 +763,7 @@ class TestGeminiMediaReplay:
                     {
                         "content": {
                             "role": "model",
-                            "parts": [
-                                {"audioTranscription": {"text": "하세요", "finished": True}}
-                            ],
+                            "parts": [{"audioTranscription": {"text": "하세요", "finished": True}}],
                         },
                         "finishReason": "STOP",
                     }
@@ -834,7 +832,7 @@ class TestVendorNativeToolsAndUnknownParts:
             content=[
                 VendorBlock(
                     type="gemini_part",
-                    source="generate_content",
+                    vendor="generate_content",
                     raw=part,
                     native=part,
                 )
@@ -849,7 +847,7 @@ class TestChatCurrentFields:
             role="assistant",
             content=[
                 AudioBlock(
-                    source="chat_completions",
+                    vendor="chat_completions",
                     file_id="audio-1",
                     data="base64-output",
                 )
@@ -882,7 +880,7 @@ class TestRemoteContentReferences:
 
     def test_same_vendor_server_file_reference_is_not_replayed(self) -> None:
         block = ServerToolBlock(
-            source="responses",
+            vendor="responses",
             raw={
                 "type": "code_interpreter_call",
                 "id": "item-1",
@@ -945,13 +943,13 @@ class TestRemoteContentReferences:
             role="assistant",
             content=[
                 ImageBlock(
-                    source="generate_content",
+                    vendor="generate_content",
                     media_type="image/png",
                     data="PNG",
                 ),
-                AudioBlock(source="responses", data="WAV", format="wav"),
+                AudioBlock(vendor="responses", data="WAV", format="wav"),
                 DocumentBlock(
-                    source="generate_content",
+                    vendor="generate_content",
                     id="result",
                     uri="https://example.test/result.pdf",
                     media_type="application/pdf",

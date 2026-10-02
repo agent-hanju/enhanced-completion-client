@@ -25,6 +25,7 @@ from ..blocks import (
     ContentBlock,
     DocumentBlock,
     ImageBlock,
+    SearchResultBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -235,7 +236,7 @@ class _ToHub:
 
     @staticmethod
     def _one(block: ContentBlock) -> list[HubResponse]:
-        block.source = SOURCE
+        block.vendor = SOURCE
         return [HubResponse(content=[block])]
 
     def _audio_seq(self, event: dict[str, Any]) -> Seq:
@@ -282,15 +283,13 @@ class _ToHub:
             )
 
         raw_annotation_index = event.get("annotation_index")
-        annotation_index = (
-            raw_annotation_index if isinstance(raw_annotation_index, int) else 0
-        )
+        annotation_index = raw_annotation_index if isinstance(raw_annotation_index, int) else 0
         seen_key = (target_seq, annotation_index)
         if seen_key in self._annotations_seen:
             return []
         self._annotations_seen.add(seen_key)
         fields: dict[str, Any] = {
-            "source": SOURCE,
+            "vendor": SOURCE,
             "seq": self._seqs.after(target_seq),
             "target_seq": target_seq,
             "kind": kind or "annotation",
@@ -338,7 +337,7 @@ class _ToHub:
             seq = self._seqs.coord(coords)
             fields: dict[str, Any] = {
                 "seq": seq,
-                "source": SOURCE,
+                "vendor": SOURCE,
                 "kind": "custom" if kind == "custom_tool_call" else str(kind).removesuffix("_call"),
                 "native": dict(item),
             }
@@ -442,7 +441,7 @@ class _ToHub:
                 if seq not in self._text_streamed and isinstance(part.get("text"), str):
                     fields["text"] = part["text"]
                     self._text_streamed.add(seq)
-                blocks.append(TextBlock(source=SOURCE, **fields))
+                blocks.append(TextBlock(vendor=SOURCE, **fields))
                 for annotation_index, annotation in enumerate(part.get("annotations") or []):
                     if not isinstance(annotation, dict):
                         continue
@@ -462,7 +461,7 @@ class _ToHub:
                     self._refusal_started = True
                     fields["text"] = prefix + part["refusal"]
                     self._refusal_streamed.add(seq)
-                blocks.append(TextBlock(source=SOURCE, **fields))
+                blocks.append(TextBlock(vendor=SOURCE, **fields))
             elif kind in ("output_audio", "audio"):
                 fields = {"seq": seq, "native": native}
                 if seq not in self._audio_streamed and isinstance(part.get("data"), str):
@@ -472,14 +471,14 @@ class _ToHub:
                 if seq not in self._audio_transcript_streamed and isinstance(transcript, str):
                     fields["transcript"] = transcript
                     self._audio_transcript_streamed.add(seq)
-                blocks.append(AudioBlock(source=SOURCE, **fields))
+                blocks.append(AudioBlock(vendor=SOURCE, **fields))
             else:
                 blocks.append(
                     VendorBlock(
                         type=f"responses_{kind or 'content'}",
                         raw=dict(part),
                         native=native,
-                        source=SOURCE,
+                        vendor=SOURCE,
                         seq=seq,
                     )
                 )
@@ -488,7 +487,7 @@ class _ToHub:
                 VendorBlock(
                     type="responses_message",
                     raw=dict(item),
-                    source=SOURCE,
+                    vendor=SOURCE,
                     seq=self._seqs.coord(_item_slot(event)),
                 )
             )
@@ -521,7 +520,7 @@ class _ToHub:
                 seq = self._seqs.coord((output, part_kind, part_index))
                 fields: dict[str, Any] = {
                     "seq": seq,
-                    "source": SOURCE,
+                    "vendor": SOURCE,
                 }
                 if seq not in self._reasoning_streamed:
                     fields["thinking"] = entry["text"]
@@ -539,7 +538,7 @@ class _ToHub:
             streamed = self._reasoning_item_slots.get(coords)
             fields: dict[str, Any] = {
                 "seq": streamed if streamed is not None else self._seqs.coord(coords),
-                "source": SOURCE,
+                "vendor": SOURCE,
                 "native": dict(item),
             }
             if isinstance(encrypted, str) and encrypted:
@@ -578,7 +577,7 @@ class _ToHub:
                                 id=citation,
                                 uri=citation,
                                 kind="response_citation",
-                                source=SOURCE,
+                                vendor=SOURCE,
                                 native={"citation": citation},
                             )
                         ]
@@ -595,7 +594,7 @@ class _ToHub:
                                 uri=citation.get("url"),
                                 title=citation.get("title"),
                                 kind=str(citation.get("type") or "response_citation"),
-                                source=SOURCE,
+                                vendor=SOURCE,
                                 native=dict(citation),
                             )
                         ]
@@ -714,15 +713,15 @@ class ResponsesAdapter:
                 if not can_replay_client_tool(block, self.name):
                     continue
                 item = self._tool_use_item(block)
-            elif isinstance(block, ThinkingBlock) and block.source == SOURCE:
+            elif isinstance(block, ThinkingBlock) and block.vendor == SOURCE:
                 item = self._reasoning_input(block)
-            elif isinstance(block, ServerToolBlock) and block.source == SOURCE:
+            elif isinstance(block, ServerToolBlock) and block.vendor == SOURCE:
                 candidate = dict(block.raw or block.native)
                 if not str(candidate.get("type") or "").startswith("response."):
                     item = candidate
             elif (
                 isinstance(block, VendorBlock)
-                and block.source == SOURCE
+                and block.vendor == SOURCE
                 and block.native.get("level") == "item"
             ):
                 item = dict(block.raw)
@@ -747,7 +746,7 @@ class ResponsesAdapter:
         plain: list[ContentBlock] = []
         item_meta: dict[str, Any] = {}
         for block in blocks:
-            if block.source != SOURCE:
+            if block.vendor != SOURCE:
                 continue
             native_item = block.native.get("item")
             if isinstance(native_item, dict):
@@ -788,14 +787,14 @@ class ResponsesAdapter:
         annotations_by_target: dict[int, list[dict[str, Any]]] = {}
         legacy_annotations: list[dict[str, Any]] = []
         for candidate in blocks:
-            if isinstance(candidate, AnnotationBlock) and candidate.source == SOURCE:
+            if isinstance(candidate, AnnotationBlock) and candidate.vendor == SOURCE:
                 if isinstance(candidate.target_index, int) and candidate.native:
                     annotations_by_target.setdefault(candidate.target_index, []).append(
                         dict(candidate.native)
                     )
             elif (
                 isinstance(candidate, CitationBlock)
-                and candidate.source == SOURCE
+                and candidate.vendor == SOURCE
                 and candidate.native
             ):
                 legacy_annotations.append(dict(candidate.native))
@@ -810,17 +809,17 @@ class ResponsesAdapter:
         for block in blocks:
             if has_opaque_media_reference(block):
                 continue
-            if isinstance(block, AnnotationBlock) and block.source == SOURCE:
+            if isinstance(block, AnnotationBlock) and block.vendor == SOURCE:
                 continue
-            if isinstance(block, CitationBlock) and block.source == SOURCE and block.native:
+            if isinstance(block, CitationBlock) and block.vendor == SOURCE and block.native:
                 continue
-            if isinstance(block, VendorBlock) and block.source == SOURCE:
+            if isinstance(block, VendorBlock) and block.vendor == SOURCE:
                 native_part = block.native.get("part")
                 if isinstance(native_part, dict):
                     flush_plain()
                     parts.append(dict(native_part))
                     continue
-            if isinstance(block, TextBlock) and block.source == SOURCE and block.native:
+            if isinstance(block, TextBlock) and block.vendor == SOURCE and block.native:
                 native = block.native
                 native_part = native.get("part")
                 if isinstance(native_part, dict):
@@ -866,7 +865,7 @@ class ResponsesAdapter:
 
     @staticmethod
     def _tool_use_item(block: ToolUseBlock) -> dict[str, Any]:
-        if block.source == SOURCE and block.native:
+        if block.vendor == SOURCE and block.native:
             item = dict(block.native)
             if block.kind == "mcp_approval":
                 return item
@@ -881,7 +880,7 @@ class ResponsesAdapter:
             item["call_id"] = block.id
             if block.name:
                 item["name"] = block.name
-        elif block.id and block.source != SOURCE:
+        elif block.id and block.vendor != SOURCE:
             item["id"] = block.id
         if block.kind == "custom":
             item["input"] = block.input_json
@@ -893,7 +892,7 @@ class ResponsesAdapter:
 
     @staticmethod
     def _tool_result_item(block: ToolResultBlock, lowerer: Lowerer) -> dict[str, Any]:
-        if block.source == SOURCE and block.native:
+        if block.vendor == SOURCE and block.native:
             return dict(block.native)
         if block.kind == "mcp_approval":
             item: dict[str, Any] = {
@@ -909,7 +908,13 @@ class ResponsesAdapter:
         rendered_parts: list[dict[str, Any]] = []
         if block.content:
             rendered_parts.append({"type": "input_text", "text": block.content})
+        searches = [nested for nested in block.blocks if isinstance(nested, SearchResultBlock)]
+        if searches:
+            # 이 API에는 search result 채널이 없다. 문서와 같은 텍스트로 보낸다.
+            rendered_parts.append({"type": "input_text", "text": lowerer.lower_text(searches)})
         for nested in block.blocks:
+            if isinstance(nested, SearchResultBlock):
+                continue
             if isinstance(nested, ContentBlock) and has_opaque_media_reference(nested):
                 continue
             if isinstance(nested, TextBlock):

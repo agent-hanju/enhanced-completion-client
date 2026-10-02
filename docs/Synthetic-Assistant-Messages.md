@@ -18,7 +18,7 @@ assistant 메시지의 선언 필드는 `synthetic: bool = False`다. 블록별 
 처리한다. `user`, `system`, 도구 결과 메시지에는 표시하지 않는다.
 
 모델 응답에 호출 블록 하나만 추가했어도 메시지 전체를 `synthetic=True`로 표시한다.
-브리지는 작성·편집 여부를 자동 감지하지 않는다. `source=None`, 서명 누락, 도구 이름으로
+브리지는 작성·편집 여부를 자동 감지하지 않는다. `vendor=None`, 서명 누락, 도구 이름으로
 synthetic 여부를 추측하지 않는다. 단순 저장·복원이나 `HubMessage.of_response(response)`로
 원본 응답을 이력에 옮기는 것은 사용자 편집으로 취급하지 않는다.
 

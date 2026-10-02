@@ -623,7 +623,7 @@ class TestResponses:
                 "type": "message",
                 "role": "user",
                 "content": [{"type": "input_text", "text": "질문"}],
-            }
+            },
         ]
         assert "messages" not in body
 
@@ -1045,9 +1045,7 @@ class TestHubConvergence:
             )
             result = await client.complete(["수도?"])
             assert result.text == "서울은 수도다."
-            cited = next(
-                b for b in result.content if isinstance(b, TextBlock) and b.citations
-            )
+            cited = next(b for b in result.content if isinstance(b, TextBlock) and b.citations)
             assert cited.text == "수도"
             assert [(c.source, c.id) for c in cited.citations] == [("cite", "d1")]
 
@@ -1083,7 +1081,7 @@ class TestHubConvergence:
         """추론은 발급 벤더로만 되돌릴 수 있다. 어휘가 없으면 생략된다."""
         message = HubMessage(
             role="assistant",
-            content=[ThinkingBlock(thinking="비밀", source="messages"), TextBlock(text="답")],
+            content=[ThinkingBlock(thinking="비밀", vendor="messages"), TextBlock(text="답")],
         )
         for adapter, key in ((messages, "messages"), (responses, "input")):
             body = make(adapter).build_request([message])
@@ -1276,9 +1274,7 @@ class TestNativeCitations:
         from_tags = await with_vocabulary.complete(["x"])
 
         native_text = next(b for b in from_native.content if isinstance(b, TextBlock))
-        tagged_text = next(
-            b for b in from_tags.content if isinstance(b, TextBlock) and b.citations
-        )
+        tagged_text = next(b for b in from_tags.content if isinstance(b, TextBlock) and b.citations)
         assert native_text.text == ""
         assert native_text.citations[0].source == "messages"
         assert native_text.citations[0].cited_text == "근거"

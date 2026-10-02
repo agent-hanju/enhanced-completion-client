@@ -52,7 +52,7 @@ class _BadgeMapper:
         self._parser = TagParser(schema)
         self._level: str | None = None
         self._text: list[str] = []
-        self._source: str | None = None
+        self._vendor: str | None = None
         self._badge_seq: Seq | None = None
         self._text_seq: Seq | None = None
         self._last_parent: Seq | None = None
@@ -71,7 +71,7 @@ class _BadgeMapper:
             if block.native or block.signature:
                 blocks.append(
                     TextBlock(
-                        source=block.source,
+                        vendor=block.vendor,
                         native=block.native,
                         signature=block.signature,
                         seq=self._piece(block.seq),
@@ -80,7 +80,7 @@ class _BadgeMapper:
                 self._text_seq = None
             if "text" in block.model_fields_set:
                 for event in self._parser.feed(block.text):
-                    blocks.extend(self._apply(event, block.source, block.seq))
+                    blocks.extend(self._apply(event, block.vendor, block.seq))
         return [delta.model_copy(update={"content": blocks})]
 
     def flush(self) -> list[HubResponse]:
@@ -88,13 +88,13 @@ class _BadgeMapper:
         blocks: list[ContentBlock] = []
         if self._last_parent is not None:
             for event in self._parser.flush():
-                blocks.extend(self._apply(event, self._source, self._last_parent))
+                blocks.extend(self._apply(event, self._vendor, self._last_parent))
         if self._level is not None:
             blocks.append(self._close())
         return [HubResponse(content=blocks)] if blocks else []
 
     def _apply(
-        self, event: TextRun | Enter | Exit, source: str | None, parent: Seq
+        self, event: TextRun | Enter | Exit, vendor: str | None, parent: Seq
     ) -> list[ContentBlock]:
         """파서 이벤트 하나를 text 조각 또는 badge로 옮긴다."""
         if isinstance(event, TextRun):
@@ -103,12 +103,12 @@ class _BadgeMapper:
                 return []
             if self._text_seq is None or self._text_seq[:-1] != parent:
                 self._text_seq = self._piece(parent)
-            return [TextBlock(text=event.content, source=source, seq=self._text_seq)]
+            return [TextBlock(text=event.content, vendor=vendor, seq=self._text_seq)]
         if isinstance(event, Enter) and event.path == BADGE_PATH:
             closed = [self._close()] if self._level is not None else []
             self._level = html.unescape(event.attributes.get("level", "info"))
             self._text = []
-            self._source = source
+            self._vendor = vendor
             self._badge_seq = self._piece(parent)
             self._text_seq = None
             return closed
@@ -127,12 +127,12 @@ class _BadgeMapper:
         block = BadgeBlock(
             level=self._level or "info",
             text=html.unescape("".join(self._text)),
-            source=self._source,
+            vendor=self._vendor,
             seq=self._badge_seq,
         )
         self._level = None
         self._text = []
-        self._source = None
+        self._vendor = None
         self._badge_seq = None
         return block
 

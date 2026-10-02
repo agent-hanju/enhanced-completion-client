@@ -77,14 +77,14 @@
     {
       "type": "thinking",
       "index": 0,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {},
       "thinking": "날씨 도구를 호출한다."
     },
     {
       "type": "tool_use",
       "index": 1,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {
         "index": 0,
         "id": "call-1",
@@ -338,7 +338,7 @@
     {
       "type": "thinking",
       "index": 0,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "thinking",
         "thinking": ""
@@ -349,7 +349,7 @@
     {
       "type": "tool_use",
       "index": 1,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "tool_use",
         "id": "call-1",
@@ -627,7 +627,7 @@
     {
       "type": "thinking",
       "index": 0,
-      "source": "responses",
+      "vendor": "responses",
       "native": {
         "type": "reasoning",
         "id": "rs-1",
@@ -645,7 +645,7 @@
     {
       "type": "tool_use",
       "index": 1,
-      "source": "responses",
+      "vendor": "responses",
       "native": {
         "type": "function_call",
         "id": "fc-1",
@@ -892,7 +892,7 @@
     {
       "type": "thinking",
       "index": 0,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "text": "날씨 도구를 호출한다.",
         "thought": true,
@@ -904,7 +904,7 @@
     {
       "type": "tool_use",
       "index": 1,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "functionCall": {
           "id": "call-1",
@@ -1842,7 +1842,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
           "functionResponse": {
             "name": "capture",
             "response": {
-              "temp_c": 25
+              "result": "관측 결과"
             },
             "id": "call-media",
             "parts": [
@@ -1920,14 +1920,14 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "thinking",
       "index": 0,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {},
       "thinking": "이미지와 근거를 결합한다."
     },
     {
       "type": "text",
       "index": 1,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {},
       "text": "서울은 25도다.",
       "citations": []
@@ -1935,7 +1935,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "annotation",
       "index": 2,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {
         "type": "url_citation",
         "url_citation": {
@@ -1956,7 +1956,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "audio",
       "index": 3,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {
         "id": "audio-1",
         "data": "UklGRg==",
@@ -2287,7 +2287,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "thinking",
       "index": 0,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "thinking",
         "thinking": ""
@@ -2298,7 +2298,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "text",
       "index": 1,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "text",
         "text": ""
@@ -2328,7 +2328,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 2,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "server_tool_use",
         "id": "srv-search-1",
@@ -2353,7 +2353,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 3,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "web_search_tool_result",
         "tool_use_id": "srv-search-1",
@@ -2388,7 +2388,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 4,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "code_execution_tool_result",
         "tool_use_id": "srv-code-1",
@@ -2429,7 +2429,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "container_upload",
       "index": 5,
-      "source": "messages",
+      "vendor": "messages",
       "native": {
         "type": "container_upload",
         "file_id": "file_1"
@@ -2824,7 +2824,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "thinking",
       "index": 0,
-      "source": "responses",
+      "vendor": "responses",
       "native": {
         "type": "reasoning",
         "id": "rs-rich-1",
@@ -2842,7 +2842,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "text",
       "index": 1,
-      "source": "responses",
+      "vendor": "responses",
       "native": {
         "item": {
           "type": "message",
@@ -2870,7 +2870,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "annotation",
       "index": 2,
-      "source": "responses",
+      "vendor": "responses",
       "native": {
         "type": "url_citation",
         "start_index": 0,
@@ -2889,7 +2889,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "audio",
       "index": 3,
-      "source": "responses",
+      "vendor": "responses",
       "native": {},
       "serialize": false,
       "data": "UklGRg==",
@@ -2898,7 +2898,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 4,
-      "source": "responses",
+      "vendor": "responses",
       "native": {
         "type": "web_search_call",
         "id": "ws-rich-1",
@@ -2926,7 +2926,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 5,
-      "source": "responses",
+      "vendor": "responses",
       "native": {
         "type": "code_interpreter_call",
         "id": "ci-rich-1",
@@ -3336,7 +3336,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "thinking",
       "index": 0,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "text": "자료를 함께 검토한다.",
         "thought": true,
@@ -3348,7 +3348,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "text",
       "index": 1,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "text": "서울은 25도다.",
         "thoughtSignature": "gemini-rich-text"
@@ -3360,7 +3360,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "annotation",
       "index": 2,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "startIndex": 0,
         "endIndex": 2,
@@ -3377,7 +3377,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "image",
       "index": 3,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "inlineData": {
           "mimeType": "image/png",
@@ -3391,7 +3391,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "document",
       "index": 4,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "fileData": {
           "mimeType": "application/pdf",
@@ -3408,7 +3408,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 5,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "executableCode": {
           "language": "PYTHON",
@@ -3427,7 +3427,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 6,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "codeExecutionResult": {
           "outcome": "OUTCOME_OK",
@@ -3446,7 +3446,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "grounding",
       "index": 7,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {
         "webSearchQueries": [
           "서울 현재 기온"
@@ -3523,7 +3523,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "server_tool",
       "index": 8,
-      "source": "generate_content",
+      "vendor": "generate_content",
       "native": {},
       "id": "",
       "name": "urlContextMetadata",
@@ -4116,7 +4116,7 @@ escape/unescape하며, 하나의 wire text를 여러 의미 block으로 나눌 �
     {
       "type": "text",
       "index": 0,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {},
       "text": "앞 ",
       "citations": []
@@ -4124,7 +4124,7 @@ escape/unescape하며, 하나의 wire text를 여러 의미 block으로 나눌 �
     {
       "type": "badge",
       "index": 1,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {},
       "level": "warning",
       "text": "점검 &amp; 확인"
@@ -4132,7 +4132,7 @@ escape/unescape하며, 하나의 wire text를 여러 의미 block으로 나눌 �
     {
       "type": "text",
       "index": 2,
-      "source": "chat_completions",
+      "vendor": "chat_completions",
       "native": {},
       "text": " 뒤",
       "citations": []

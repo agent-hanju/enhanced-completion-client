@@ -59,8 +59,8 @@ class _ToHub:
     유지한다. annotation은 대상 text 블록 바로 뒤의 seq를 받는다.
     """
 
-    def __init__(self, source: str) -> None:
-        self._source = source
+    def __init__(self, vendor: str) -> None:
+        self._vendor = vendor
         self._seqs = SeqAllocator(1)
         self._next_index = 0
         self._channel: str | None = None
@@ -93,7 +93,7 @@ class _ToHub:
         if isinstance(reasoning, str) and reasoning:
             blocks.append(
                 ThinkingBlock(
-                    thinking=reasoning, seq=self._segment("reasoning"), source=self._source
+                    thinking=reasoning, seq=self._segment("reasoning"), vendor=self._vendor
                 )
             )
 
@@ -103,7 +103,7 @@ class _ToHub:
             start = self._text_ranges.get(seq, (self._text_length, self._text_length))[0]
             self._text_length += len(content)
             self._text_ranges[seq] = (start, self._text_length)
-            blocks.append(TextBlock(text=content, seq=seq, source=self._source))
+            blocks.append(TextBlock(text=content, seq=seq, vendor=self._vendor))
 
         # 거부도 사용자가 봐야 하는 본문이다. 다만 답변과 구분되게 표시를 붙인다.
         refusal = delta.get("refusal")
@@ -113,7 +113,7 @@ class _ToHub:
                 TextBlock(
                     text=prefix + refusal,
                     seq=self._segment("refusal"),
-                    source=self._source,
+                    vendor=self._vendor,
                 )
             )
 
@@ -122,7 +122,7 @@ class _ToHub:
             blocks.append(
                 AudioBlock(
                     seq=self._segment("audio"),
-                    source=self._source,
+                    vendor=self._vendor,
                     native=dict(audio),
                     file_id=audio.get("id"),
                     data=audio.get("data"),
@@ -172,7 +172,7 @@ class _ToHub:
         self._channel = None
         fields: dict[str, Any] = {
             "seq": self._tool_seqs[key],
-            "source": self._source,
+            "vendor": self._vendor,
             "native": dict(call),
         }
         if isinstance(kind, str) and kind:
@@ -197,7 +197,7 @@ class _ToHub:
         if not isinstance(detail, dict):
             detail = annotation
         fields: dict[str, Any] = {
-            "source": self._source,
+            "vendor": self._vendor,
             "kind": str(annotation.get("type") or "annotation"),
             "native": dict(annotation),
         }
@@ -369,7 +369,7 @@ class ChatCompletionsAdapter:
         reasoning = [
             b.thinking
             for b in blocks
-            if isinstance(b, ThinkingBlock) and b.source == self.name and self.reasoning_input_field
+            if isinstance(b, ThinkingBlock) and b.vendor == self.name and self.reasoning_input_field
         ]
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
@@ -386,7 +386,7 @@ class ChatCompletionsAdapter:
             if isinstance(block, ToolUseBlock):
                 continue
             if isinstance(block, ThinkingBlock):
-                if block.source == self.name and self.reasoning_input_field:
+                if block.vendor == self.name and self.reasoning_input_field:
                     continue
                 plain.append(block)
                 continue
@@ -402,7 +402,7 @@ class ChatCompletionsAdapter:
                 continue
             if (
                 isinstance(block, ServerToolBlock | VendorBlock)
-                and block.source == self.name
+                and block.vendor == self.name
                 and block.raw
             ):
                 flush_plain()
@@ -435,7 +435,7 @@ class ChatCompletionsAdapter:
         return wire
 
     def _tool_call(self, block: ToolUseBlock) -> dict[str, Any]:
-        if block.source == self.name and block.native:
+        if block.vendor == self.name and block.native:
             call = dict(block.native)
             # ``index`` identifies a tool-call delta inside a streamed response.
             # It is not part of an assistant tool call accepted in request history.
@@ -456,16 +456,22 @@ class ChatCompletionsAdapter:
 
     @staticmethod
     def _tool_result_text(block: ToolResultBlock, lowerer: Lowerer) -> str:
+        """tool 메시지 본문. 이 API의 tool 메시지는 문자열만 받는다.
+
+        ``blocks``를 text로 바꾼 결과가 있으면 ``content`` 뒤에 그것을 쓰고
+        ``structured_content``는 보내지 않는다. 없으면 ``structured_content`` JSON, 그것도
+        없으면 ``content``를 쓴다.
+        """
         nested = lowerer.lower_text(
             b
             for b in block.blocks
             if not isinstance(b, ContentBlock) or not has_opaque_media_reference(b)
         )
-        if block.content and nested:
-            return f"{block.content}\n{nested}"
+        if nested:
+            return f"{block.content}\n{nested}" if block.content else nested
         if block.structured_content is not None:
             return json.dumps(block.structured_content, ensure_ascii=False)
-        return block.content or nested
+        return block.content
 
     def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any] | None:
         native = tool.native_for(self.name)

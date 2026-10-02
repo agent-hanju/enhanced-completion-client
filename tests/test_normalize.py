@@ -269,9 +269,7 @@ class TestGeminiPromptBlocking:
     @respx.mock
     async def test_normal_empty_response_has_no_block_reason(self) -> None:
         """정상 종료된 빈 응답을 차단으로 오인하지 않는다."""
-        payload = sse(
-            (None, {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]})
-        )
+        payload = sse((None, {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]}))
         respx.post(f"{BASE}{GEMINI.path}").mock(return_value=httpx.Response(200, content=payload))
         result = await make(GEMINI).complete(["x"])
 
@@ -403,7 +401,7 @@ class TestCitationSerialization:
     def test_native_citation_replays_on_the_same_vendor(self) -> None:
         block = TextBlock(
             text="서울이다",
-            source="messages",
+            vendor="messages",
             citations=[Citation(source="messages", native={"type": "char_location"})],
         )
         body = make(messages).build_request([HubMessage(role="assistant", content=[block])])
@@ -414,7 +412,7 @@ class TestCitationSerialization:
     def test_native_citation_is_serialized_for_other_vendors(self) -> None:
         block = TextBlock(
             text="서울이다",
-            source="messages",
+            vendor="messages",
             citations=[Citation(id="d1", source="messages", native={"type": "char_location"})],
         )
         message = HubMessage(role="assistant", content=[block])
@@ -449,9 +447,7 @@ class TestEvidenceFamilies:
             "id": "m1",
             "role": "assistant",
             "status": "completed",
-            "content": [
-                {"type": "output_text", "text": "서울", "annotations": [annotation]}
-            ],
+            "content": [{"type": "output_text", "text": "서울", "annotations": [annotation]}],
         }
         payload = sse(
             (
@@ -464,11 +460,9 @@ class TestEvidenceFamilies:
         result = await make(responses).complete(["x"])
 
         text = next(block for block in result.content if isinstance(block, TextBlock))
-        evidence = next(
-            block for block in result.content if isinstance(block, AnnotationBlock)
-        )
+        evidence = next(block for block in result.content if isinstance(block, AnnotationBlock))
         assert text.text == "서울"
-        assert evidence.source == "responses"
+        assert evidence.vendor == "responses"
         assert evidence.target_index == text.index
         assert evidence.native == annotation
 
@@ -492,9 +486,7 @@ class TestEvidenceFamilies:
         item = {
             "type": "message",
             "role": "assistant",
-            "content": [
-                {"type": "output_text", "text": "서울", "annotations": [annotation]}
-            ],
+            "content": [{"type": "output_text", "text": "서울", "annotations": [annotation]}],
         }
         payload = sse(
             (
@@ -567,13 +559,9 @@ class TestEvidenceFamilies:
         respx.post(f"{BASE}{GEMINI.path}").mock(return_value=httpx.Response(200, content=payload))
         result = await make(GEMINI).complete(["x"])
 
-        annotation = next(
-            block for block in result.content if isinstance(block, AnnotationBlock)
-        )
-        grounding = next(
-            block for block in result.content if isinstance(block, GroundingBlock)
-        )
-        assert annotation.source == "generate_content"
+        annotation = next(block for block in result.content if isinstance(block, AnnotationBlock))
+        grounding = next(block for block in result.content if isinstance(block, GroundingBlock))
+        assert annotation.vendor == "generate_content"
         assert annotation.native["license"] == "CC"
         assert grounding.sources[0].uri == "https://ground.test"
         assert grounding.supports[0].source_indices == [0]

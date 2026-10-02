@@ -28,6 +28,7 @@ from .blocks import (
     GroundingSource,
     GroundingSupport,
     ImageBlock,
+    SearchResultBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -67,7 +68,7 @@ from .vendors.base import Lowerer, VendorAdapter
 from .vocabularies import CiteVocabulary, cite_schema
 from .vocabulary import Vocabulary
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "AnnotationBlock",
@@ -95,6 +96,7 @@ __all__ = [
     "ExtractionError",
     "MappingError",
     "ParseEvent",
+    "SearchResultBlock",
     "ServerToolBlock",
     "SseEvent",
     "SseParser",

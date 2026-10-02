@@ -12,7 +12,7 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 | 상태 | 의미 |
 |---|---|
 | 지원 | 공통 의미 변환과 회귀 테스트가 있다 |
-| 원형 보존 | `source`와 `native`/`raw`로 수신 정보를 보존한다. 자동 기능 활성화를 뜻하지 않는다 |
+| 원형 보존 | `vendor`와 `native`/`raw`로 수신 정보를 보존한다. 자동 기능 활성화를 뜻하지 않는다 |
 | 명시적 native | 호출자가 대상 벤더의 wire 정의를 직접 전달한 요청에서만 활성화한다 |
 | 부분 지원 | 정보 일부를 text fallback하거나 대상 API가 표현하지 못하는 부분을 생략한다 |
 | 외부 책임 | 브리지 밖의 provider/consumer 애플리케이션이 소유한다 |
@@ -204,9 +204,11 @@ request에만 마지막 덮어쓰기로 적용된다. 후보 수(`n`, `candidate
 - Anthropic의 `code_execution_tool_result`와 `tool_search_tool_result`는
   `ServerToolBlock`으로 정규화한다. `container_upload`의 원본 file ID는 응답 진단용으로
   보존하지만 요청으로 재생하지 않는다.
-- Anthropic 입력 union에 추가된 `search_result`는 정확한 native wire가 필요하면
-  `VendorBlock(source="messages")`로 보존하고, 교차 벤더의 텍스트 근거로는 `DocumentBlock`을
-  사용한다. `container_upload`는 file ID 기반이라 normalized 요청에서 제외한다.
+- Anthropic 입력 union의 `search_result`는 `SearchResultBlock`으로 표현한다. Anthropic에는
+  네이티브 `search_result`로, 다른 벤더에는 `<document>` 형식 텍스트로 보낸다. 응답의
+  `search_result_location` 인용은 `Citation`의 `document_title`, `document_index`
+  (`search_result_index`), `uri`/`id`(출처), `source_start`/`source_end`(청크 범위)로 옮긴다.
+  `container_upload`는 file ID 기반이라 normalized 요청에서 제외한다.
 - Responses reasoning summary의 독립 경계는 `summary_index`로 식별하고, audio transcript의 현재
   이벤트명은 `response.audio.transcript.delta`다. 구형 호환 서버 표기도 함께 읽는다.
 - Chat Completions 요청은 text/image뿐 아니라 inline `input_audio`와 inline `file`을 지원한다.

@@ -321,7 +321,7 @@ def test_anthropic_persistent_bash_call_moves_as_a_virtual_tool() -> None:
             role="user",
             content=[
                 ToolResultBlock(
-                    source="messages",
+                    vendor="messages",
                     kind=call.kind,
                     tool_use_id=call.id,
                     content="/workspace",
@@ -668,7 +668,7 @@ def test_remote_reference_results_are_omitted_not_faked() -> None:
     block = ServerToolBlock(
         id="cu-1",
         name="container_upload",
-        source="messages",
+        vendor="messages",
         raw={"type": "container_upload", "file_id": "file-abc"},
     )
     history = [HubMessage(role="assistant", content=[block])]
@@ -769,6 +769,7 @@ def test_chat_refusal_audio_and_metadata_keep_dense_indices() -> None:
     assert result.content[0].text.endswith("no thanks")
     assert result.content[1].data == "ab"
     assert result.content[2].text.endswith("again")
+
 
 def responses_text(output_index: int, delta: str) -> dict[str, Any]:
     """Responses의 본문 delta 이벤트. part는 item의 첫 content part다."""

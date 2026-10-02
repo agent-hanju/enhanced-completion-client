@@ -29,6 +29,7 @@ from ..blocks import (
     GroundingSource,
     GroundingSupport,
     ImageBlock,
+    SearchResultBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -119,7 +120,7 @@ class _ToHub:
                 VendorBlock(
                     type="promptFeedback",
                     raw=dict(feedback),
-                    source=SOURCE,
+                    vendor=SOURCE,
                     seq=self._seqs.after(),
                 )
             )
@@ -131,9 +132,7 @@ class _ToHub:
                     blocks.append(block)
 
         text_seqs = [
-            block.seq
-            for block in blocks
-            if isinstance(block, TextBlock) and block.seq is not None
+            block.seq for block in blocks if isinstance(block, TextBlock) and block.seq is not None
         ]
         target_seq = text_seqs[0] if len(set(text_seqs)) == 1 else None
         blocks.extend(self._citations(head.get("citationMetadata"), target_seq))
@@ -186,7 +185,7 @@ class _ToHub:
             if not isinstance(source, dict):
                 continue
             fields: dict[str, Any] = {
-                "source": SOURCE,
+                "vendor": SOURCE,
                 "seq": self._seqs.after(target_seq, key=("citation", position)),
                 "target_seq": target_seq,
                 "kind": "citation_source",
@@ -277,7 +276,7 @@ class _ToHub:
         search_entry = metadata.get("searchEntryPoint")
         retrieval = metadata.get("retrievalMetadata")
         return GroundingBlock(
-            source=SOURCE,
+            vendor=SOURCE,
             seq=self._seqs.after(key=("grounding",)),
             sources=sources,
             supports=supports,
@@ -300,7 +299,7 @@ class _ToHub:
             if isinstance(value, dict):
                 # 서버가 검색을 돌린 결과다. 다른 벤더의 서버 도구와 같은 자리다.
                 out.append(
-                    ServerToolBlock(name=key, raw=value, source=SOURCE, seq=self._seqs.after())
+                    ServerToolBlock(name=key, raw=value, vendor=SOURCE, seq=self._seqs.after())
                 )
         ratings = candidate.get("safetyRatings")
         if isinstance(ratings, list) and ratings:
@@ -308,7 +307,7 @@ class _ToHub:
                 VendorBlock(
                     type="safetyRatings",
                     raw={"ratings": ratings},
-                    source=SOURCE,
+                    vendor=SOURCE,
                     seq=self._seqs.after(),
                 )
             )
@@ -356,12 +355,12 @@ class _ToHub:
                 signature = part.get("thoughtSignature")
                 if isinstance(signature, str) and signature:
                     fields["signature"] = signature
-                return ThinkingBlock(source=SOURCE, **fields)
+                return ThinkingBlock(vendor=SOURCE, **fields)
             fields = {"text": text, "seq": seq, "native": dict(part)}
             signature = part.get("thoughtSignature")
             if isinstance(signature, str) and signature:
                 fields["signature"] = signature
-            return TextBlock(source=SOURCE, **fields)
+            return TextBlock(vendor=SOURCE, **fields)
 
         call = part.get(_FUNCTION_CALL)
         if isinstance(call, dict):
@@ -387,7 +386,7 @@ class _ToHub:
                 blocks=nested,
                 native=dict(part),
                 seq=seq,
-                source=SOURCE,
+                vendor=SOURCE,
             )
 
         transcription = part.get("audioTranscription")
@@ -397,7 +396,7 @@ class _ToHub:
                 transcript=text if isinstance(text, str) else None,
                 native=dict(part),
                 seq=seq,
-                source=SOURCE,
+                vendor=SOURCE,
             )
 
         # inlineData는 이미지 또는 음성이다. MIME으로 갈린다.
@@ -411,7 +410,7 @@ class _ToHub:
                     data=data,
                     native=dict(part),
                     seq=seq,
-                    source=SOURCE,
+                    vendor=SOURCE,
                 )
             if mime.startswith("image/"):
                 return ImageBlock(
@@ -419,14 +418,14 @@ class _ToHub:
                     data=data,
                     native=dict(part),
                     seq=seq,
-                    source=SOURCE,
+                    vendor=SOURCE,
                 )
             return DocumentBlock(
                 media_type=mime or "application/octet-stream",
                 data=data,
                 native=dict(part),
                 seq=seq,
-                source=SOURCE,
+                vendor=SOURCE,
             )
 
         file_data = part.get("fileData")
@@ -439,7 +438,7 @@ class _ToHub:
                     url=uri,
                     native=dict(part),
                     seq=seq,
-                    source=SOURCE,
+                    vendor=SOURCE,
                 )
             if mime.startswith("audio/"):
                 return AudioBlock(
@@ -447,14 +446,14 @@ class _ToHub:
                     uri=uri,
                     native=dict(part),
                     seq=seq,
-                    source=SOURCE,
+                    vendor=SOURCE,
                 )
             return DocumentBlock(
                 media_type=mime or "application/octet-stream",
                 uri=uri,
                 native=dict(part),
                 seq=seq,
-                source=SOURCE,
+                vendor=SOURCE,
             )
 
         for field in _SERVER_TOOL_FIELDS:
@@ -469,14 +468,14 @@ class _ToHub:
                     raw=value,
                     native=dict(part),
                     seq=seq,
-                    source=SOURCE,
+                    vendor=SOURCE,
                 )
         return VendorBlock(
             type="gemini_part",
             raw=dict(part),
             native=dict(part),
             seq=seq,
-            source=SOURCE,
+            vendor=SOURCE,
         )
 
     def _call(
@@ -487,7 +486,7 @@ class _ToHub:
     ) -> ToolUseBlock:
         fields: dict[str, Any] = {
             "seq": seq,
-            "source": SOURCE,
+            "vendor": SOURCE,
             "native": dict(part),
         }
         if call.get("id"):
@@ -685,7 +684,7 @@ class GenerateContentAdapter:
                 continue
             if isinstance(block, ToolResultBlock):
                 flush_plain()
-                parts.append(self._function_response(block, call_names))
+                parts.append(self._function_response(block, call_names, lowerer))
                 continue
             part = as_gemini_part(block)
             if part is None:
@@ -710,16 +709,30 @@ class GenerateContentAdapter:
     def _function_response(
         block: ToolResultBlock,
         call_names: dict[str, str],
+        lowerer: Lowerer,
     ) -> dict[str, Any]:
-        if block.source == SOURCE and block.native:
+        """도구 결과를 ``functionResponse`` part로 바꾼다.
+
+        ``blocks``가 있으면 ``response``의 ``result``에 ``content``와 search result 텍스트를
+        넣고 ``structured_content``는 보내지 않는다. search result가 아닌 블록은 ``parts``로
+        보낸다. ``blocks``가 없으면 ``structured_content``를, 그것도 없으면 ``content``를
+        ``response``로 쓴다.
+        """
+        if block.vendor == SOURCE and block.native:
             return dict(block.native)
 
         name = block.name or call_names.get(block.tool_use_id) or block.tool_use_id
-        response: Any = block.structured_content
-        if response is None:
+        searches = [b for b in block.blocks if isinstance(b, SearchResultBlock)]
+        response: Any
+        if block.blocks:
+            texts = [block.content, lowerer.lower_text(searches) if searches else ""]
+            response = {"result": "\n".join(text for text in texts if text)}
+        elif block.structured_content is None:
             response = {"result": block.content}
-        elif not isinstance(response, dict):
-            response = {"result": response}
+        elif isinstance(block.structured_content, dict):
+            response = block.structured_content
+        else:
+            response = {"result": block.structured_content}
 
         function_response: dict[str, Any] = {"name": name, "response": response}
         if block.tool_use_id:
@@ -727,7 +740,7 @@ class GenerateContentAdapter:
         nested = [
             as_gemini_part(part)
             for part in block.blocks
-            if isinstance(part, ContentBlock) and not has_opaque_media_reference(part)
+            if not isinstance(part, SearchResultBlock) and not has_opaque_media_reference(part)
         ]
         rendered = [part for part in nested if part is not None]
         if rendered:

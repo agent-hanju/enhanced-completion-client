@@ -46,7 +46,7 @@ class VendorAdapter(Protocol):
     """한 벤더 API에 대한 요청 조립과 응답 해석."""
 
     name: str
-    """진단과 블록 ``source`` 태그에 쓰는 이름."""
+    """진단과 블록 ``vendor`` 필드에 쓰는 이름."""
 
     parameter_family: str
     """공통 Hyperparameters를 투영할 표준 API 계열 이름."""

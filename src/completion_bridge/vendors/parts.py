@@ -19,6 +19,7 @@ from ..blocks import (
     ContentBlock,
     DocumentBlock,
     ImageBlock,
+    SearchResultBlock,
     ServerToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -57,14 +58,14 @@ def has_opaque_media_reference(block: ContentBlock) -> bool:
     return bool(reference and urlsplit(reference).scheme.lower() not in {"http", "https", "data"})
 
 
-def _native(block: ContentBlock, source: str) -> dict[str, Any]:
-    if block.source != source:
+def _native(block: ContentBlock, vendor: str) -> dict[str, Any]:
+    if block.vendor != vendor:
         return {}
     return dict(block.native)
 
 
-def _raw(block: ServerToolBlock | VendorBlock, source: str) -> dict[str, Any] | None:
-    if block.source != source or not block.raw:
+def _raw(block: ServerToolBlock | VendorBlock, vendor: str) -> dict[str, Any] | None:
+    if block.vendor != vendor or not block.raw:
         return None
     return dict(block.raw)
 
@@ -74,7 +75,7 @@ def as_anthropic_part(block: ContentBlock) -> dict[str, Any] | None:
     if getattr(block, "serialize", False):
         # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
         return None
-    if isinstance(block, TextBlock) and block.source == "messages":
+    if isinstance(block, TextBlock) and block.vendor == "messages":
         part = _native(block, "messages")
         part.update({"type": "text", "text": block.text})
         citations = [dict(citation.native) for citation in block.citations if citation.native]
@@ -82,7 +83,7 @@ def as_anthropic_part(block: ContentBlock) -> dict[str, Any] | None:
             part["citations"] = citations
         return part
     if isinstance(block, ThinkingBlock):
-        if block.source != "messages" or not block.signature:
+        if block.vendor != "messages" or not block.signature:
             return None
         part = _native(block, "messages")
         part.update({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
@@ -100,6 +101,18 @@ def as_anthropic_part(block: ContentBlock) -> dict[str, Any] | None:
         return part
     if isinstance(block, ServerToolBlock | VendorBlock):
         return _raw(block, "messages")
+    if isinstance(block, SearchResultBlock):
+        # 인용 설정은 요청 단위로 정하므로 Messages 어댑터가 ``citations``를 채운다.
+        part = _native(block, "messages")
+        part.update(
+            {
+                "type": "search_result",
+                "source": block.source,
+                "title": block.title,
+                "content": [{"type": "text", "text": chunk} for chunk in block.content],
+            }
+        )
+        return part
     if isinstance(block, ImageBlock):
         source = _anthropic_source(block.media_type, block.data, block.url)
         if source is None:
@@ -205,7 +218,7 @@ def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
         return None
     if (
         isinstance(block, TextBlock)
-        and block.source == "generate_content"
+        and block.vendor == "generate_content"
         and (block.signature or block.native)
     ):
         part = _native(block, "generate_content")
@@ -214,7 +227,7 @@ def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
             part["thoughtSignature"] = block.signature
         return part
     if isinstance(block, ThinkingBlock):
-        if block.source != "generate_content":
+        if block.vendor != "generate_content":
             return None
         part = _native(block, "generate_content")
         part.update({"text": block.thinking, "thought": True})
@@ -227,11 +240,11 @@ def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
             call["id"] = block.id
         part = _native(block, "generate_content")
         part["functionCall"] = call
-        if block.source == "generate_content" and block.signature:
+        if block.vendor == "generate_content" and block.signature:
             part["thoughtSignature"] = block.signature
         return part
     if isinstance(block, ServerToolBlock):
-        if block.source != "generate_content":
+        if block.vendor != "generate_content":
             return None
         return dict(block.native or block.raw) or None
     if isinstance(block, VendorBlock):
@@ -252,7 +265,7 @@ def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
             return part
         return None
     if isinstance(block, AudioBlock):
-        if block.source == "generate_content" and block.native and block.transcript is not None:
+        if block.vendor == "generate_content" and block.native and block.transcript is not None:
             part = _native(block, "generate_content")
             transcription = part.get("audioTranscription")
             if not isinstance(transcription, dict):

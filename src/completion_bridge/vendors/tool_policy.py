@@ -22,12 +22,12 @@ def can_replay_client_tool(
     target: str,
 ) -> bool:
     """Whether ``block`` can be serialized for ``target`` without changing its semantics."""
-    if block.source == target:
+    if block.vendor == target:
         return True
     if block.kind == "function":
         return True
     if block.kind == "custom":
-        return block.source in _OPENAI_WIRES and target in _OPENAI_WIRES
+        return block.vendor in _OPENAI_WIRES and target in _OPENAI_WIRES
     if block.kind == "mcp_approval":
         return target == "responses"
     return False
@@ -43,9 +43,9 @@ _BRAND = {
 }
 
 
-def virtual_tool_name(name: str, source: str | None) -> str:
+def virtual_tool_name(name: str, vendor: str | None) -> str:
     """벤더 브랜드 접두어를 붙인다. 대상 API의 실제 도구와 충돌하지 않는다."""
-    brand = _BRAND.get(source or "")
+    brand = _BRAND.get(vendor or "")
     if not brand or name.startswith(f"{brand}_"):
         return name
     return f"{brand}_{name}"
@@ -63,7 +63,7 @@ def to_portable(blocks: Sequence[ContentBlock], target: str) -> list[ContentBloc
     """
     out: list[ContentBlock] = []
     for block in blocks:
-        if isinstance(block, ServerToolBlock) and block.source not in (None, target):
+        if isinstance(block, ServerToolBlock) and block.vendor not in (None, target):
             pair = _virtual_pair(block)
             # 옮길 기록이 없으면 빈 쌍을 만들지 않는다. 원격 참조에 갇힌 결과가 그렇다.
             out.extend(pair)
@@ -79,7 +79,7 @@ def to_portable(blocks: Sequence[ContentBlock], target: str) -> list[ContentBloc
 
 def _as_function(block: ToolUseBlock | ToolResultBlock) -> ContentBlock:
     """환경 의존 client tool을 브랜드 접두어가 붙은 일반 함수 호출로 바꾼다."""
-    name = virtual_tool_name(block.name or block.kind, block.source)
+    name = virtual_tool_name(block.name or block.kind, block.vendor)
     return block.model_copy(update={"kind": "function", "name": name, "native": {}})
 
 
@@ -92,7 +92,7 @@ def _virtual_pair(block: ServerToolBlock) -> list[ContentBlock]:
         # 호출 인수도 결과도 없다. 원격 참조에 갇혀 옮길 내용이 없는 경우다.
         return []
     call_id = block.id or f"{block.name or 'server_tool'}_{block.index or 0}"
-    name = virtual_tool_name(block.name or "server_tool", block.source)
+    name = virtual_tool_name(block.name or "server_tool", block.vendor)
     use = ToolUseBlock(
         id=call_id,
         name=name,

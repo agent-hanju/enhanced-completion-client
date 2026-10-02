@@ -17,6 +17,7 @@ from .blocks import (
     DocumentBlock,
     GroundingBlock,
     ImageBlock,
+    SearchResultBlock,
     ServerToolBlock,
     TextBlock,
     ToolResultBlock,
@@ -97,9 +98,7 @@ class _Lowerer:
             replaced = vocabulary.lower(current)
             if replaced is not None:
                 current = list(replaced)
-        parts = [
-            self._lower_citations(b) for b in current if isinstance(b, TextBlock) and b.text
-        ]
+        parts = [self._lower_citations(b) for b in current if isinstance(b, TextBlock) and b.text]
         documents = self._lower_documents(current)
         attachments = self._lower_attachments(current)
         references = self._lower_references(current)
@@ -167,8 +166,9 @@ class _Lowerer:
             if isinstance(block, ImageBlock):
                 tag, media = "image", block.media_type
             elif isinstance(block, AudioBlock):
-                tag, media = "audio", block.media_type or (
-                    f"audio/{block.format}" if block.format else None
+                tag, media = (
+                    "audio",
+                    block.media_type or (f"audio/{block.format}" if block.format else None),
                 )
             else:
                 continue
@@ -212,12 +212,17 @@ class _Lowerer:
         않는다. 중복되지 않는다.
 
         문서를 본문보다 앞에 둔다. 네이티브 채널도 그 순서이고, 모델이 근거를 먼저 읽는다.
+
+        :class:`SearchResultBlock`도 같은 ``<documents>`` 묶음에 블록 순서대로 들어간다.
         """
-        documents = [b for b in blocks if isinstance(b, DocumentBlock)]
+        documents = [b for b in blocks if isinstance(b, DocumentBlock | SearchResultBlock)]
         if not documents:
             return ""
         rendered = "\n".join(
-            d.to_prompt(extracted=self._extract(d.media_type, d)) for d in documents
+            d.to_prompt(extracted=self._extract(d.media_type, d))
+            if isinstance(d, DocumentBlock)
+            else d.to_prompt()
+            for d in documents
         )
         return f"<documents>\n{rendered}\n</documents>"
 
@@ -435,9 +440,7 @@ class _BridgeBase:
         normalized_messages = [_coerce_message(m) for m in messages]
         _reject_remote_content_references(normalized_messages, self._vendor.name)
         normalized_messages = [
-            message.model_copy(
-                update={"content": to_portable(message.content, self._vendor.name)}
-            )
+            message.model_copy(update={"content": to_portable(message.content, self._vendor.name)})
             for message in normalized_messages
         ]
         request = HubRequest(
@@ -771,7 +774,7 @@ def _reject_remote_content_references(messages: Sequence[HubMessage], target: st
         return False
 
     def check(block: ContentBlock) -> None:
-        same_or_unscoped = block.source is None or block.source == target
+        same_or_unscoped = block.vendor is None or block.vendor == target
         if (
             same_or_unscoped
             and isinstance(block, ImageBlock | AudioBlock | DocumentBlock)
@@ -799,7 +802,7 @@ def _reject_remote_content_references(messages: Sequence[HubMessage], target: st
                     check(nested)
         if (
             isinstance(block, ServerToolBlock | VendorBlock)
-            and block.source == target
+            and block.vendor == target
             and (has_remote_key(block.raw) or has_remote_key(block.native))
         ):
             raise MappingError(

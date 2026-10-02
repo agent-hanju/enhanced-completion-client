@@ -32,6 +32,8 @@ DENSE_TOOL = ToolDefinition(
 
 ANSWER = "서울은 1000만이다."
 CITED = "1000만"
+
+
 # 인덱스를 손으로 세지 않는다. 문자열에서 찾아 쓰면 문구를 고쳐도 어긋나지 않는다.
 def dense_history() -> list[HubMessage]:
     """블록 여섯 종류를 실은 대화 이력.
@@ -54,7 +56,7 @@ def dense_history() -> list[HubMessage]:
         HubMessage(
             role="assistant",
             content=[
-                ThinkingBlock(thinking="표를 조회해야 한다.", source="prior"),
+                ThinkingBlock(thinking="표를 조회해야 한다.", vendor="prior"),
                 ToolUseBlock(id="c1", name="lookup", input_json='{"key":"서울"}'),
             ],
         ),
