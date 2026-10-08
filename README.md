@@ -88,6 +88,27 @@ async with Bridge(
 `complete()`는 내부적으로 스트림을 끝까지 소비해 병합된 `HubResponse`만 반환한다.
 요청을 보낼 땐 `HubMessage`를 사용하며, `build_request()`는 네트워크 요청 없이 각 벤더사에 보내지는 변환 형태를 확인할 때 사용한다.
 
+### 공통 벤더 설정
+
+모든 벤더는 `Bridge(vendor=..., base_url=..., model=..., api_key=...)`로 생성한다.
+Gemini도 어댑터에 모델이나 키를 미리 설정할 필요가 없다.
+
+```python
+from completion_bridge import Bridge
+from completion_bridge.vendors import generate_content
+
+bridge = Bridge(
+    vendor=generate_content,
+    base_url="https://generativelanguage.googleapis.com",
+    model="your-gemini-model",
+    api_key="...",
+)
+```
+
+Gemini의 URL 모델명과 `x-goog-api-key` 헤더는 내부에서 구성한다. 요청별 `model=`은
+스트리밍·완성·토큰 수 측정에 모두 적용되며 Bridge 기본값이나 공용 어댑터를 변경하지 않는다.
+`SyncBridge`도 같은 생성 인자를 사용한다.
+
 ### 동기 API
 
 ```python
@@ -723,3 +744,9 @@ uv build
 ```bash
 uv run pytest -m "live and not slow" -s
 ```
+
+### 요청·응답 로그
+
+`completion_bridge.wire.calls`와 `completion_bridge.wire.sse`의 DEBUG 로그로 실제 요청, SSE,
+최종 HubResponse를 기록할 수 있다. `stream()` / `complete()`의 선택적 `request_id`를 생략하면
+UUID4를 생성한다. [common-hitl-chat 파일 저장 설정](docs/Wire-Logging.md)을 참고한다.

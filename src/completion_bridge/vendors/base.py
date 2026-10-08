@@ -51,8 +51,10 @@ class VendorAdapter(Protocol):
     parameter_family: str
     """공통 Hyperparameters를 투영할 표준 API 계열 이름."""
 
-    path: str
-    """base_url에 붙일 경로."""
+    @property
+    def path(self) -> str:
+        """base_url에 붙일 경로. 읽기 전용 구현도 허용한다."""
+        ...
 
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
         """허브 요청을 이 벤더 API의 body로 만든다.

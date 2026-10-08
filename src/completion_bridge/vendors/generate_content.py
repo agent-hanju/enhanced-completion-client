@@ -10,8 +10,7 @@
 이름 붙은 SSE 이벤트를 쓰지 않는다. 종료 표지도 없다. ``finishReason``이 실린 프레임이
 마지막이다.
 
-경로에 모델명과 API key가 들어가므로 :attr:`path`가 요청마다 달라진다. 브리지가 고정 경로를
-쓰므로 어댑터를 모델별로 만든다.
+경로의 모델명은 Bridge가 요청별로 바인딩하고 API key는 헤더로 전달한다.
 """
 
 from __future__ import annotations
@@ -537,14 +536,13 @@ class _ToHub:
 class GenerateContentAdapter:
     """``POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse``.
 
-    경로에 모델명이 들어가므로 모델별로 어댑터를 만든다. ``for_model``이 그 일을 한다.
-
-    API key는 ``x-goog-api-key`` 헤더로 보낸다. ``Bridge(api_key=...)``는
-    ``Authorization: Bearer``를 쓰므로 이 어댑터는 자기 헤더를 따로 요구한다.
+    ``Bridge(vendor=generate_content, model=..., api_key=...)``로 사용한다.
+    Bridge가 ``for_model``로 모델을 바인딩하고 키를 ``x-goog-api-key`` 헤더로 보낸다.
     """
 
     name = SOURCE
     parameter_family = "generate_content"
+    api_key_header = "x-goog-api-key"
 
     def __init__(self, *, model: str = "", api_key: str = "", version: str = "v1beta") -> None:
         self.model = model
@@ -557,6 +555,7 @@ class GenerateContentAdapter:
         return f"/{self.version}/models/{model}:streamGenerateContent?alt=sse"
 
     def for_model(self, model: str, *, api_key: str = "") -> GenerateContentAdapter:
+        """원본을 변경하지 않고 모델을 바인딩한다. Bridge가 자동으로 호출한다."""
         return GenerateContentAdapter(
             model=model,
             api_key=api_key or self.api_key,
@@ -803,11 +802,13 @@ class GenerateContentAdapter:
         ``model``이 없는 ``generateContentRequest``를 거부한다.
 
         Raises:
-            ValueError: 어댑터에 모델이 없을 때. :meth:`for_model`로 만든 어댑터를 쓴다.
+            ValueError: 모델이 없을 때. Bridge의 ``model`` 또는 :meth:`for_model`로 지정한다.
             MappingError: 응답에 정수 ``totalTokens``가 없을 때.
         """
         if not self.model:
-            raise ValueError("generate_content token count needs a model; use for_model(model)")
+            raise ValueError(
+                "generate_content needs a model; set Bridge(model=...) or for_model(model)"
+            )
         payload = yield JsonCall(
             f"/{self.version}/models/{self.model}:countTokens",
             {"generateContentRequest": {"model": f"models/{self.model}", **body}},
@@ -819,4 +820,4 @@ class GenerateContentAdapter:
 
 
 generate_content = GenerateContentAdapter()
-"""기본 인스턴스. ``for_model(name, api_key=...)``로 대상을 지정한다."""
+"""기본 인스턴스. Bridge의 ``model``과 ``api_key``로 대상을 지정한다."""

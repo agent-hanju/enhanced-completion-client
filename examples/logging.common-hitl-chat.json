@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "bridge_json": {"()": "completion_bridge.wire_logging.JsonFormatter"}
+  },
+  "handlers": {
+    "bridge_calls": {
+      "class": "logging.handlers.RotatingFileHandler",
+      "level": "DEBUG",
+      "formatter": "bridge_json",
+      "filename": "logs/bridge-calls.jsonl",
+      "encoding": "utf-8",
+      "maxBytes": 20971520,
+      "backupCount": 5
+    },
+    "bridge_sse": {
+      "class": "logging.handlers.RotatingFileHandler",
+      "level": "DEBUG",
+      "formatter": "bridge_json",
+      "filename": "logs/bridge-sse.jsonl",
+      "encoding": "utf-8",
+      "maxBytes": 52428800,
+      "backupCount": 5
+    }
+  },
+  "loggers": {
+    "completion_bridge.wire": {
+      "level": "DEBUG",
+      "handlers": [],
+      "propagate": false
+    },
+    "completion_bridge.wire.calls": {
+      "level": "DEBUG",
+      "handlers": ["bridge_calls"],
+      "propagate": false
+    },
+    "completion_bridge.wire.sse": {
+      "level": "DEBUG",
+      "handlers": ["bridge_sse"],
+      "propagate": false
+    }
+  }
+}

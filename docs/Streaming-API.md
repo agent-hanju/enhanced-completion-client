@@ -67,6 +67,17 @@ bridge = Bridge(
 | `timeout` | `120.0`. 내부 HTTP client 생성 시 전달 |
 
 기본 헤더는 `Accept: text/event-stream`, `Content-Type: application/json`이다.
+`api_key`는 Chat Completions와 Responses에서는 `Authorization: Bearer ...`, Messages에서는
+`x-api-key`, Gemini에서는 `x-goog-api-key`로 전달한다. 인증 우선순위는 사용자 `headers`,
+Bridge의 비어 있지 않은 `api_key`, 기존 어댑터의 키 순이며 헤더 이름의 대소문자를 구분하지 않는다.
+
+Gemini도 `vendor=generate_content, model=..., api_key=...`로 생성한다. `for_model()`을
+직접 호출하거나 빈 키를 Bridge에 전달할 필요가 없다. Bridge는 모델별 경로를 사용하는
+어댑터의 선택적 `for_model(model) -> VendorAdapter` 계약으로 새 어댑터를 얻는다.
+이 메서드는 원본을 변경하지 않아야 한다. 기존 `for_model()` 호출 방식도 사용할 수 있다.
+`VendorAdapter.path`는 읽기 계약이므로 일반 속성과 읽기 전용 property 모두 허용한다.
+요청별 `model=`은 생성 경로와 토큰 수 측정 경로에 적용되며 기본 모델을 변경하지 않는다.
+
 브리지가 생성한 HTTP client는 브리지가 닫으며, 주입한 client의 수명은 호출자가 관리한다.
 주입 client에는 브리지의 `timeout`을 다시 적용하지 않는다. 스트림 재연결·재개·재전송은
 브리지 자체에서 구현하지 않는다.
@@ -486,3 +497,10 @@ partial = stream.partial
 - [test_token_count.py](../tests/test_token_count.py): 토큰 수 요청·응답 및 오류
 - [test_search_results.py](../tests/test_search_results.py): 검색 결과 변환·인용·중첩 JSON 복원
 - [변환 예제](Conversion-Examples.md): 벤더별 요청·raw event·HubResponse JSON
+
+## 요청 추적 로그
+
+`Bridge`와 `SyncBridge`의 `stream()` / `complete()`는 선택적 키워드 인자
+`request_id: str | None = None`을 받는다. 생략하면 UUID4를 생성하며 벤더 요청에는 전달하지 않는다.
+요청 JSON, SSE, 완료 HubResponse와 실패·취소를 전용 DEBUG 로거로 기록한다.
+[로그 계약과 파일 저장 설정](Wire-Logging.md)을 참고한다.

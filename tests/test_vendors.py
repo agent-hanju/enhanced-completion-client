@@ -645,7 +645,8 @@ class TestResponses:
 # =============================================================================
 
 GEMINI = generate_content.for_model("gemini-2.5-flash", api_key="k")
-GEMINI_URL = f"{BASE}{GEMINI.path}"
+# The shared Bridge helper selects model="m", overriding the adapter default.
+GEMINI_URL = f"{BASE}/v1beta/models/m:streamGenerateContent?alt=sse"
 
 
 class TestGenerateContent:

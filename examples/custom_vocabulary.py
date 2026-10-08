@@ -175,7 +175,7 @@ TARGETS: tuple[tuple[str, VendorAdapter], ...] = (
     ("Chat Completions", chat_completions),
     ("Anthropic Messages", messages),
     ("OpenAI Responses", responses),
-    ("Gemini GenerateContent", generate_content.for_model("gemini-example")),
+    ("Gemini GenerateContent", generate_content),
 )
 
 RAW_CHUNKS = (

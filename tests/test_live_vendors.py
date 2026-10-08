@@ -348,7 +348,8 @@ class TestGemini:
         base, model, key = GEMINI
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             bridge = Bridge(
-                vendor=generate_content.for_model(model, api_key=key),
+                vendor=generate_content,
+                api_key=key,
                 base_url=base,
                 model=model,
                 http_client=client,
@@ -362,7 +363,8 @@ class TestGemini:
         base, model, key = GEMINI
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             bridge = Bridge(
-                vendor=generate_content.for_model(model, api_key=key),
+                vendor=generate_content,
+                api_key=key,
                 base_url=base,
                 model=model,
                 http_client=client,
@@ -381,7 +383,8 @@ class TestGemini:
         web = ToolDefinition.native("generate_content", {"googleSearch": {}})
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             bridge = Bridge(
-                vendor=generate_content.for_model(model, api_key=key),
+                vendor=generate_content,
+                api_key=key,
                 base_url=base,
                 model=model,
                 http_client=client,
@@ -422,7 +425,8 @@ class TestCrossVendor:
             )
 
             gemini_bridge = Bridge(
-                vendor=generate_content.for_model(g_model, api_key=g_key),
+                vendor=generate_content,
+                api_key=g_key,
                 base_url=g_base,
                 model=g_model,
                 http_client=client,
@@ -484,7 +488,8 @@ class TestDenseInput:
         base, model, key = GEMINI
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             bridge = Bridge(
-                vendor=generate_content.for_model(model, api_key=key),
+                vendor=generate_content,
+                api_key=key,
                 base_url=base,
                 model=model,
                 vocabularies=[CiteVocabulary()],
@@ -574,7 +579,8 @@ class TestTokenCount:
         base, model, key = GEMINI
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             bridge = Bridge(
-                vendor=generate_content.for_model(model, api_key=key),
+                vendor=generate_content,
+                api_key=key,
                 base_url=base,
                 model=model,
                 http_client=client,

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import html
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
-from typing import Any
+from dataclasses import asdict
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
@@ -34,6 +35,7 @@ from .transport.sse import SseEvent
 from .vendors.base import VendorAdapter
 from .vendors.tool_policy import to_portable
 from .vocabulary import Vocabulary
+from .wire_logging import WireLog
 
 __all__ = ["AsyncStream", "Bridge", "SyncBridge", "SyncStream"]
 
@@ -261,6 +263,7 @@ class _StreamBase:
         self._merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
         self._finished = False
         self._closed = False
+        self._wire: WireLog | None = None
 
     @property
     def result(self) -> HubResponse:
@@ -288,6 +291,9 @@ class _StreamBase:
         종료라고 바로 버리면 그 둘을 잃는다. ``[DONE]``처럼 알맹이가 없는 표지는 ``decode``가
         ``None``을 돌려주므로 그냥 지나간다.
         """
+        if self._wire is not None:
+            self._wire.sequence += 1
+            self._wire.emit("sse", lambda: asdict(frame))
         if frame.is_comment_only:
             # 하트비트다. 흘려보낸다.
             return [], False
@@ -296,6 +302,23 @@ class _StreamBase:
         if chunk is None:
             return [], terminal
         return self._emit(self._pipeline.map(chunk)), terminal
+
+    def _log_start(self) -> None:
+        if self._wire is not None:
+            self._wire.start()
+
+    def _log_end(self, event: str, error: BaseException | None = None) -> None:
+        if self._wire is not None:
+            self._wire.finish(
+                event,
+                lambda: (
+                    self.result.model_dump(mode="json")
+                    if event == "response"
+                    else {"error_type": type(error).__name__}
+                    if error is not None
+                    else {}
+                ),
+            )
 
     def _finish(self) -> list[HubResponse]:
         return self._emit(self._pipeline.flush())
@@ -324,6 +347,7 @@ class AsyncStream(_StreamBase):
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[HubResponse]:
+        self._log_start()
         try:
             async for frame in self._frames:
                 deltas, terminal = self._process(frame)
@@ -334,6 +358,10 @@ class AsyncStream(_StreamBase):
             for delta in self._finish():
                 yield delta
             self._finished = True
+            self._log_end("response")
+        except BaseException as exc:
+            self._log_end("error" if isinstance(exc, Exception) else "cancelled", exc)
+            raise
         finally:
             await self._release()
 
@@ -348,6 +376,7 @@ class AsyncStream(_StreamBase):
         if self._closed:
             return
         self._closed = True
+        self._log_end("cancelled")
         aclose = getattr(self._frames, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -366,6 +395,7 @@ class SyncStream(_StreamBase):
         self._frames = frames
 
     def __iter__(self) -> Iterator[HubResponse]:
+        self._log_start()
         try:
             for frame in self._frames:
                 deltas, terminal = self._process(frame)
@@ -374,6 +404,10 @@ class SyncStream(_StreamBase):
                     break
             yield from self._finish()
             self._finished = True
+            self._log_end("response")
+        except BaseException as exc:
+            self._log_end("error" if isinstance(exc, Exception) else "cancelled", exc)
+            raise
         finally:
             self._release()
 
@@ -388,9 +422,17 @@ class SyncStream(_StreamBase):
         if self._closed:
             return
         self._closed = True
+        self._log_end("cancelled")
         close = getattr(self._frames, "close", None)
         if close is not None:
             close()
+
+
+@runtime_checkable
+class _ModelBindable(Protocol):
+    """모델별 경로가 필요한 어댑터의 선택적 계약. 원본을 변경하지 않는다."""
+
+    def for_model(self, model: str) -> VendorAdapter: ...
 
 
 class _BridgeBase:
@@ -409,7 +451,9 @@ class _BridgeBase:
         headers: Mapping[str, str] | None = None,
         timeout: float = 120.0,
     ) -> None:
-        self._vendor = vendor
+        self._vendor = (
+            vendor.for_model(model) if model and isinstance(vendor, _ModelBindable) else vendor
+        )
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
@@ -426,6 +470,14 @@ class _BridgeBase:
     @property
     def url(self) -> str:
         return f"{self._base_url}{self._vendor.path}"
+
+    def _request_vendor(self, model: str | None) -> VendorAdapter:
+        if model and isinstance(self._vendor, _ModelBindable):
+            return self._vendor.for_model(model)
+        return self._vendor
+
+    def _request_url(self, model: str | None) -> str:
+        return f"{self._base_url}{self._request_vendor(model).path}"
 
     def build_request(
         self,
@@ -462,21 +514,23 @@ class _BridgeBase:
         ``accept``는 ``Accept``의 기본값이다. 스트리밍 요청은 ``text/event-stream``, 토큰 수
         측정 요청은 ``application/json``을 쓴다.
         """
-        headers = {
-            "Accept": accept,
-            "Content-Type": "application/json",
-        }
+        headers = httpx.Headers(
+            {
+                "Accept": accept,
+                "Content-Type": "application/json",
+            }
+        )
         vendor_headers = getattr(self._vendor, "request_headers", None)
         if callable(vendor_headers):
             headers.update(vendor_headers())
-        headers.update(self._headers)
         if self._api_key:
             api_key_header = getattr(self._vendor, "api_key_header", "Authorization")
             if str(api_key_header).lower() == "authorization":
-                headers.setdefault("Authorization", f"Bearer {self._api_key}")
+                headers["Authorization"] = f"Bearer {self._api_key}"
             else:
-                headers.setdefault(str(api_key_header), self._api_key)
-        return headers
+                headers[str(api_key_header)] = self._api_key
+        headers.update(self._headers)
+        return dict(headers)
 
 
 class Bridge(_BridgeBase):
@@ -530,6 +584,7 @@ class Bridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
+        request_id: str | None = None,
         **params: Any,
     ) -> AsyncStream:
         """스트리밍 요청을 시작한다. 반환값을 ``async for``로 돌린다."""
@@ -541,9 +596,17 @@ class Bridge(_BridgeBase):
             **params,
         )
         frames = astream_sse(
-            self._get_client(), self.url, json=body, headers=self._request_headers()
+            self._get_client(), self._request_url(model), json=body, headers=self._request_headers()
         )
-        return AsyncStream(self._vendor, self._vocabularies, frames)
+        stream = AsyncStream(self._vendor, self._vocabularies, frames)
+        stream._wire = WireLog(
+            request_id,
+            self._vendor.name,
+            model or self._model,
+            self._request_url(model),
+            body,
+        )
+        return stream
 
     async def complete(
         self,
@@ -552,11 +615,13 @@ class Bridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
+        request_id: str | None = None,
         **params: Any,
     ) -> HubResponse:
         """스트림을 끝까지 돌려 병합 결과만 돌려준다."""
         stream = self.stream(
             messages,
+            request_id=request_id,
             tools=tools,
             model=model,
             hyperparameters=hyperparameters,
@@ -594,7 +659,7 @@ class Bridge(_BridgeBase):
         )
         client = self._get_client()
         headers = self._request_headers(accept="application/json")
-        calls = self._vendor.token_count_calls(body)
+        calls = self._request_vendor(model).token_count_calls(body)
         try:
             call = next(calls)
             while True:
@@ -665,6 +730,7 @@ class SyncBridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
+        request_id: str | None = None,
         **params: Any,
     ) -> SyncStream:
         body = self.build_request(
@@ -675,9 +741,17 @@ class SyncBridge(_BridgeBase):
             **params,
         )
         frames = stream_sse(
-            self._get_client(), self.url, json=body, headers=self._request_headers()
+            self._get_client(), self._request_url(model), json=body, headers=self._request_headers()
         )
-        return SyncStream(self._vendor, self._vocabularies, frames)
+        stream = SyncStream(self._vendor, self._vocabularies, frames)
+        stream._wire = WireLog(
+            request_id,
+            self._vendor.name,
+            model or self._model,
+            self._request_url(model),
+            body,
+        )
+        return stream
 
     def complete(
         self,
@@ -686,10 +760,12 @@ class SyncBridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
+        request_id: str | None = None,
         **params: Any,
     ) -> HubResponse:
         stream = self.stream(
             messages,
+            request_id=request_id,
             tools=tools,
             model=model,
             hyperparameters=hyperparameters,
@@ -718,7 +794,7 @@ class SyncBridge(_BridgeBase):
         )
         client = self._get_client()
         headers = self._request_headers(accept="application/json")
-        calls = self._vendor.token_count_calls(body)
+        calls = self._request_vendor(model).token_count_calls(body)
         try:
             call = next(calls)
             while True:
