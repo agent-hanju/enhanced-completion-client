@@ -229,6 +229,7 @@ class TestAsyncStreaming:
         usage = (await bridge.complete(["hi"])).usage
         assert usage is not None
         assert (usage.input_tokens, usage.output_tokens) == (7, 2)
+        assert usage.native == {"prompt_tokens": 7, "completion_tokens": 2}
         await bridge.aclose()
 
     @respx.mock

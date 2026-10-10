@@ -530,7 +530,7 @@ class _ToHub:
             fields["input_tokens"] = raw["promptTokenCount"]
         if isinstance(raw.get("candidatesTokenCount"), int):
             fields["output_tokens"] = raw["candidatesTokenCount"]
-        return Usage(**fields) if fields else None
+        return Usage(**fields, native=dict(raw))
 
 
 class GenerateContentAdapter:

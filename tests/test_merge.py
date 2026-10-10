@@ -110,6 +110,17 @@ class TestNested:
         assert usage is not None
         assert (usage.input_tokens, usage.output_tokens) == (10, 4)
 
+    def test_native_usage_merges_by_key_and_keeps_the_first_delta(self) -> None:
+        first = HubResponse(usage=Usage(native={"input_tokens": 10, "output_tokens": 1}))
+        merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+        merger.apply(first)
+        merger.apply(HubResponse(usage=Usage(native={"output_tokens": 4, "cache": {"read": 2}})))
+        usage = merger.build().usage
+        assert usage is not None
+        assert usage.native == {"input_tokens": 10, "output_tokens": 4, "cache": {"read": 2}}
+        assert first.usage is not None
+        assert first.usage.native == {"input_tokens": 10, "output_tokens": 1}
+
 
 class TestHubResponse:
     def test_text_blocks_accumulate_into_one_block(self) -> None:

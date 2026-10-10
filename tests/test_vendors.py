@@ -161,6 +161,7 @@ class TestMessages:
         usage = (await make(messages).complete(["x"])).usage
         assert usage is not None
         assert (usage.input_tokens, usage.output_tokens) == (12, 5)
+        assert usage.native == {"input_tokens": 12, "output_tokens": 5}
 
     @respx.mock
     async def test_thinking_and_signature(self) -> None:
@@ -409,6 +410,7 @@ class TestResponses:
         assert result.stop_reason == "end_turn"
         assert result.usage is not None
         assert (result.usage.input_tokens, result.usage.output_tokens) == (3, 4)
+        assert result.usage.native == {"input_tokens": 3, "output_tokens": 4}
 
     @respx.mock
     async def test_two_content_parts_in_one_item_stay_separate(self) -> None:
@@ -685,6 +687,7 @@ class TestGenerateContent:
         assert result.stop_reason == "end_turn"
         assert result.usage is not None
         assert (result.usage.input_tokens, result.usage.output_tokens) == (5, 2)
+        assert result.usage.native == {"promptTokenCount": 5, "candidatesTokenCount": 2}
 
     @respx.mock
     async def test_thought_flag_splits_the_same_field(self) -> None:

@@ -190,6 +190,9 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 
 `Usage.input_tokens`, `Usage.output_tokens`는 각각 `int | None`이고 기본값은 `None`이다.
 이 두 필드는 합산하지 않고 최신 값으로 덮는다. 벤더 확장 필드도 보존할 수 있다.
+`Usage.native`(`dict[str, Any] | None`)는 벤더가 보낸 usage 객체 원본이다. 캐시·추론 토큰 같은
+세부 항목도 그대로 두며, 스트림 조각마다 온 원본을 최상위 key 단위로 합친다. 같은 key는 나중
+조각의 값이 대신한다.
 `HubRequest`, `HubMessage`, `HubResponse`, `Usage`는 선언 외 필드를 허용한다.
 
 `response.text`는 `TextBlock.text`만 이어 붙인 편의 속성이다. 추론, 도구 인수,

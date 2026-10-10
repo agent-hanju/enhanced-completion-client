@@ -234,6 +234,7 @@ class _ToHub:
         return Usage(
             input_tokens=raw.get("prompt_tokens"),
             output_tokens=raw.get("completion_tokens"),
+            native=dict(raw),
         )
 
 

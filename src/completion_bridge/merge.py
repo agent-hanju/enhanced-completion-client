@@ -173,7 +173,11 @@ class StreamMerger[M: BaseModel]:
         acc[name] = self._combine(acc[name], value, field)
 
     def _seed(self, field: FieldInfo, value: Any) -> Any:
-        """처음 등장한 값을 누적 형태로 바꾼다."""
+        """처음 등장한 값을 누적 형태로 바꾼다.
+
+        dict는 얕게 복사한다. 뒤 조각을 합칠 때 누적 상태를 고치므로, 복사하지 않으면 이미
+        소비자에게 넘어간 델타의 값이 바뀐다.
+        """
         if isinstance(value, BaseModel):
             nested: dict[str, Any] = {}
             self._merge_model(nested, value)
@@ -182,6 +186,8 @@ class StreamMerger[M: BaseModel]:
             seeded: list[Any] = []
             self._extend_list(seeded, value)
             return seeded
+        if isinstance(value, dict):
+            return dict(value)
         return value
 
     def _replace(self, _current: Any, value: Any) -> Any:

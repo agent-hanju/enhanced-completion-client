@@ -368,7 +368,11 @@
   "stop_reason": "tool_use",
   "usage": {
     "input_tokens": 12,
-    "output_tokens": 24
+    "output_tokens": 24,
+    "native": {
+      "input_tokens": 12,
+      "output_tokens": 24
+    }
   }
 }</pre></td></tr>
 </table>
@@ -666,7 +670,11 @@
   "stop_reason": "end_turn",
   "usage": {
     "input_tokens": 12,
-    "output_tokens": 24
+    "output_tokens": 24,
+    "native": {
+      "input_tokens": 12,
+      "output_tokens": 24
+    }
   }
 }</pre></td></tr>
 </table>
@@ -928,7 +936,11 @@
   "stop_reason": "end_turn",
   "usage": {
     "input_tokens": 12,
-    "output_tokens": 24
+    "output_tokens": 24,
+    "native": {
+      "promptTokenCount": 12,
+      "candidatesTokenCount": 24
+    }
   }
 }</pre></td></tr>
 </table>
@@ -1974,7 +1986,11 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
   "stop_reason": "end_turn",
   "usage": {
     "input_tokens": 18,
-    "output_tokens": 12
+    "output_tokens": 12,
+    "native": {
+      "prompt_tokens": 18,
+      "completion_tokens": 12
+    }
   }
 }</pre></td></tr>
 </table>
@@ -2444,7 +2460,11 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
   "stop_reason": "end_turn",
   "usage": {
     "input_tokens": 18,
-    "output_tokens": 32
+    "output_tokens": 32,
+    "native": {
+      "input_tokens": 18,
+      "output_tokens": 32
+    }
   }
 }</pre></td></tr>
 </table>
@@ -2962,7 +2982,11 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
   "stop_reason": "end_turn",
   "usage": {
     "input_tokens": 18,
-    "output_tokens": 32
+    "output_tokens": 32,
+    "native": {
+      "input_tokens": 18,
+      "output_tokens": 32
+    }
   }
 }</pre></td></tr>
 </table>
@@ -3543,7 +3567,11 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
   "stop_reason": "end_turn",
   "usage": {
     "input_tokens": 18,
-    "output_tokens": 32
+    "output_tokens": 32,
+    "native": {
+      "promptTokenCount": 18,
+      "candidatesTokenCount": 32
+    }
   }
 }</pre></td></tr>
 </table>

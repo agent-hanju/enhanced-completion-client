@@ -313,7 +313,7 @@ class _ToHub:
             fields["input_tokens"] = raw["input_tokens"]
         if isinstance(raw.get("output_tokens"), int):
             fields["output_tokens"] = raw["output_tokens"]
-        return Usage(**fields) if fields else None
+        return Usage(**fields, native=dict(raw))
 
 
 class MessagesAdapter:

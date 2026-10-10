@@ -36,6 +36,13 @@ class Usage(BaseModel):
 
     input_tokens: int | None = Field(default=None, json_schema_extra=_overwrite())
     output_tokens: int | None = Field(default=None, json_schema_extra=_overwrite())
+    native: dict[str, Any] | None = None
+    """벤더가 보낸 usage 객체 원본. 캐시·추론 토큰 같은 세부 항목도 그대로 둔다.
+
+    스트림 조각마다 온 원본은 최상위 key 단위로 합친다. 같은 key는 나중 조각의 값이 대신한다.
+    Anthropic Messages의 ``message_start``와 ``message_delta``, Gemini의 누적 ``usageMetadata``가
+    이렇게 합쳐진다.
+    """
 
 
 class HubResponse(BaseModel):
