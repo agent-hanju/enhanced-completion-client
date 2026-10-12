@@ -311,7 +311,7 @@ vLLM `ChatCompletionRequest`가 OpenAI 표준에 더해 선언하는 필드다. 
 
 | 계열 | 필드 |
 |---|---|
-| 샘플링 | `min_p`, `repetition_penalty`, `length_penalty`, `use_beam_search`, `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output`, `allowed_token_ids`, `bad_words`, `prompt_logprobs`, `skip_special_tokens`, `spaces_between_special_tokens`, `truncate_prompt_tokens`, `truncation_side` |
+| 샘플링 | `min_p`, `repetition_penalty`, `length_penalty`, `use_beam_search`, `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output`, `allowed_token_ids`, `bad_words`, `prompt_logprobs`, `skip_special_tokens`, `spaces_between_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `thinking_token_budget` |
 | 채팅 템플릿 | `chat_template`, `chat_template_kwargs`, `add_generation_prompt`, `continue_final_message`, `add_special_tokens`, `echo` |
 | 멀티모달 처리 | `media_io_kwargs`, `mm_processor_kwargs` |
 | 구조화 출력 | `structured_outputs` |

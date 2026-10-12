@@ -106,6 +106,13 @@ class TestOwnership:
         assert gem["safetySettings"] == [{"category": "HARM_CATEGORY_HATE_SPEECH"}]
         assert "inference_geo" not in gem
 
+    def test_thinking_token_budget_reaches_only_vllm(self) -> None:
+        params = Hyperparameters(thinking_token_budget=512)
+        assert body(VLLM, params)["thinking_token_budget"] == 512
+        assert "thinking_token_budget" not in body(responses, params)
+        assert "thinking_token_budget" not in body(messages, params)
+        assert "thinking_token_budget" not in body(GEMINI, params)
+
     def test_same_wire_name_different_contract_is_split(self) -> None:
         """``service_tier``와 ``logprobs``는 값 계약이 달라 접두어로 나뉜다."""
         params = Hyperparameters(

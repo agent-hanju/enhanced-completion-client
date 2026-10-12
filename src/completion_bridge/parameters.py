@@ -101,6 +101,7 @@ _VLLM_ONLY = (
     "spaces_between_special_tokens",
     "truncate_prompt_tokens",
     "truncation_side",
+    "thinking_token_budget",
     # vLLM extra
     "chat_template",
     "chat_template_kwargs",
@@ -237,6 +238,7 @@ class Hyperparameters(BaseModel):
     spaces_between_special_tokens: bool | None = None
     truncate_prompt_tokens: int | None = None
     truncation_side: Literal["left", "right"] | None = None
+    thinking_token_budget: int | None = None
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     add_generation_prompt: bool | None = None
