@@ -102,6 +102,7 @@ _VLLM_ONLY = (
     "truncate_prompt_tokens",
     "truncation_side",
     "thinking_token_budget",
+    "repetition_detection",
     # vLLM extra
     "chat_template",
     "chat_template_kwargs",
@@ -116,6 +117,8 @@ _VLLM_ONLY = (
     "priority",
     "request_id",
     "return_tokens_as_token_ids",
+    "include_reasoning",
+    "stream_interval",
 )
 
 _RESPONSES_ONLY = (
@@ -239,6 +242,7 @@ class Hyperparameters(BaseModel):
     truncate_prompt_tokens: int | None = None
     truncation_side: Literal["left", "right"] | None = None
     thinking_token_budget: int | None = None
+    repetition_detection: dict[str, Any] | None = None
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     add_generation_prompt: bool | None = None
@@ -252,6 +256,8 @@ class Hyperparameters(BaseModel):
     priority: int | None = None
     request_id: str | None = None
     return_tokens_as_token_ids: bool | None = None
+    include_reasoning: bool | None = None
+    stream_interval: int | None = None
 
     # ---- OpenAI Responses ----
     background: bool | None = None

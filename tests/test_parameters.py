@@ -113,6 +113,22 @@ class TestOwnership:
         assert "thinking_token_budget" not in body(messages, params)
         assert "thinking_token_budget" not in body(GEMINI, params)
 
+    def test_vllm_generation_controls_reach_only_vllm(self) -> None:
+        """``include_reasoning=False``는 None이 아니므로 빠지지 않는다."""
+        detection = {"max_pattern_size": 20, "min_count": 3}
+        params = Hyperparameters(
+            include_reasoning=False,
+            repetition_detection=detection,
+            stream_interval=4,
+        )
+        chat = body(VLLM, params)
+        assert chat["include_reasoning"] is False
+        assert chat["repetition_detection"] == detection
+        assert chat["stream_interval"] == 4
+        controls = {"include_reasoning", "repetition_detection", "stream_interval"}
+        for other in (body(responses, params), body(messages, params), body(GEMINI, params)):
+            assert not controls & other.keys()
+
     def test_same_wire_name_different_contract_is_split(self) -> None:
         """``service_tier``와 ``logprobs``는 값 계약이 달라 접두어로 나뉜다."""
         params = Hyperparameters(

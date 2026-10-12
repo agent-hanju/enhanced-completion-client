@@ -311,12 +311,12 @@ vLLM `ChatCompletionRequest`가 OpenAI 표준에 더해 선언하는 필드다. 
 
 | 계열 | 필드 |
 |---|---|
-| 샘플링 | `min_p`, `repetition_penalty`, `length_penalty`, `use_beam_search`, `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output`, `allowed_token_ids`, `bad_words`, `prompt_logprobs`, `skip_special_tokens`, `spaces_between_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `thinking_token_budget` |
+| 샘플링 | `min_p`, `repetition_penalty`, `length_penalty`, `use_beam_search`, `min_tokens`, `ignore_eos`, `stop_token_ids`, `include_stop_str_in_output`, `allowed_token_ids`, `bad_words`, `prompt_logprobs`, `skip_special_tokens`, `spaces_between_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `thinking_token_budget`, `repetition_detection` |
 | 채팅 템플릿 | `chat_template`, `chat_template_kwargs`, `add_generation_prompt`, `continue_final_message`, `add_special_tokens`, `echo` |
 | 멀티모달 처리 | `media_io_kwargs`, `mm_processor_kwargs` |
 | 구조화 출력 | `structured_outputs` |
 | RAG | `documents` |
-| 운영 | `priority`, `request_id`, `return_tokens_as_token_ids` |
+| 운영 | `priority`, `request_id`, `return_tokens_as_token_ids`, `include_reasoning`, `stream_interval` |
 
 `chat_template_kwargs`는 **body 최상위 정식 필드**다. OpenAI SDK를 쓸 때 `extra_body`로 감싸는
 것은 SDK가 미선언 필드를 통과시키는 방법일 뿐이고, 이 패키지는 wire body를 직접 만들므로 감쌀
