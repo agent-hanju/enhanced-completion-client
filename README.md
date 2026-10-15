@@ -759,3 +759,13 @@ UUID4를 생성한다. [common-hitl-chat 파일 저장 설정](docs/Wire-Logging
 `apply(chunk)` 후 `build()`를 호출하면 API별 `ChatCompletionsResponse`, `ResponsesResponse`,
 `MessagesResponse`, `GenerateContentResponse` 객체를 얻는다. 주요 하위 구조도 타입 객체로
 제공한다. [원본 Response 객체와 SSE 사용 예제](docs/Streaming-API.md#원본-response-객체)를 참고한다.
+
+
+## 모델·도구 반복 실행
+
+`CompletionRuntime`은 기존 `Bridge`로 모델 호출과 도구 실행을 반복한다.
+승인 필요 시 기록을 반환하고 종료하며, `Run.tasks`의 `HitlTask`로 일반 호출과
+백그라운드 작업의 기록·완료 대기·취소를 제공한다. 자식 에이전트와 도구 호출 제한,
+도구 결과의 최종 답변 대체도 지원한다.
+
+실행기·정책 정의와 스트림 자원 정리는 [Completion Runtime](docs/Completion-Runtime.md)을 참고한다.

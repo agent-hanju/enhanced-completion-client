@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from .agent import AgentToolExecutor
 from .blocks import (
     AnnotationBlock,
     AudioBlock,
@@ -69,6 +70,24 @@ from .parameters import (
     ResponseFormat,
     ToolChoice,
 )
+from .runtime import (
+    CompletionRuntime,
+    HitlTask,
+    Run,
+    RuntimeCancelled,
+    RuntimeErrorWithPartial,
+    RuntimeExecution,
+)
+from .runtime_models import (
+    Execution,
+    HitlDecision,
+    HitlDraft,
+    PolicyEvaluator,
+    ToolCall,
+    ToolExecutor,
+    ToolOutput,
+    ToolPolicy,
+)
 from .transport.sse import SseEvent, SseParser
 from .vendors.base import Lowerer, NativeAccumulator, VendorAdapter
 from .vocabularies import CiteVocabulary, cite_schema
@@ -77,6 +96,21 @@ from .vocabulary import Vocabulary
 __version__ = "0.4.1"
 
 __all__ = [
+    "AgentToolExecutor",
+    "CompletionRuntime",
+    "HitlTask",
+    "Run",
+    "RuntimeCancelled",
+    "RuntimeErrorWithPartial",
+    "RuntimeExecution",
+    "Execution",
+    "HitlDecision",
+    "HitlDraft",
+    "PolicyEvaluator",
+    "ToolCall",
+    "ToolExecutor",
+    "ToolOutput",
+    "ToolPolicy",
     "AnnotationBlock",
     "AsyncStream",
     "AudioBlock",
