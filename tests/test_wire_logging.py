@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from completion_bridge import Bridge, SyncBridge
-from completion_bridge.vendors import chat_completions
+from completion_bridge.vendors import chat_completions, messages
 
 PAYLOAD = 'data: {"choices":[{"delta":{"content":"hello"}}]}\n\ndata: [DONE]\n\n'
 
@@ -43,7 +43,11 @@ async def test_wire_records(caplog, sync, request_id):
         assert records[0]["request_id"] == request_id
     assert records[1]["payload"]["data"] == '{"choices":[{"delta":{"content":"hello"}}]}'
     assert records[2]["sequence"] == 2
-    assert records[-1]["payload"] == result.model_dump(mode="json")
+    assert result.text == "hello"
+    assert records[-1]["payload"] == {
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"content": "hello"}}],
+    }
 
 
 @pytest.mark.parametrize("sync", [True, False])
@@ -127,6 +131,77 @@ def test_disabled_logging_skips_payload(monkeypatch):
         raise AssertionError("must not serialize disabled logs")
 
     wire.finish("response", payload)
+
+
+def test_merge_failure_is_logged_without_breaking_completion(caplog):
+    """허브 변환은 받아들이지만 원본 누적 규약에 맞지 않는 스트림은 merge_error로 남는다."""
+    caplog.set_level(logging.DEBUG, logger="completion_bridge.wire")
+    # content_block_start 없이 index 0의 delta가 온다.
+    payload = (
+        'event: message_start\ndata: {"type":"message_start","message":'
+        '{"id":"msg_1","role":"assistant","content":[]}}\n\n'
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+        '"delta":{"type":"text_delta","text":"hello"}}\n\n'
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, text=payload))
+    with httpx.Client(transport=transport) as client:
+        result = SyncBridge(vendor=messages, base_url="https://test", http_client=client).complete(
+            ["hi"]
+        )
+    assert result.text == "hello"
+    records = []
+    for record in caplog.records:
+        if hasattr(record, "wire") and record.name == "completion_bridge.wire.calls":
+            records.append(record.wire)
+    assert records[-1]["event"] == "merge_error"
+    assert records[-1]["payload"] == {
+        "error_type": "MappingError",
+        "message": "messages content_block_delta references unstarted 0",
+    }
+
+
+def test_disabled_calls_logging_skips_accumulation(monkeypatch):
+    def forbidden():
+        raise AssertionError("must not accumulate when call logging is disabled")
+
+    monkeypatch.setattr(logging.Logger, "isEnabledFor", lambda self, level: False)
+    monkeypatch.setattr(chat_completions, "to_native", forbidden)
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, text=PAYLOAD))
+    with httpx.Client(transport=transport) as client:
+        result = SyncBridge(
+            vendor=chat_completions, base_url="https://test", http_client=client
+        ).complete(["hi"])
+    assert result.text == "hello"
+
+
+@pytest.mark.parametrize("sync", [True, False])
+async def test_response_model_validation_failure_does_not_break_completion(caplog, sync):
+    """원본 응답 타입 검증 실패는 생성 결과 대신 merge_error 기록에만 영향을 준다."""
+    caplog.set_level(logging.DEBUG, logger="completion_bridge.wire.calls")
+    chunk = {
+        "choices": [{"index": 0, "delta": {"content": "hello"}}],
+        "usage": {"prompt_tokens": "3"},
+    }
+    payload = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n"
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text=payload))
+    if sync:
+        with httpx.Client(transport=transport) as client:
+            result = SyncBridge(
+                vendor=chat_completions, base_url="https://test", http_client=client
+            ).complete(["hi"])
+    else:
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await Bridge(
+                vendor=chat_completions, base_url="https://test", http_client=client
+            ).complete(["hi"])
+    assert result.text == "hello"
+    records = []
+    for record in caplog.records:
+        if hasattr(record, "wire"):
+            records.append(record.wire)
+    assert records[-1]["event"] == "merge_error"
+    assert records[-1]["payload"]["error_type"] == "ValidationError"
 
 
 def test_broken_handler_does_not_break_completion():

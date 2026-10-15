@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -577,20 +578,36 @@ class TestAnthropicReplay:
             },
             {"type": "container_upload", "file_id": "file_1"},
         ]
+        events: list[dict[str, Any]] = [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_results",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude",
+                    "content": [],
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            }
+        ]
+        for index in range(len(blocks)):
+            events.append(
+                {"type": "content_block_start", "index": index, "content_block": blocks[index]}
+            )
+            events.append({"type": "content_block_stop", "index": index})
+        events.append(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 0},
+            }
+        )
+        events.append({"type": "message_stop"})
         respx.post(f"{BASE}/v1/messages").mock(
             return_value=httpx.Response(
                 200,
-                content=sse(
-                    *[
-                        {
-                            "type": "content_block_start",
-                            "index": index,
-                            "content_block": block,
-                        }
-                        for index, block in enumerate(blocks)
-                    ],
-                    {"type": "message_stop"},
-                ),
+                content=sse(*events),
             )
         )
         bridge = Bridge(
@@ -624,6 +641,19 @@ class TestAnthropicReplay:
                 200,
                 content=sse(
                     {
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_fixture",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": "claude",
+                            "content": [],
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {"input_tokens": 0, "output_tokens": 0},
+                        },
+                    },
+                    {
                         "type": "content_block_start",
                         "index": 0,
                         "content_block": {"type": "text", "text": ""},
@@ -637,6 +667,12 @@ class TestAnthropicReplay:
                         "type": "content_block_delta",
                         "index": 0,
                         "delta": {"type": "citations_delta", "citation": citation},
+                    },
+                    {"type": "content_block_stop", "index": 0},
+                    {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                        "usage": {"output_tokens": 0},
                     },
                     {"type": "message_stop"},
                 ),
@@ -659,7 +695,30 @@ class TestAnthropicReplay:
     async def test_mcp_beta_header_is_opt_in(self) -> None:
         adapter = MessagesAdapter(betas=["mcp-client-2025-11-20"])
         route = respx.post(f"{BASE}/v1/messages").mock(
-            return_value=httpx.Response(200, content=sse({"type": "message_stop"}))
+            return_value=httpx.Response(
+                200,
+                content=sse(
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_fixture",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": "claude",
+                            "content": [],
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {"input_tokens": 0, "output_tokens": 0},
+                        },
+                    },
+                    {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                        "usage": {"output_tokens": 0},
+                    },
+                    {"type": "message_stop"},
+                ),
+            )
         )
         bridge = Bridge(
             vendor=adapter,

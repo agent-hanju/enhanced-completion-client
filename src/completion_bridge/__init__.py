@@ -58,17 +58,23 @@ from .hub import (
 )
 from .mapper import StreamMapper, compose, identity_mapper
 from .merge import StreamMerger
+from .native import (
+    ChatCompletionsResponse,
+    GenerateContentResponse,
+    MessagesResponse,
+    ResponsesResponse,
+)
 from .parameters import (
     Hyperparameters,
     ResponseFormat,
     ToolChoice,
 )
 from .transport.sse import SseEvent, SseParser
-from .vendors.base import Lowerer, VendorAdapter
+from .vendors.base import Lowerer, NativeAccumulator, VendorAdapter
 from .vocabularies import CiteVocabulary, cite_schema
 from .vocabulary import Vocabulary
 
-__version__ = "0.3.4"
+__version__ = "0.4.0"
 
 __all__ = [
     "AnnotationBlock",
@@ -76,6 +82,7 @@ __all__ = [
     "AudioBlock",
     "Block",
     "Bridge",
+    "ChatCompletionsResponse",
     "Citation",
     "CitationBlock",
     "CiteVocabulary",
@@ -91,12 +98,16 @@ __all__ = [
     "GroundingBlock",
     "GroundingSource",
     "GroundingSupport",
+    "GenerateContentResponse",
     "ImageBlock",
     "Lowerer",
     "ExtractionError",
     "MappingError",
+    "NativeAccumulator",
+    "MessagesResponse",
     "ParseEvent",
     "SearchResultBlock",
+    "ResponsesResponse",
     "ServerToolBlock",
     "SseEvent",
     "SseParser",

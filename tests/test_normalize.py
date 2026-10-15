@@ -128,8 +128,26 @@ class TestStopReasonVocabulary:
                 200,
                 content=sse(
                     (
+                        "message_start",
+                        {
+                            "type": "message_start",
+                            "message": {
+                                "id": "msg_stop",
+                                "type": "message",
+                                "role": "assistant",
+                                "model": "claude",
+                                "content": [],
+                                "usage": {"input_tokens": 0, "output_tokens": 0},
+                            },
+                        },
+                    ),
+                    (
                         "message_delta",
-                        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+                        {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                            "usage": {"output_tokens": 0},
+                        },
                     ),
                     ("message_stop", {"type": "message_stop"}),
                 ),

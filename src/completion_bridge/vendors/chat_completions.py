@@ -13,6 +13,8 @@ import json
 from collections.abc import Generator
 from typing import Any
 
+from pydantic import BaseModel
+
 from ..blocks import (
     AnnotationBlock,
     AudioBlock,
@@ -37,9 +39,15 @@ from ..hub import (
     Usage,
 )
 from ..mapper import StreamMapper
+from ..native import (
+    ChatCompletionsChoice,
+    ChatCompletionsMessage,
+    ChatCompletionsResponse,
+    ChatCompletionsToolCall,
+)
 from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer
+from .base import JsonCall, Lowerer, NativeAccumulator
 from .normalize import REFUSAL_PREFIX, stop_reason_from_chat
 from .parts import as_chat_completions_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -49,6 +57,9 @@ __all__ = ["ChatCompletionsAdapter", "chat_completions"]
 DONE = "[DONE]"
 
 _RESERVED = frozenset({"model", "messages", "tools", "stream"})
+
+# 원본 응답 누적에서 조각마다 같은 값이 다시 올 수 있는 식별 필드. 연결하지 않고 나중 값을 쓴다.
+_REPLACED_FIELDS = frozenset({"index", "type", "role", "finish_reason", "stop_reason"})
 
 
 class _ToHub:
@@ -238,6 +249,158 @@ class _ToHub:
         )
 
 
+def _merge_value(target: BaseModel | dict[str, Any], key: str, value: Any) -> None:
+    """chunk 필드 하나를 누적 중인 객체의 같은 ``key``에 반영한다.
+
+    객체와 리스트는 첫 값부터 재귀 병합해 같은 index의 조각을 누적한다. ``None``은 기존 값을
+    유지하고 :data:`_REPLACED_FIELDS`는 나중 값을 쓴다. 문자열 조각은 연결하고 숫자는 합산한다.
+    객체는 key별로 재귀 반영하고 리스트는 :func:`_merge_items`로 반영한다. 그 밖의 값은 나중
+    값으로 바꾼다.
+    """
+    if isinstance(target, BaseModel):
+        present = key in target.model_fields_set or key in (target.model_extra or {})
+        current = getattr(target, key, None)
+    else:
+        present = key in target
+        current = target.get(key)
+    if not present or current is None:
+        # 첫 chunk 안에도 같은 tool index의 조각이 여러 개 있을 수 있다.
+        if isinstance(value, dict):
+            initial: Any = {}
+        elif isinstance(value, list):
+            initial = []
+        else:
+            initial = value
+        if isinstance(target, BaseModel):
+            setattr(target, key, initial)
+            current = getattr(target, key)
+        else:
+            target[key] = initial
+            current = initial
+        if not isinstance(value, (dict, list)):
+            return
+    if value is None:
+        return
+    if current is None or key in _REPLACED_FIELDS:
+        merged = value
+    elif isinstance(current, str) and isinstance(value, str):
+        merged = current + value
+    elif isinstance(current, (int, float)) and isinstance(value, (int, float)):
+        merged = current + value
+    elif isinstance(current, (BaseModel, dict)) and isinstance(value, dict):
+        for field in value:
+            _merge_value(current, field, value[field])
+        return
+    elif isinstance(current, list) and isinstance(value, list):
+        typed_tools = isinstance(target, ChatCompletionsMessage) and key == "tool_calls"
+        _merge_items(current, value, typed_tools=typed_tools)
+        return
+    else:
+        merged = value
+    if isinstance(target, BaseModel):
+        setattr(target, key, merged)
+    else:
+        target[key] = merged
+
+
+def _merge_items(current: list[Any], items: list[Any], *, typed_tools: bool = False) -> None:
+    """리스트 조각의 원소를 누적 중인 리스트에 반영한다.
+
+    정수 ``index``를 가진 객체는 같은 ``index``의 기존 객체에 :func:`_merge_value`로 반영한다.
+    같은 ``index``의 객체가 없거나 ``index``가 없는 원소는 끝에 추가한다. ``tool_calls``가 앞의
+    경우이고 ``logprobs.content``가 뒤의 경우다. ``typed_tools``이면 새 항목을
+    :class:`ChatCompletionsToolCall` 객체로 만든다.
+    """
+    for item in items:
+        if typed_tools and not isinstance(item, dict):
+            raise MappingError("chat completions tool call must be a JSON object")
+        existing: BaseModel | dict[str, Any] | None = None
+        if isinstance(item, dict) and isinstance(item.get("index"), int):
+            for candidate in current:
+                candidate_index = None
+                if isinstance(candidate, BaseModel):
+                    candidate_index = getattr(candidate, "index", None)
+                elif isinstance(candidate, dict):
+                    candidate_index = candidate.get("index")
+                if candidate_index == item["index"]:
+                    existing = candidate
+                    break
+        if existing is None:
+            if not isinstance(item, dict):
+                current.append(item)
+                continue
+            if typed_tools:
+                existing = ChatCompletionsToolCall()
+            else:
+                existing = {}
+            current.append(existing)
+        for field in item:
+            _merge_value(existing, field, item[field])
+
+
+class _ToNative:
+    """Chat Completions chunk를 ``ChatCompletion`` 객체 하나로 누적한다.
+
+    ``choices`` 외 최상위 필드는 ``None``이 아닌 나중 값을 쓴다. choice는 ``index``별로 모으고
+    ``index``가 없으면 chunk 안 위치를 쓴다. choice의 ``delta``는 ``message``에 반영하며 choice
+    필드의 반영 규칙은 :func:`_merge_value`다. 결과의 ``object``는 ``chat.completion``이다.
+    """
+
+    def __init__(self) -> None:
+        self._completion = ChatCompletionsResponse(object="chat.completion", choices=[])
+        self._choices: dict[int, ChatCompletionsChoice] = {}
+
+    def apply(self, chunk: dict[str, Any]) -> None:
+        """chunk 하나를 누적한다.
+
+        Raises:
+            MappingError: ``choices``가 리스트가 아니거나, choice나 ``delta``가 객체가 아닐 때.
+        """
+        # 최상위 필드: id, model, usage 등은 None이 아닌 나중 값을 쓴다.
+        for key in chunk:
+            if key in ("choices", "object"):
+                continue
+            value = chunk[key]
+            present = key in self._completion.model_fields_set or key in (
+                self._completion.model_extra or {}
+            )
+            if value is not None or not present:
+                setattr(self._completion, key, value)
+
+        # choices: index별 choice에 delta를 message로 반영한다.
+        choices = chunk.get("choices")
+        if choices is None:
+            return
+        if not isinstance(choices, list):
+            raise MappingError("chat completions chunk choices must be a list")
+        for position in range(len(choices)):
+            choice = choices[position]
+            if not isinstance(choice, dict):
+                raise MappingError(f"chat completions choice {position} must be a JSON object")
+            raw_index = choice.get("index")
+            index = raw_index if isinstance(raw_index, int) else position
+            merged = self._choices.get(index)
+            if merged is None:
+                merged = ChatCompletionsChoice(index=index, message=ChatCompletionsMessage())
+                self._choices[index] = merged
+            for key in choice:
+                value = choice[key]
+                if key == "delta":
+                    if value is not None and not isinstance(value, dict):
+                        raise MappingError(f"chat completions choice {index} delta is not object")
+                    _merge_value(merged, "message", value)
+                else:
+                    _merge_value(merged, key, value)
+
+    def build(self) -> ChatCompletionsResponse:
+        """누적한 ``ChatCompletion`` 객체를 돌려준다. ``choices``는 ``index`` 오름차순이다."""
+        choices: list[ChatCompletionsChoice] = []
+        for index in sorted(self._choices):
+            choices.append(self._choices[index])
+        self._completion.choices = choices
+        return self._completion
+
+
 class ChatCompletionsAdapter:
     """``POST {base_url}/v1/chat/completions``."""
 
@@ -290,6 +453,9 @@ class ChatCompletionsAdapter:
 
     def to_hub(self) -> StreamMapper[Any, Any]:
         return _ToHub(self.name)
+
+    def to_native(self) -> NativeAccumulator[ChatCompletionsResponse]:
+        return _ToNative()
 
     def token_count_calls(
         self, body: dict[str, Any]

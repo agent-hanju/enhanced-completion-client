@@ -32,9 +32,10 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubMessage, HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
+from ..native import MessagesContentBlock, MessagesResponse, MessagesUsage
 from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer
+from .base import JsonCall, Lowerer, NativeAccumulator
 from .normalize import INSTRUCTION_ROLES
 from .parts import as_anthropic_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -314,6 +315,179 @@ class _ToHub:
         if isinstance(raw.get("output_tokens"), int):
             fields["output_tokens"] = raw["output_tokens"]
         return Usage(**fields, native=dict(raw))
+
+
+class _ToNative:
+    """Messages 스트림 이벤트를 ``Message`` 객체 하나로 누적한다.
+
+    ``message_start``의 ``message``를 기본 객체로 쓴다. ``content_block_start``의 블록은 서버가
+    준 ``index`` 순서로 ``content``에 추가하고, ``content_block_delta``는 그 블록에 반영한다.
+    ``input_json_delta``의 ``partial_json``은 블록별로 연결해 두었다가 :meth:`build`에서 JSON으로
+    파싱해 ``input``을 바꾼다. ``message_delta``는 ``delta`` 필드를 ``Message``에, ``usage``
+    필드를 ``Message.usage``에 최상위 key 단위로 반영한다.
+    """
+
+    def __init__(self) -> None:
+        self._message: MessagesResponse | None = None
+        self._input_json: dict[int, str] = {}
+
+    def apply(self, chunk: dict[str, Any]) -> None:
+        """이벤트 하나를 ``Message`` 객체에 반영한다.
+
+        Raises:
+            MappingError: ``message_start`` 전에 다른 이벤트가 오거나, 블록 ``index``가 시작 순서와
+                맞지 않거나, 누적 규칙이 없는 이벤트·delta 종류가 올 때.
+        """
+        name = chunk.get("type")
+        if name in ("content_block_stop", *IGNORED_EVENTS, *TERMINAL_EVENTS):
+            return
+
+        # message_start: 이후 이벤트를 반영할 Message 기본 객체를 정한다.
+        if name == "message_start":
+            message = chunk.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                raise MappingError("messages message_start event has no message content list")
+            self._message = MessagesResponse.model_validate(message)
+            return
+        if self._message is None:
+            raise MappingError(f"messages {name} event arrived before message_start")
+        content = self._message.content
+
+        # content_block_start: 서버가 준 index 순서로 블록을 추가한다.
+        if name == "content_block_start":
+            index = self._index(chunk)
+            block = chunk.get("content_block")
+            if not isinstance(block, dict):
+                raise MappingError(f"messages content_block_start {index} has no content_block")
+            if index != len(content):
+                raise MappingError(
+                    f"messages content_block_start index {index} != next block {len(content)}"
+                )
+            content.append(MessagesContentBlock.model_validate(block))
+            return
+
+        # content_block_delta: 이미 시작한 블록에 조각을 반영한다.
+        if name == "content_block_delta":
+            index = self._index(chunk)
+            if index >= len(content):
+                raise MappingError(f"messages content_block_delta references unstarted {index}")
+            self._apply_delta(index, content[index], chunk.get("delta"))
+            return
+
+        # message_delta: 종료 정보와 누적 usage를 Message에 반영한다.
+        if name == "message_delta":
+            delta = chunk.get("delta")
+            if not isinstance(delta, dict):
+                raise MappingError("messages message_delta event has no delta object")
+            for field in delta:
+                setattr(self._message, field, delta[field])
+            usage = chunk.get("usage")
+            if usage is not None:
+                if not isinstance(usage, dict):
+                    raise MappingError("messages message_delta usage is not an object")
+                current: dict[str, Any] = {}
+                if self._message.usage is not None:
+                    current = self._message.usage.model_dump(exclude_unset=True)
+                for field in usage:
+                    # null은 message_start에서 받은 값을 지우지 않는다.
+                    if usage[field] is not None or field not in current:
+                        current[field] = usage[field]
+                self._message.usage = MessagesUsage.model_validate(current)
+            for key in chunk:
+                if key not in ("type", "delta", "usage"):
+                    setattr(self._message, key, chunk[key])
+            return
+
+        raise MappingError(f"messages event type {name!r} has no accumulation rule")
+
+    def build(self) -> MessagesResponse:
+        """누적한 ``Message`` 객체를 돌려준다. 도구 입력 JSON 조각을 파싱해 ``input``에 둔다.
+
+        ``partial_json`` 조각이 하나도 없거나 빈 문자열뿐인 블록은 ``content_block_start``의
+        ``input``을 그대로 둔다.
+
+        Raises:
+            MappingError: ``message_start``를 받지 못했거나 연결한 도구 입력이 JSON이 아닐 때.
+        """
+        if self._message is None:
+            raise MappingError("messages stream ended without message_start")
+        content = self._message.content
+        for index in self._input_json:
+            raw = self._input_json[index]
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise MappingError(f"messages tool input JSON of block {index} is invalid") from exc
+            content[index].input = parsed
+        return self._message
+
+    @staticmethod
+    def _index(chunk: dict[str, Any]) -> int:
+        """블록 이벤트의 ``index``를 돌려준다.
+
+        Raises:
+            MappingError: 정수 ``index``가 없을 때.
+        """
+        index = chunk.get("index")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise MappingError(
+                f"messages {chunk.get('type')} event has no non-negative integer index"
+            )
+        return index
+
+    def _apply_delta(self, index: int, block: MessagesContentBlock, delta: Any) -> None:
+        """``content_block_delta``의 delta 하나를 ``index`` 블록에 반영한다.
+
+        text·thinking 조각은 연결하고, signature는 나중 값으로 바꾸고, citation은 목록 끝에
+        추가한다. ``partial_json``은 블록별 버퍼에 연결만 한다.
+
+        Raises:
+            MappingError: delta가 객체가 아니거나, 누적 규칙이 없는 종류이거나, 조각 값의 타입이
+                규약과 다를 때.
+        """
+        if not isinstance(delta, dict):
+            raise MappingError(f"messages content_block_delta {index} has no delta object")
+        kind = delta.get("type")
+        if kind == "text_delta":
+            self._append_text(block, delta, "text")
+        elif kind == "thinking_delta":
+            self._append_text(block, delta, "thinking")
+        elif kind == "signature_delta":
+            signature = delta.get("signature")
+            if not isinstance(signature, str):
+                raise MappingError(f"messages signature_delta {index} has no string signature")
+            block.signature = signature
+        elif kind == "input_json_delta":
+            fragment = delta.get("partial_json")
+            if not isinstance(fragment, str):
+                raise MappingError(f"messages input_json_delta {index} has no partial_json")
+            self._input_json[index] = self._input_json.get(index, "") + fragment
+        elif kind == "citations_delta":
+            citation = delta.get("citation")
+            if not isinstance(citation, dict):
+                raise MappingError(f"messages citations_delta {index} has no citation object")
+            if block.citations is None:
+                block.citations = []
+            block.citations.append(citation)
+        else:
+            raise MappingError(f"messages delta type {kind!r} has no accumulation rule")
+
+    @staticmethod
+    def _append_text(block: MessagesContentBlock, delta: dict[str, Any], field: str) -> None:
+        """delta의 문자열 ``field`` 조각을 블록의 같은 필드 끝에 연결한다.
+
+        Raises:
+            MappingError: 조각이나 블록의 기존 값이 문자열이 아닐 때.
+        """
+        piece = delta.get(field)
+        current = getattr(block, field)
+        if field not in block.model_fields_set:
+            current = ""
+        if not isinstance(piece, str) or not isinstance(current, str):
+            raise MappingError(f"messages {delta.get('type')} cannot append {field}")
+        setattr(block, field, current + piece)
 
 
 class MessagesAdapter:
@@ -688,6 +862,9 @@ class MessagesAdapter:
 
     def to_hub(self) -> StreamMapper[Any, Any]:
         return _ToHub()
+
+    def to_native(self) -> NativeAccumulator[MessagesResponse]:
+        return _ToNative()
 
     def token_count_calls(
         self, body: dict[str, Any]

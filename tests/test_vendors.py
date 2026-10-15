@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -101,6 +102,7 @@ def anthropic_stream() -> bytes:
                     "id": "msg_1",
                     "model": "claude",
                     "role": "assistant",
+                    "content": [],
                     "usage": {"input_tokens": 12},
                 },
             },
@@ -144,8 +146,9 @@ def anthropic_stream() -> bytes:
 
 class TestMessages:
     @respx.mock
-    async def test_text_blocks_use_the_server_index(self) -> None:
+    async def test_text_blocks_use_the_server_index(self, caplog: pytest.LogCaptureFixture) -> None:
         """다른 벤더는 어댑터가 인덱스를 만들지만 여기서는 그대로 옮긴다."""
+        caplog.set_level(logging.DEBUG, logger="completion_bridge.wire.calls")
         respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=anthropic_stream()))
         result = await make(messages).complete(["안녕"])
         assert result.text == "안녕하세요"
@@ -154,6 +157,13 @@ class TestMessages:
         assert result.stop_reason == "end_turn"
         assert [b.type for b in result.content] == ["text"]
         assert result.content[0].index == 0
+        calls = []
+        for record in caplog.records:
+            if hasattr(record, "wire"):
+                calls.append(record.wire)
+        assert calls[-1]["event"] == "response"
+        assert calls[-1]["payload"]["content"] == [{"type": "text", "text": "안녕하세요"}]
+        assert calls[-1]["payload"]["usage"] == {"input_tokens": 12, "output_tokens": 5}
 
     @respx.mock
     async def test_usage_merges_across_two_events(self) -> None:
@@ -167,6 +177,22 @@ class TestMessages:
     async def test_thinking_and_signature(self) -> None:
         """서명은 이어붙이지 않는다. 원문 그대로 되돌려야 하는 값이다."""
         payload = sse(
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
             (
                 "content_block_start",
                 {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
@@ -187,6 +213,15 @@ class TestMessages:
                     "delta": {"type": "signature_delta", "signature": "sig1"},
                 },
             ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
+                },
+            ),
             ("message_stop", {"type": "message_stop"}),
         )
         respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=payload))
@@ -199,10 +234,26 @@ class TestMessages:
     async def test_tool_use_arguments_accumulate(self) -> None:
         payload = sse(
             (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
                 "content_block_start",
                 {
                     "type": "content_block_start",
-                    "index": 1,
+                    "index": 0,
                     "content_block": {"type": "tool_use", "id": "t1", "name": "search"},
                 },
             ),
@@ -210,7 +261,7 @@ class TestMessages:
                 "content_block_delta",
                 {
                     "type": "content_block_delta",
-                    "index": 1,
+                    "index": 0,
                     "delta": {"type": "input_json_delta", "partial_json": '{"q"'},
                 },
             ),
@@ -218,8 +269,17 @@ class TestMessages:
                 "content_block_delta",
                 {
                     "type": "content_block_delta",
-                    "index": 1,
+                    "index": 0,
                     "delta": {"type": "input_json_delta", "partial_json": ':"서울"}'},
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
                 },
             ),
             ("message_stop", {"type": "message_stop"}),
@@ -235,6 +295,22 @@ class TestMessages:
     async def test_two_blocks_stay_separate(self) -> None:
         payload = sse(
             (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
                 "content_block_start",
                 {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
             ),
@@ -246,6 +322,7 @@ class TestMessages:
                     "delta": {"type": "thinking_delta", "thinking": "생각"},
                 },
             ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
             (
                 "content_block_start",
                 {"type": "content_block_start", "index": 1, "content_block": {"type": "text"}},
@@ -256,6 +333,15 @@ class TestMessages:
                     "type": "content_block_delta",
                     "index": 1,
                     "delta": {"type": "text_delta", "text": "답"},
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
                 },
             ),
             ("message_stop", {"type": "message_stop"}),
@@ -269,6 +355,22 @@ class TestMessages:
     async def test_server_tool_result_becomes_a_server_tool_block(self) -> None:
         payload = sse(
             (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
                 "content_block_start",
                 {
                     "type": "content_block_start",
@@ -278,6 +380,15 @@ class TestMessages:
                         "tool_use_id": "srv1",
                         "content": [{"url": "u"}],
                     },
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
                 },
             ),
             ("message_stop", {"type": "message_stop"}),
@@ -292,6 +403,22 @@ class TestMessages:
     @respx.mock
     async def test_ping_is_ignored(self) -> None:
         payload = sse(
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
             ("ping", {"type": "ping"}),
             (
                 "content_block_start",
@@ -303,6 +430,15 @@ class TestMessages:
                     "type": "content_block_delta",
                     "index": 0,
                     "delta": {"type": "text_delta", "text": "x"},
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
                 },
             ),
             ("message_stop", {"type": "message_stop"}),
@@ -956,6 +1092,22 @@ class TestHubConvergence:
                 200,
                 content=sse(
                     (
+                        "message_start",
+                        {
+                            "type": "message_start",
+                            "message": {
+                                "id": "msg_fixture",
+                                "type": "message",
+                                "role": "assistant",
+                                "model": "claude",
+                                "content": [],
+                                "stop_reason": None,
+                                "stop_sequence": None,
+                                "usage": {"input_tokens": 0, "output_tokens": 0},
+                            },
+                        },
+                    ),
+                    (
                         "content_block_start",
                         {
                             "type": "content_block_start",
@@ -969,6 +1121,15 @@ class TestHubConvergence:
                             "type": "content_block_delta",
                             "index": 0,
                             "delta": {"type": "text_delta", "text": "서울"},
+                        },
+                    ),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    (
+                        "message_delta",
+                        {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                            "usage": {"output_tokens": 0},
                         },
                     ),
                     ("message_stop", {"type": "message_stop"}),
@@ -1019,11 +1180,44 @@ class TestHubConvergence:
                 200,
                 content=sse(
                     (
+                        "message_start",
+                        {
+                            "type": "message_start",
+                            "message": {
+                                "id": "msg_fixture",
+                                "type": "message",
+                                "role": "assistant",
+                                "model": "claude",
+                                "content": [],
+                                "stop_reason": None,
+                                "stop_sequence": None,
+                                "usage": {"input_tokens": 0, "output_tokens": 0},
+                            },
+                        },
+                    ),
+                    (
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    ),
+                    (
                         "content_block_delta",
                         {
                             "type": "content_block_delta",
                             "index": 0,
                             "delta": {"type": "text_delta", "text": tagged},
+                        },
+                    ),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    (
+                        "message_delta",
+                        {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                            "usage": {"output_tokens": 0},
                         },
                     ),
                     ("message_stop", {"type": "message_stop"}),
@@ -1061,11 +1255,44 @@ class TestHubConvergence:
                 200,
                 content=sse(
                     (
+                        "message_start",
+                        {
+                            "type": "message_start",
+                            "message": {
+                                "id": "msg_fixture",
+                                "type": "message",
+                                "role": "assistant",
+                                "model": "claude",
+                                "content": [],
+                                "stop_reason": None,
+                                "stop_sequence": None,
+                                "usage": {"input_tokens": 0, "output_tokens": 0},
+                            },
+                        },
+                    ),
+                    (
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    ),
+                    (
                         "content_block_delta",
                         {
                             "type": "content_block_delta",
                             "index": 0,
                             "delta": {"type": "text_delta", "text": "답변"},
+                        },
+                    ),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    (
+                        "message_delta",
+                        {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                            "usage": {"output_tokens": 0},
                         },
                     ),
                     ("message_stop", {"type": "message_stop"}),
@@ -1155,6 +1382,22 @@ class TestNativeCitations:
     async def test_citations_delta_is_nested_in_its_text_block(self) -> None:
         payload = sse(
             (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
                 "content_block_start",
                 {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
             ),
@@ -1184,6 +1427,15 @@ class TestNativeCitations:
                     },
                 },
             ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
+                },
+            ),
             ("message_stop", {"type": "message_stop"}),
         )
         respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=payload))
@@ -1203,6 +1455,30 @@ class TestNativeCitations:
     async def test_page_location_maps_to_the_same_fields(self) -> None:
         payload = sse(
             (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
+            (
                 "content_block_delta",
                 {
                     "type": "content_block_delta",
@@ -1217,6 +1493,15 @@ class TestNativeCitations:
                             "end_page_number": 4,
                         },
                     },
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
                 },
             ),
             ("message_stop", {"type": "message_stop"}),
@@ -1236,6 +1521,30 @@ class TestNativeCitations:
 
         native = sse(
             (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
+            (
                 "content_block_delta",
                 {
                     "type": "content_block_delta",
@@ -1250,15 +1559,57 @@ class TestNativeCitations:
                     },
                 },
             ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
+                },
+            ),
             ("message_stop", {"type": "message_stop"}),
         )
         tagged = sse(
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
             (
                 "content_block_delta",
                 {
                     "type": "content_block_delta",
                     "index": 0,
                     "delta": {"type": "text_delta", "text": '<cite id="d1">근거</cite>'},
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
                 },
             ),
             ("message_stop", {"type": "message_stop"}),

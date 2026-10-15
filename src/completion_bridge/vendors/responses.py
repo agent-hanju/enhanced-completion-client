@@ -36,9 +36,10 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
+from ..native import ResponsesResponse
 from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer
+from .base import JsonCall, Lowerer, NativeAccumulator
 from .normalize import REFUSAL_PREFIX, stop_reason_from_responses
 from .parts import as_responses_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -49,6 +50,8 @@ SOURCE = "responses"
 TERMINAL_EVENTS = frozenset(
     {"response.completed", "response.failed", "response.incomplete", "error"}
 )
+# 최종 Response 객체 전체를 response 필드로 보내는 종료 이벤트.
+_RESPONSE_EVENTS = frozenset({"response.completed", "response.failed", "response.incomplete"})
 
 # seq 좌표는 (output_index, part_kind, part_index)다. reasoning item의 원문 추론 part는 같은
 # item의 summary part와 구분되도록 part_kind 1을 쓰고, 나머지 part와 item 수준 블록은 0을 쓴다.
@@ -636,6 +639,42 @@ class _ToHub:
         return Usage(**fields, native=dict(raw))
 
 
+class _ToNative:
+    """종료 이벤트가 전달한 ``Response`` 객체를 원본 응답으로 보관한다.
+
+    ``response.completed``, ``response.incomplete``, ``response.failed``는 최종 ``Response``
+    전체를 ``response`` 필드로 보낸다. 다른 이벤트의 내용은 이 객체에 이미 포함되므로 누적하지
+    않는다.
+    """
+
+    def __init__(self) -> None:
+        self._response: ResponsesResponse | None = None
+
+    def apply(self, chunk: dict[str, Any]) -> None:
+        """종료 이벤트이면 그 ``response`` 객체를 보관한다.
+
+        Raises:
+            MappingError: 종료 이벤트의 ``response``가 JSON 객체가 아닐 때.
+        """
+        name = chunk.get("type")
+        if name not in _RESPONSE_EVENTS:
+            return
+        response = chunk.get("response")
+        if not isinstance(response, dict):
+            raise MappingError(f"responses {name} event has no response object")
+        self._response = ResponsesResponse.model_validate(response)
+
+    def build(self) -> ResponsesResponse:
+        """보관한 ``Response`` 객체를 돌려준다.
+
+        Raises:
+            MappingError: 스트림이 종료 이벤트 없이 끝났을 때.
+        """
+        if self._response is None:
+            raise MappingError("responses stream ended without a response object event")
+        return self._response
+
+
 class ResponsesAdapter:
     """``POST {base_url}/v1/responses``."""
 
@@ -1005,6 +1044,9 @@ class ResponsesAdapter:
 
     def to_hub(self) -> StreamMapper[Any, Any]:
         return _ToHub()
+
+    def to_native(self) -> NativeAccumulator[ResponsesResponse]:
+        return _ToNative()
 
     def token_count_calls(
         self, body: dict[str, Any]

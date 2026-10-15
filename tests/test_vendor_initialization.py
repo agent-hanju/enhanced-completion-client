@@ -20,7 +20,48 @@ async def test_uniform_initialization(vendor: VendorAdapter, sync: bool) -> None
 
     def handler(request: httpx.Request) -> httpx.Response:
         sent.append(request)
-        return httpx.Response(200, text="", headers={"content-type": "text/event-stream"})
+        if vendor is messages:
+            events = [
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_init",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "chosen",
+                        "content": [],
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
+                },
+                {"type": "message_stop"},
+            ]
+        elif vendor is responses:
+            events = [
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_init",
+                        "object": "response",
+                        "status": "completed",
+                        "output": [],
+                    },
+                }
+            ]
+        elif vendor is generate_content:
+            events = [{"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]}]
+        else:
+            events = [
+                {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": "stop"}]}
+            ]
+        payload = ""
+        for event in events:
+            payload += f"data: {json.dumps(event)}\n\n"
+        return httpx.Response(200, text=payload, headers={"content-type": "text/event-stream"})
 
     transport = httpx.MockTransport(handler)
     if sync:

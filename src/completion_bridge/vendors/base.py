@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
+
+from pydantic import BaseModel
 
 from ..hub import HubRequest, TokenCount
 from ..mapper import StreamMapper
 from ..transport.sse import SseEvent
 
-__all__ = ["JsonCall", "Lowerer", "VendorAdapter"]
+__all__ = ["JsonCall", "Lowerer", "NativeAccumulator", "VendorAdapter"]
+
+NativeResponseT = TypeVar("NativeResponseT", bound=BaseModel, covariant=True)
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,32 @@ class Lowerer(Protocol):
 
     def lower_text_parts(self, blocks: Any) -> list[str]:
         """블록 경계를 유지한 요청 text part 목록을 만든다."""
+        ...
+
+
+@runtime_checkable
+class NativeAccumulator(Protocol[NativeResponseT]):
+    """스트림 chunk를 같은 API의 비스트리밍 응답 형식 객체 하나로 누적한다.
+
+    로깅과 독립적으로 사용할 수 있다. 상태를 가지므로 스트림마다 새 인스턴스를 쓴다.
+    받은 chunk 객체는 누적기가 소유하므로 호출자는 넘긴 뒤 그 객체를 다시 쓰지 않는다.
+    """
+
+    def apply(self, chunk: Any) -> None:
+        """:meth:`VendorAdapter.decode`가 돌려준 chunk 하나를 누적한다.
+
+        Raises:
+            MappingError: chunk가 이 API의 스트림 규약으로 누적할 수 없는 모양일 때.
+            pydantic.ValidationError: 응답 모델에 선언된 필드의 타입이 맞지 않을 때.
+        """
+        ...
+
+    def build(self) -> NativeResponseT:
+        """지금까지 누적한 응답 객체를 돌려준다. 스트림이 정상 종료된 뒤 한 번 호출한다.
+
+        Raises:
+            MappingError: 누적한 내용으로 응답 객체를 완성할 수 없을 때.
+        """
         ...
 
 
@@ -84,6 +114,10 @@ class VendorAdapter(Protocol):
         :class:`~completion_bridge.errors.MappingError`가 된다. ``index``는 채우지 않는다.
         규칙은 ``docs/block_index_and_key_tuple.md``에 있다.
         """
+        ...
+
+    def to_native(self) -> NativeAccumulator[BaseModel]:
+        """벤더 chunk를 이 API의 비스트리밍 응답 형식으로 누적하는 객체. 매번 새 인스턴스."""
         ...
 
     def token_count_calls(

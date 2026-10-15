@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import html
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict
@@ -9,6 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
+from pydantic import BaseModel
 
 from .blocks import (
     UNAVAILABLE,
@@ -32,7 +34,7 @@ from .parameters import Hyperparameters
 from .seq import finalize
 from .transport.http import apost_json, astream_sse, post_json, stream_sse
 from .transport.sse import SseEvent
-from .vendors.base import VendorAdapter
+from .vendors.base import NativeAccumulator, VendorAdapter
 from .vendors.tool_policy import to_portable
 from .vocabulary import Vocabulary
 from .wire_logging import WireLog
@@ -264,6 +266,8 @@ class _StreamBase:
         self._finished = False
         self._closed = False
         self._wire: WireLog | None = None
+        self._native: NativeAccumulator[BaseModel] | None = None
+        self._native_failure: Exception | None = None
 
     @property
     def result(self) -> HubResponse:
@@ -301,22 +305,68 @@ class _StreamBase:
         chunk = self._vendor.decode(frame)
         if chunk is None:
             return [], terminal
+        self._accumulate(chunk)
         return self._emit(self._pipeline.map(chunk)), terminal
 
+    def _accumulate(self, chunk: Any) -> None:
+        """원본 응답 누적기에 chunk의 깊은 복사본을 넘긴다.
+
+        허브 매퍼가 chunk의 하위 객체를 참조한 채 보관하므로 누적기에는 복사본을 준다. 누적이
+        실패하면 예외를 보관하고 이후 chunk를 넘기지 않는다. 그 예외는 스트림 소비로 전파하지
+        않고 :meth:`_log_end`의 ``merge_error`` 기록에만 쓴다.
+        """
+        if self._native is None or self._native_failure is not None:
+            return
+        try:
+            self._native.apply(copy.deepcopy(chunk))
+        except Exception as exc:
+            self._native_failure = exc
+
     def _log_start(self) -> None:
+        """요청을 기록하고, 요청·응답 로그가 켜져 있으면 원본 응답 누적기를 만든다."""
         if self._wire is not None:
             self._wire.start()
+            if self._native is None and self._wire.calls_enabled():
+                self._native = self._vendor.to_native()
 
     def _log_end(self, event: str, error: BaseException | None = None) -> None:
-        if self._wire is not None:
+        """종료 기록을 남긴다. 호출당 첫 기록만 남는다.
+
+        정상 종료(``response``)의 payload는 원본 응답 누적기가 만든 객체다. 누적기가 없으면
+        소비 시작 시점에 요청·응답 로그가 꺼져 있었으므로 ``None``이다. 누적이나 객체 완성이
+        실패하면 ``response`` 대신 ``merge_error``를 예외 클래스 이름과 메시지로 기록한다.
+        ``error``와 ``cancelled``의 payload는 예외 클래스 이름 또는 빈 객체다.
+        """
+        if self._wire is None:
+            return
+        if event != "response":
             self._wire.finish(
                 event,
+                lambda: {"error_type": type(error).__name__} if error is not None else {},
+            )
+            return
+
+        # 정상 종료: 누적한 원본 응답 객체를 완성한다.
+        merged: BaseModel | None = None
+        if self._native is not None and self._native_failure is None:
+            try:
+                merged = self._native.build()
+            except Exception as exc:
+                self._native_failure = exc
+
+        failure = self._native_failure
+        if failure is not None:
+            self._wire.finish(
+                "merge_error",
+                lambda: {"error_type": type(failure).__name__, "message": str(failure)},
+            )
+        else:
+            self._wire.finish(
+                "response",
                 lambda: (
-                    self.result.model_dump(mode="json")
-                    if event == "response"
-                    else {"error_type": type(error).__name__}
-                    if error is not None
-                    else {}
+                    merged.model_dump(mode="json", by_alias=True, exclude_unset=True)
+                    if merged is not None
+                    else None
                 ),
             )
 

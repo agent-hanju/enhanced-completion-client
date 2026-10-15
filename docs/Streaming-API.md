@@ -501,9 +501,65 @@ partial = stream.partial
 - [test_search_results.py](../tests/test_search_results.py): 검색 결과 변환·인용·중첩 JSON 복원
 - [변환 예제](Conversion-Examples.md): 벤더별 요청·raw event·HubResponse JSON
 
+## 원본 Response 객체
+
+각 어댑터의 `to_native()`는 `NativeAccumulator[응답 타입]`을 반환한다. 누적기는 로깅이나
+HTTP 호출 없이도 사용할 수 있으며, `apply()`로 디코딩된 chunk를 반영하고 정상 종료 후
+`build()`로 API별 Pydantic 응답 객체를 얻는다.
+
+| 어댑터 | `build()` 반환 타입 | 중첩 속성 예시 |
+|---|---|---|
+| `chat_completions` | `ChatCompletionsResponse` | `response.choices[0].message.content` |
+| `responses` | `ResponsesResponse` | `response.output[0].content` |
+| `messages` | `MessagesResponse` | `response.content[0].text` |
+| `generate_content` | `GenerateContentResponse` | `response.candidates[0].content.parts` |
+
+네 응답 타입은 `completion_bridge`와 `completion_bridge.vendors`에서 import할 수 있다.
+하위 모델은 `completion_bridge.native`에서 제공한다. 공식 SDK 타입이 아닌 이 라이브러리의
+응답 타입이며, SDK 의존성을 추가하지 않는다. Google 응답 속성은 `usageMetadata`,
+`thoughtSignature`처럼 REST JSON 필드명을 사용한다.
+
+```python
+from collections.abc import Iterable
+
+from completion_bridge import MessagesResponse, SseEvent
+from completion_bridge.vendors import messages
+
+
+def merge_messages(frames: Iterable[SseEvent]) -> MessagesResponse:
+    """정상적으로 수신한 Messages SSE 이벤트를 원본 응답 객체로 누적한다."""
+    native = messages.to_native()
+    for frame in frames:
+        if frame.is_comment_only:
+            continue
+        chunk = messages.decode(frame)
+        if chunk is not None:
+            native.apply(chunk)
+        if messages.is_terminal(frame):
+            break
+    return native.build()
+```
+
+`frames`는 이미 SSE 파싱을 마친 이벤트 목록이나 이터레이터다. 호출자는 정상 종료 여부를
+확인한 뒤 `build()`를 한 번 호출한다. 같은 chunk를 다른 처리에도 사용한다면 `apply()`에는
+깊은 복사본을 전달한다. 누적기에 전달한 chunk는 누적기가 소유한다.
+
+모델의 주요 응답 구조·도구 호출·사용량은 타입으로 선언하며, 미디어나 도구별 고유 payload는
+JSON 객체로 유지한다. 모든 계층에서 추가 필드를 허용한다. 누적 중 아직 받지 않은 필드를
+표현하기 위해 메타데이터 필드는 기본값을 가지므로, 공식 API의 모든 필수 필드가 존재하는지를
+검사하는 완전한 스키마 검증기는 아니다. 선언된 필드의 타입은 생성·속성 대입 시 검증하며,
+잘못된 타입은 `pydantic.ValidationError`, 누적 순서·지원 규칙 위반은 `MappingError`가 된다.
+
+JSON이 필요하면 `response.model_dump(mode="json", by_alias=True, exclude_unset=True)`를
+사용한다. 미수신 필드의 기본값은 출력하지 않고, 명시적인 null과 확장 필드는 보존한다.
+벤더별 병합 규칙은 [원본 응답 병합](Wire-Logging.md#원본-응답-병합)에 설명한다.
+
+`Bridge`는 호출 로그가 활성화됐을 때 이 누적기를 사용한다. `stream.result`와 `complete()`의
+반환 타입은 기존과 같이 `HubResponse`다.
+
 ## 요청 추적 로그
 
 `Bridge`와 `SyncBridge`의 `stream()` / `complete()`는 선택적 키워드 인자
 `request_id: str | None = None`을 받는다. 생략하면 UUID4를 생성하며 벤더 요청에는 전달하지 않는다.
-요청 JSON, SSE, 완료 HubResponse와 실패·취소를 전용 DEBUG 로거로 기록한다.
+요청 JSON, SSE, 같은 벤더 API 형식으로 병합한 완료 응답과 실패·취소를 전용 DEBUG 로거로 기록한다.
 [로그 계약과 파일 저장 설정](Wire-Logging.md)을 참고한다.

@@ -10,6 +10,9 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
+CALLS_LOGGER = "completion_bridge.wire.calls"
+SSE_LOGGER = "completion_bridge.wire.sse"
+
 
 class JsonFormatter(logging.Formatter):
     """Format bridge wire records as one JSON object per line."""
@@ -41,10 +44,12 @@ class WireLog:
         self.ended = False
         self.sequence = 0
 
+    def calls_enabled(self) -> bool:
+        """요청·응답 로거가 지금 DEBUG 기록을 받는지 돌려준다."""
+        return logging.getLogger(CALLS_LOGGER).isEnabledFor(logging.DEBUG)
+
     def emit(self, event: str, payload: Callable[[], Any]) -> None:
-        logger = logging.getLogger(
-            "completion_bridge.wire.sse" if event == "sse" else "completion_bridge.wire.calls"
-        )
+        logger = logging.getLogger(SSE_LOGGER if event == "sse" else CALLS_LOGGER)
         if not logger.isEnabledFor(logging.DEBUG):
             return
         try:

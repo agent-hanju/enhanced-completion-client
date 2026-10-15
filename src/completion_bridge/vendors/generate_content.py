@@ -19,6 +19,8 @@ import json
 from collections.abc import Generator
 from typing import Any
 
+from pydantic import BaseModel
+
 from ..blocks import (
     AnnotationBlock,
     AudioBlock,
@@ -39,9 +41,15 @@ from ..blocks import (
 from ..errors import MappingError
 from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from ..mapper import StreamMapper
+from ..native import (
+    GenerateContentCandidate,
+    GenerateContentContent,
+    GenerateContentPart,
+    GenerateContentResponse,
+)
 from ..seq import Seq, SeqAllocator
 from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer
+from .base import JsonCall, Lowerer, NativeAccumulator
 from .normalize import INSTRUCTION_ROLES, normalize_role, stop_reason_from_gemini
 from .parts import as_gemini_part, has_opaque_media_reference
 from .tool_policy import can_replay_client_tool
@@ -533,6 +541,121 @@ class _ToHub:
         return Usage(**fields, native=dict(raw))
 
 
+class _ToNative:
+    """GenerateContent chunk를 ``GenerateContentResponse`` 형식 객체 하나로 누적한다.
+
+    Google Gen AI SDK의 채팅 이력처럼 chunk의 part를 받은 순서대로 보존한다.
+
+    - candidate는 ``index``별로 모은다. ``index``가 없으면 proto3 JSON의 생략 규칙대로 0이다.
+    - ``content.parts``는 text 조각도 연결하지 않고 받은 순서대로 추가한다.
+      ``thoughtSignature``를 포함한 part의 필드와 구성을 유지한다.
+    - 그 밖의 필드는 :meth:`_merge_field` 규칙으로 반영한다.
+    """
+
+    def __init__(self) -> None:
+        self._response = GenerateContentResponse()
+        self._candidates: dict[int, GenerateContentCandidate] = {}
+
+    def apply(self, chunk: dict[str, Any]) -> None:
+        """chunk 하나를 누적한다.
+
+        Raises:
+            MappingError: ``candidates``가 리스트가 아니거나, candidate가 객체가 아니거나,
+                candidate ``index``가 정수가 아닐 때. ``content`` 규약 위반은
+                :meth:`_merge_content`가 알린다.
+        """
+        # 최상위 필드: usageMetadata, modelVersion 등을 반영한다.
+        for key in chunk:
+            if key != "candidates":
+                self._merge_field(self._response, key, chunk[key])
+
+        # candidates: index별 candidate에 content와 메타데이터를 반영한다.
+        candidates = chunk.get("candidates")
+        if candidates is None:
+            return
+        if not isinstance(candidates, list):
+            raise MappingError("generate_content chunk candidates must be a list")
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise MappingError("generate_content candidate must be a JSON object")
+            index = candidate.get("index", 0)
+            if not isinstance(index, int):
+                raise MappingError("generate_content candidate index must be an integer")
+            merged = self._candidates.get(index)
+            if merged is None:
+                merged = GenerateContentCandidate()
+                self._candidates[index] = merged
+            for key in candidate:
+                if key == "content":
+                    self._merge_content(merged, candidate[key])
+                else:
+                    self._merge_field(merged, key, candidate[key])
+
+    def build(self) -> GenerateContentResponse:
+        """누적한 응답 객체를 돌려준다.
+
+        ``candidates``는 candidate를 받은 적이 있을 때만 ``index`` 순서로 맨 앞에 둔다.
+        """
+        if self._candidates:
+            candidates: list[GenerateContentCandidate] = []
+            for index in sorted(self._candidates):
+                candidates.append(self._candidates[index])
+            self._response.candidates = candidates
+        return self._response
+
+    def _merge_content(self, candidate: GenerateContentCandidate, content: Any) -> None:
+        """chunk candidate의 ``content``를 누적 중인 candidate에 반영한다.
+
+        ``parts``는 클래스 설명의 part 규칙으로, 그 밖의 필드는 :meth:`_merge_field`로 반영한다.
+
+        Raises:
+            MappingError: ``content``가 객체가 아니거나, ``parts``가 리스트가 아니거나, part가
+                객체가 아닐 때.
+        """
+        if content is None:
+            return
+        if not isinstance(content, dict):
+            raise MappingError("generate_content candidate content must be a JSON object")
+        if candidate.content is None:
+            candidate.content = GenerateContentContent()
+        target = candidate.content
+        for key in content:
+            value = content[key]
+            if key != "parts":
+                self._merge_field(target, key, value)
+                continue
+            if not isinstance(value, list):
+                raise MappingError("generate_content content parts must be a list")
+            if "parts" not in target.model_fields_set:
+                target.parts = []
+            for part in value:
+                if not isinstance(part, dict):
+                    raise MappingError("generate_content part must be a JSON object")
+                target.parts.append(GenerateContentPart.model_validate(part))
+
+    @staticmethod
+    def _merge_field(target: BaseModel, key: str, value: Any) -> None:
+        """part 외 필드 하나를 반영한다.
+
+        처음 오는 key는 값을 그대로 둔다. 그 뒤로 ``None``은 기존 값을 유지한다. 기존 값과 새
+        값이 모두 객체이면 최상위 key 단위로 나중 값을 쓰고, 그 밖에는 나중 값으로 바꾼다.
+        """
+        present = key in target.model_fields_set or key in (target.model_extra or {})
+        if not present:
+            setattr(target, key, value)
+            return
+        if value is None:
+            return
+        current = getattr(target, key)
+        if isinstance(current, BaseModel):
+            current = current.model_dump(exclude_unset=True)
+        if isinstance(current, dict) and isinstance(value, dict):
+            for field in value:
+                current[field] = value[field]
+            value = current
+        setattr(target, key, value)
+
+
 class GenerateContentAdapter:
     """``POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse``.
 
@@ -791,6 +914,9 @@ class GenerateContentAdapter:
 
     def to_hub(self) -> StreamMapper[Any, Any]:
         return _ToHub()
+
+    def to_native(self) -> NativeAccumulator[GenerateContentResponse]:
+        return _ToNative()
 
     def token_count_calls(
         self, body: dict[str, Any]

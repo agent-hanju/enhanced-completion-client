@@ -46,7 +46,9 @@ uv run pytest
 사용자 작성 assistant 이력의 `synthetic=False` 기본값과 사용법은
 [외부 연동 계약](docs/Synthetic-Assistant-Messages.md)에 정리되어 있다.
 
-문서·견본은 0.3.1 구현을 기준으로 한다. 0.3.0에서의 `source → vendor` 변경과 적용 사항은
+현재 버전은 **0.4.0**이다. 원본 Response 타입·누적기와 로깅 변경 및 사용자 정의 어댑터의
+적용 사항은 [0.4.0 변경 보고](docs/Release-0.4.0.md)를 참고한다.
+0.3.0에서의 `source → vendor` 변경과 적용 사항은
 [0.3.1 변경 보고](docs/Release-0.3.1-common-mcp-server.md)를 참고한다.
 
 | 문서 | 내용 |
@@ -748,5 +750,10 @@ uv run pytest -m "live and not slow" -s
 ### 요청·응답 로그
 
 `completion_bridge.wire.calls`와 `completion_bridge.wire.sse`의 DEBUG 로그로 실제 요청, SSE,
-최종 HubResponse를 기록할 수 있다. `stream()` / `complete()`의 선택적 `request_id`를 생략하면
+같은 벤더 API 형식으로 병합한 최종 응답을 기록할 수 있다. `stream()` / `complete()`의 선택적 `request_id`를 생략하면
 UUID4를 생성한다. [common-hitl-chat 파일 저장 설정](docs/Wire-Logging.md)을 참고한다.
+
+원본 응답 누적기는 로그 없이도 사용할 수 있다. `adapter.to_native()`로 누적기를 만들고
+`apply(chunk)` 후 `build()`를 호출하면 API별 `ChatCompletionsResponse`, `ResponsesResponse`,
+`MessagesResponse`, `GenerateContentResponse` 객체를 얻는다. 주요 하위 구조도 타입 객체로
+제공한다. [원본 Response 객체와 SSE 사용 예제](docs/Streaming-API.md#원본-response-객체)를 참고한다.
