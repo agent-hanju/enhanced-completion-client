@@ -390,7 +390,12 @@ class Hyperparameters(BaseModel):
         for field in _MESSAGES_ONLY:
             _put(out, _MESSAGES_WIRE.get(field, field), getattr(self, field))
         choice = _tool_choice(self.tool_choice, "messages")
-        if isinstance(choice, dict) and self.parallel_tool_calls is not None:
+        # ``{"type": "none"}``에는 병렬 호출 필드가 없다.
+        if (
+            isinstance(choice, dict)
+            and choice["type"] != "none"
+            and self.parallel_tool_calls is not None
+        ):
             choice["disable_parallel_tool_use"] = not self.parallel_tool_calls
         _put(out, "tool_choice", choice)
         _nest(out, "output_config", "format", _response_format(self.response_format, "messages"))

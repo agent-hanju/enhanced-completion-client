@@ -162,6 +162,15 @@ class TestTypedObjects:
             "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["lookup"]}
         }
 
+    def test_messages_none_choice_has_no_parallel_field(self) -> None:
+        params = Hyperparameters(tool_choice=ToolChoice(mode="none"), parallel_tool_calls=False)
+        assert body(messages, params)["tool_choice"] == {"type": "none"}
+        auto = Hyperparameters(tool_choice=ToolChoice(mode="auto"), parallel_tool_calls=False)
+        assert body(messages, auto)["tool_choice"] == {
+            "type": "auto",
+            "disable_parallel_tool_use": True,
+        }
+
     def test_json_schema_is_rendered_per_api(self) -> None:
         schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
         params = Hyperparameters(
