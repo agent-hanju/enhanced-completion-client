@@ -14,16 +14,17 @@ from completion_bridge import (
     ToolUseBlock,
     Usage,
 )
+from completion_bridge.streaming.metadata import STREAM_OVERWRITE
 
 
 class Item(BaseModel):
     index: int | None = None
-    name: str = Field(default="", json_schema_extra={"stream": "overwrite"})
+    name: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
     args: str = ""
 
 
 class Envelope(BaseModel):
-    ident: str | None = Field(default=None, json_schema_extra={"stream": "overwrite"})
+    ident: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     text: str | None = None
     count: int | None = None
     kind: Literal["a", "b"] | None = None

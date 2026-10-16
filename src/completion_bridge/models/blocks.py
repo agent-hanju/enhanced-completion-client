@@ -19,6 +19,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SerializeAsAny, model_validator
 
+from completion_bridge.streaming.metadata import STREAM_INDEX, STREAM_OVERWRITE
+
 __all__ = [
     "UNAVAILABLE",
     "AnnotationBlock",
@@ -48,21 +50,6 @@ __all__ = [
 #: 조용히 사라지는 것보다 전달되지 않았다는 사실이 남는 편이 낫다.
 UNAVAILABLE = "이 형식은 이 요청에 전달할 수 없다"
 
-# 병합 전략을 필드 메타로 선언할 때 쓰는 키.
-STREAM_META_KEY = "stream"
-OVERWRITE = "overwrite"
-
-
-def _overwrite() -> dict[str, Any]:
-    """필드의 스트림 병합을 값 교체로 지정하는 메타데이터를 반환한다."""
-    return {STREAM_META_KEY: OVERWRITE}
-
-
-def _index() -> dict[str, Any]:
-    """리스트 원소를 식별하는 필드의 스트림 병합 메타데이터를 반환한다."""
-    return {STREAM_META_KEY: "index"}
-
-
 class ContentBlock(BaseModel):
     """모든 content block의 기반 타입.
 
@@ -72,17 +59,17 @@ class ContentBlock(BaseModel):
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    type: str = Field(json_schema_extra=_overwrite())
+    type: str = Field(json_schema_extra=STREAM_OVERWRITE)
     """블록 판별자. 리스트 짝짓기와 레지스트리 조회에 쓴다."""
 
-    index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """최종 결과에서 이 블록의 위치. 0부터 1씩 증가한다.
 
     :func:`~completion_bridge.streaming.sequence.finalize`가 ``seq`` 순서로 채운다.
     delta에는 값이 없다.
     """
 
-    seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=_index())
+    seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=STREAM_INDEX)
     """delta에서 같은 블록의 조각을 짝짓고 블록 순서를 정하는 키.
 
     ``(API 좌표..., after)`` 뒤에 블록을 나누는 vocabulary의 성분이 이어진다. 순서는 튜플
@@ -90,14 +77,14 @@ class ContentBlock(BaseModel):
     있다.
     """
 
-    vendor: str | None = Field(default=None, json_schema_extra=_overwrite())
+    vendor: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """이 블록을 만들어낸 벤더 이름.
 
     추론 블록처럼 발급 벤더로만 되돌릴 수 있는 블록을 다른 벤더로 내릴 때 떨어뜨리는 판단에
     쓴다. 응답을 JSON/DB에 저장한 뒤에도 같은 벤더 재생이 가능해야 하므로 직렬화에 포함한다.
     """
 
-    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=STREAM_OVERWRITE)
     """발급 벤더의 원본 블록·Part·Item에서 공통 필드 밖의 정보를 보존한다.
 
     같은 벤더로 되돌릴 때만 사용한다. 다른 벤더 어댑터는 이 값을 해석하지 않는다.
@@ -117,19 +104,19 @@ class Citation(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    type: str = Field(default="citation", json_schema_extra=_overwrite())
-    source: str | None = Field(default=None, json_schema_extra=_overwrite())
+    type: str = Field(default="citation", json_schema_extra=STREAM_OVERWRITE)
+    source: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """인용 규약의 소유자. ``messages``는 Anthropic native, ``cite``는 XML 어휘다."""
-    id: str = Field(default="", json_schema_extra=_overwrite())
-    cited_text: str | None = Field(default=None, json_schema_extra=_overwrite())
-    document_index: int | None = Field(default=None, json_schema_extra=_overwrite())
-    document_title: str | None = Field(default=None, json_schema_extra=_overwrite())
-    source_start: int | None = Field(default=None, json_schema_extra=_overwrite())
-    source_end: int | None = Field(default=None, json_schema_extra=_overwrite())
-    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
-    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
-    encrypted_index: str | None = Field(default=None, json_schema_extra=_overwrite())
-    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+    id: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    cited_text: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    document_index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    document_title: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    source_start: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    source_end: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    uri: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    file_id: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    encrypted_index: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=STREAM_OVERWRITE)
 
 
 class TextBlock(ContentBlock):
@@ -138,7 +125,7 @@ class TextBlock(ContentBlock):
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["text"] = "text"  # pyright: ignore[reportIncompatibleVariableOverride]
     text: str = ""
-    signature: str | None = Field(default=None, json_schema_extra=_overwrite())
+    signature: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     citations: list[Citation] = Field(default_factory=list)
 
 
@@ -152,8 +139,8 @@ class ThinkingBlock(ContentBlock):
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["thinking"] = "thinking"  # pyright: ignore[reportIncompatibleVariableOverride]
     thinking: str = ""
-    signature: str | None = Field(default=None, json_schema_extra=_overwrite())
-    encrypted_content: str | None = Field(default=None, json_schema_extra=_overwrite())
+    signature: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    encrypted_content: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
 
 
 class ToolUseBlock(ContentBlock):
@@ -164,12 +151,12 @@ class ToolUseBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["tool_use"] = "tool_use"  # pyright: ignore[reportIncompatibleVariableOverride]
-    id: str = Field(default="", json_schema_extra=_overwrite())
-    name: str = Field(default="", json_schema_extra=_overwrite())
-    kind: str = Field(default="function", json_schema_extra=_overwrite())
+    id: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    name: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    kind: str = Field(default="function", json_schema_extra=STREAM_OVERWRITE)
     input_json: str = ""
-    input: Any | None = Field(default=None, json_schema_extra=_overwrite())
-    signature: str | None = Field(default=None, json_schema_extra=_overwrite())
+    input: Any | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    signature: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
 
     @model_validator(mode="after")
     def parse_complete_input(self) -> ToolUseBlock:
@@ -218,14 +205,14 @@ class ToolResultBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["tool_result"] = "tool_result"  # pyright: ignore[reportIncompatibleVariableOverride]
-    tool_use_id: str = Field(default="", json_schema_extra=_overwrite())
-    name: str | None = Field(default=None, json_schema_extra=_overwrite())
-    kind: str = Field(default="function", json_schema_extra=_overwrite())
+    tool_use_id: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    name: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    kind: str = Field(default="function", json_schema_extra=STREAM_OVERWRITE)
     content: str = ""
-    structured_content: Any | None = Field(default=None, json_schema_extra=_overwrite())
+    structured_content: Any | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     blocks: list[Block] = Field(default_factory=list)
     """도구가 돌려준 블록. JSON에서 읽으면 ``type``으로 등록된 블록 클래스로 복원된다."""
-    is_error: bool | None = Field(default=None, json_schema_extra=_overwrite())
+    is_error: bool | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
 
 
 class ImageBlock(ContentBlock):
@@ -240,12 +227,12 @@ class ImageBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["image"] = "image"  # pyright: ignore[reportIncompatibleVariableOverride]
-    media_type: str | None = Field(default=None, json_schema_extra=_overwrite())
-    data: str | None = Field(default=None, json_schema_extra=_overwrite())
-    url: str | None = Field(default=None, json_schema_extra=_overwrite())
-    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    media_type: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    data: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    url: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    file_id: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
-    detail: str | None = Field(default=None, json_schema_extra=_overwrite())
+    detail: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """Chat Completions ``image_url.detail``. ``auto``/``low``/``high``."""
 
 
@@ -263,13 +250,13 @@ class AudioBlock(ContentBlock):
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["audio"] = "audio"  # pyright: ignore[reportIncompatibleVariableOverride]
     data: str | None = None
-    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
-    format: str | None = Field(default=None, json_schema_extra=_overwrite())
-    media_type: str | None = Field(default=None, json_schema_extra=_overwrite())
-    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    uri: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    format: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    media_type: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    file_id: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
     transcript: str | None = None
-    expires_at: int | None = Field(default=None, json_schema_extra=_overwrite())
+    expires_at: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
 
 
 class CitationBlock(ContentBlock):
@@ -282,16 +269,16 @@ class CitationBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["citation"] = "citation"  # pyright: ignore[reportIncompatibleVariableOverride]
-    id: str = Field(default="", json_schema_extra=_overwrite())
+    id: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
     text: str = ""
-    start_index: int = Field(default=0, json_schema_extra=_overwrite())
-    end_index: int = Field(default=0, json_schema_extra=_overwrite())
+    start_index: int = Field(default=0, json_schema_extra=STREAM_OVERWRITE)
+    end_index: int = Field(default=0, json_schema_extra=STREAM_OVERWRITE)
 
-    document_index: int | None = Field(default=None, json_schema_extra=_overwrite())
-    document_title: str | None = Field(default=None, json_schema_extra=_overwrite())
-    source_start: int | None = Field(default=None, json_schema_extra=_overwrite())
-    source_end: int | None = Field(default=None, json_schema_extra=_overwrite())
-    source_kind: str | None = Field(default=None, json_schema_extra=_overwrite())
+    document_index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    document_title: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    source_start: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    source_end: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    source_kind: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
 
 
 class AnnotationBlock(ContentBlock):
@@ -303,18 +290,18 @@ class AnnotationBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["annotation"] = "annotation"  # pyright: ignore[reportIncompatibleVariableOverride]
-    target_index: int | None = Field(default=None, json_schema_extra=_overwrite())
+    target_index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """최종 결과에서 이 annotation이 가리키는 text block의 ``index``. 정할 수 없으면 ``None``."""
-    target_seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=_overwrite())
+    target_seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """delta에서 이 annotation이 가리키는 text block의 ``seq``. 최종 결과에서는 ``None``."""
-    kind: str = Field(default="annotation", json_schema_extra=_overwrite())
-    id: str = Field(default="", json_schema_extra=_overwrite())
-    text: str | None = Field(default=None, json_schema_extra=_overwrite())
-    start_index: int | None = Field(default=None, json_schema_extra=_overwrite())
-    end_index: int | None = Field(default=None, json_schema_extra=_overwrite())
-    title: str | None = Field(default=None, json_schema_extra=_overwrite())
-    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
-    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    kind: str = Field(default="annotation", json_schema_extra=STREAM_OVERWRITE)
+    id: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    text: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    start_index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    end_index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    title: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    uri: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    file_id: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
 
 
 class GroundingSource(BaseModel):
@@ -322,11 +309,11 @@ class GroundingSource(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    index: int = Field(json_schema_extra=_index())
-    kind: str = Field(default="unknown", json_schema_extra=_overwrite())
-    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
-    title: str | None = Field(default=None, json_schema_extra=_overwrite())
-    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+    index: int = Field(json_schema_extra=STREAM_INDEX)
+    kind: str = Field(default="unknown", json_schema_extra=STREAM_OVERWRITE)
+    uri: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    title: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=STREAM_OVERWRITE)
 
 
 class GroundingSupport(BaseModel):
@@ -334,13 +321,13 @@ class GroundingSupport(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    index: int = Field(json_schema_extra=_index())
-    text: str | None = Field(default=None, json_schema_extra=_overwrite())
-    start_index: int | None = Field(default=None, json_schema_extra=_overwrite())
-    end_index: int | None = Field(default=None, json_schema_extra=_overwrite())
-    source_indices: list[int] = Field(default_factory=list, json_schema_extra=_overwrite())
-    confidence_scores: list[float] = Field(default_factory=list, json_schema_extra=_overwrite())
-    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+    index: int = Field(json_schema_extra=STREAM_INDEX)
+    text: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    start_index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    end_index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    source_indices: list[int] = Field(default_factory=list, json_schema_extra=STREAM_OVERWRITE)
+    confidence_scores: list[float] = Field(default_factory=list, json_schema_extra=STREAM_OVERWRITE)
+    native: dict[str, Any] = Field(default_factory=dict, json_schema_extra=STREAM_OVERWRITE)
 
 
 class GroundingBlock(ContentBlock):
@@ -354,9 +341,13 @@ class GroundingBlock(ContentBlock):
     type: Literal["grounding"] = "grounding"  # pyright: ignore[reportIncompatibleVariableOverride]
     sources: list[GroundingSource] = Field(default_factory=list)
     supports: list[GroundingSupport] = Field(default_factory=list)
-    search_queries: list[str] = Field(default_factory=list, json_schema_extra=_overwrite())
-    search_entry_point: dict[str, Any] | None = Field(default=None, json_schema_extra=_overwrite())
-    retrieval_metadata: dict[str, Any] | None = Field(default=None, json_schema_extra=_overwrite())
+    search_queries: list[str] = Field(default_factory=list, json_schema_extra=STREAM_OVERWRITE)
+    search_entry_point: dict[str, Any] | None = Field(
+        default=None, json_schema_extra=STREAM_OVERWRITE
+    )
+    retrieval_metadata: dict[str, Any] | None = Field(
+        default=None, json_schema_extra=STREAM_OVERWRITE
+    )
 
 
 class DocumentBlock(ContentBlock):
@@ -376,15 +367,15 @@ class DocumentBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["document"] = "document"  # pyright: ignore[reportIncompatibleVariableOverride]
-    id: str = Field(default="", json_schema_extra=_overwrite())
-    title: str | None = Field(default=None, json_schema_extra=_overwrite())
+    id: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    title: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     text: str = ""
-    data: str | None = Field(default=None, json_schema_extra=_overwrite())
-    uri: str | None = Field(default=None, json_schema_extra=_overwrite())
-    file_id: str | None = Field(default=None, json_schema_extra=_overwrite())
+    data: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    uri: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    file_id: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
-    media_type: str = Field(default="text/plain", json_schema_extra=_overwrite())
-    citations_enabled: bool = Field(default=True, json_schema_extra=_overwrite())
+    media_type: str = Field(default="text/plain", json_schema_extra=STREAM_OVERWRITE)
+    citations_enabled: bool = Field(default=True, json_schema_extra=STREAM_OVERWRITE)
 
     @property
     def is_inline_text(self) -> bool:
@@ -428,12 +419,12 @@ class SearchResultBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["search_result"] = "search_result"  # pyright: ignore[reportIncompatibleVariableOverride]
-    source: str = Field(min_length=1, json_schema_extra=_overwrite())
+    source: str = Field(min_length=1, json_schema_extra=STREAM_OVERWRITE)
     """검색 결과의 출처 URL 또는 식별자."""
-    title: str = Field(min_length=1, json_schema_extra=_overwrite())
+    title: str = Field(min_length=1, json_schema_extra=STREAM_OVERWRITE)
     content: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
     """청크 본문 목록. 비어 있지 않은 문자열이 하나 이상 있어야 한다."""
-    citations_enabled: bool = Field(default=True, json_schema_extra=_overwrite())
+    citations_enabled: bool = Field(default=True, json_schema_extra=STREAM_OVERWRITE)
     """인용 허용 여부. Anthropic은 한 요청의 search result가 모두 같은 설정이어야 하므로,
     하나라도 참이면 그 요청의 모든 search result에 인용을 켠다."""
 
@@ -478,13 +469,13 @@ class ServerToolBlock(ContentBlock):
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
     type: Literal["server_tool"] = "server_tool"  # pyright: ignore[reportIncompatibleVariableOverride]
-    id: str = Field(default="", json_schema_extra=_overwrite())
-    name: str = Field(default="", json_schema_extra=_overwrite())
-    status: str | None = Field(default=None, json_schema_extra=_overwrite())
+    id: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    name: str = Field(default="", json_schema_extra=STREAM_OVERWRITE)
+    status: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     input_json: str = ""
     output: str = ""
-    is_error: bool | None = Field(default=None, json_schema_extra=_overwrite())
-    raw: Mapping[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+    is_error: bool | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    raw: Mapping[str, Any] = Field(default_factory=dict, json_schema_extra=STREAM_OVERWRITE)
 
 
 class VendorBlock(ContentBlock):
@@ -495,8 +486,8 @@ class VendorBlock(ContentBlock):
     같은 벤더로 되돌릴 때는 손실이 없고, 다른 벤더로 내릴 때는 생략된다.
     """
 
-    type: str = Field(json_schema_extra=_overwrite())
-    raw: Mapping[str, Any] = Field(default_factory=dict, json_schema_extra=_overwrite())
+    type: str = Field(json_schema_extra=STREAM_OVERWRITE)
+    raw: Mapping[str, Any] = Field(default_factory=dict, json_schema_extra=STREAM_OVERWRITE)
 
 
 _REGISTRY: dict[str, type[ContentBlock]] = {}

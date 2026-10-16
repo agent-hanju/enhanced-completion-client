@@ -290,10 +290,13 @@ Python은 제네릭 소거가 없고 `Model.model_fields`로 필드 타입을 �
 `TypeVariableResolver`에 해당하는 부분이 통째로 필요 없다. Java 1,362줄 중 상당량이 여기서 빠진다.
 
 ```python
+from completion_bridge.streaming.metadata import STREAM_OVERWRITE
+
+
 class ToolCall(BaseModel):
     index: int
-    id: str | None = Field(default=None, json_schema_extra={"stream": "overwrite"})
-    type: str | None = Field(default=None, json_schema_extra={"stream": "overwrite"})
+    id: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    type: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     function: ToolFunction | None = None
 ```
 

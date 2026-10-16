@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from completion_bridge.models.blocks import Block, ContentBlock, TextBlock
 from completion_bridge.models.parameters import Hyperparameters
+from completion_bridge.streaming.metadata import STREAM_OVERWRITE
 
 __all__ = [
     "HubMessage",
@@ -25,18 +26,13 @@ __all__ = [
 ]
 
 
-def _overwrite() -> dict[str, Any]:
-    """필드의 스트림 병합을 값 교체로 지정하는 메타데이터를 반환한다."""
-    return {"stream": "overwrite"}
-
-
 class Usage(BaseModel):
     """토큰 사용량. 벤더별 이름 차이는 어댑터가 흡수한다."""
 
     model_config = ConfigDict(extra="allow")
 
-    input_tokens: int | None = Field(default=None, json_schema_extra=_overwrite())
-    output_tokens: int | None = Field(default=None, json_schema_extra=_overwrite())
+    input_tokens: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    output_tokens: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     native: dict[str, Any] | None = None
     """벤더가 보낸 usage 객체 원본. 캐시·추론 토큰 같은 세부 항목도 그대로 둔다.
 
@@ -60,12 +56,12 @@ class HubResponse(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    id: str | None = Field(default=None, json_schema_extra=_overwrite())
-    model: str | None = Field(default=None, json_schema_extra=_overwrite())
-    role: str | None = Field(default=None, json_schema_extra=_overwrite())
+    id: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    model: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    role: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     content: list[Block] = Field(default_factory=list)
-    stop_reason: str | None = Field(default=None, json_schema_extra=_overwrite())
-    block_reason: str | None = Field(default=None, json_schema_extra=_overwrite())
+    stop_reason: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
+    block_reason: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """입력이 거부되어 생성이 시작되지 않은 이유.
 
     ``stop_reason``과 축이 다르다. 저쪽은 생성이 왜 멈췄는지이고 이쪽은 생성이 시작조차

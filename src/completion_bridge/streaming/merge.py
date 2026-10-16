@@ -13,11 +13,9 @@ from typing import Any, Literal, Union, get_args, get_origin
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
-__all__ = ["StreamMerger"]
+from completion_bridge.streaming.metadata import INDEX, MERGE_META_KEY, OVERWRITE
 
-STREAM_META_KEY = "stream"
-OVERWRITE = "overwrite"
-INDEX = "index"
+__all__ = ["StreamMerger"]
 
 # 리스트 원소를 짝지을 때 어노테이션 없이도 인정하는 필드 이름.
 DEFAULT_INDEX_FIELD = "index"
@@ -27,7 +25,7 @@ def _meta(field: FieldInfo) -> str | None:
     """Pydantic 필드에 선언된 스트림 병합 전략 문자열을 조회한다."""
     extra = field.json_schema_extra
     if isinstance(extra, dict):
-        value = extra.get(STREAM_META_KEY)
+        value = extra.get(MERGE_META_KEY)
         if isinstance(value, str):
             return value
     return None
@@ -69,7 +67,7 @@ def _is_overwrite(name: str, field: FieldInfo) -> bool:
 def _index_field_name(value: Any) -> str | None:
     """모델 리스트 원소를 식별할 필드를 선택한다.
 
-    stream 메타데이터가 index인 필드를 우선하고, 없으면 index라는 필드 이름을 사용한다.
+    INDEX 병합 정책을 선언한 필드를 우선하고, 없으면 index라는 필드 이름을 사용한다.
     """
     if not isinstance(value, BaseModel):
         return None
