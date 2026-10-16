@@ -16,8 +16,16 @@
 
 from __future__ import annotations
 
-from .agent import AgentToolExecutor
-from .blocks import (
+from completion_bridge.bridge import AsyncStream, Bridge, SyncBridge, SyncStream
+from completion_bridge.errors import (
+    CompletionBridgeError,
+    ExecutionStateError,
+    MappingError,
+    StreamNotFinished,
+    TransportError,
+    VendorStreamError,
+)
+from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
     Block,
@@ -39,16 +47,7 @@ from .blocks import (
     register_block,
     registered_blocks,
 )
-from .bridge import AsyncStream, Bridge, SyncBridge, SyncStream
-from .contentstream import ContentSchema, Enter, Exit, ParseEvent, TagParser, TextRun
-from .errors import (
-    CompletionBridgeError,
-    ExtractionError,
-    MappingError,
-    StreamNotFinished,
-    TransportError,
-)
-from .hub import (
+from completion_bridge.models.hub import (
     HubMessage,
     HubRequest,
     HubResponse,
@@ -57,48 +56,49 @@ from .hub import (
     ToolDefinition,
     Usage,
 )
-from .mapper import StreamMapper, compose, identity_mapper
-from .merge import StreamMerger
-from .native import (
+from completion_bridge.models.native import (
     ChatCompletionsResponse,
     GenerateContentResponse,
     MessagesResponse,
     ResponsesResponse,
 )
-from .parameters import (
+from completion_bridge.models.parameters import (
     Hyperparameters,
     ResponseFormat,
     ToolChoice,
 )
-from .runtime import (
-    CompletionRuntime,
-    HitlTask,
+from completion_bridge.models.tools import (
+    Execution,
+    HitlDecision,
+    HitlDraft,
+    ToolCall,
+    ToolCallback,
+    ToolOutput,
+    ToolPolicy,
+)
+from completion_bridge.runtime.execution import (
     Run,
     RuntimeCancelled,
     RuntimeErrorWithPartial,
     RuntimeExecution,
 )
-from .runtime_models import (
-    Execution,
-    HitlDecision,
-    HitlDraft,
-    PolicyEvaluator,
-    ToolCall,
-    ToolExecutor,
-    ToolOutput,
-    ToolPolicy,
+from completion_bridge.streaming.content import (
+    ContentSchema,
+    Enter,
+    Exit,
+    ParseEvent,
+    TagParser,
+    TextRun,
 )
-from .transport.sse import SseEvent, SseParser
-from .vendors.base import Lowerer, NativeAccumulator, VendorAdapter
-from .vocabularies import CiteVocabulary, cite_schema
-from .vocabulary import Vocabulary
+from completion_bridge.streaming.mapping import StreamMapper, Vocabulary, compose, identity_mapper
+from completion_bridge.streaming.merge import StreamMerger
+from completion_bridge.transport.sse import SseEvent, SseParser
+from completion_bridge.vendors.base import Lowerer, NativeAccumulator, VendorAdapter
+from completion_bridge.vocabularies import CiteVocabulary, cite_schema
 
 __version__ = "0.4.1"
 
 __all__ = [
-    "AgentToolExecutor",
-    "CompletionRuntime",
-    "HitlTask",
     "Run",
     "RuntimeCancelled",
     "RuntimeErrorWithPartial",
@@ -106,9 +106,8 @@ __all__ = [
     "Execution",
     "HitlDecision",
     "HitlDraft",
-    "PolicyEvaluator",
     "ToolCall",
-    "ToolExecutor",
+    "ToolCallback",
     "ToolOutput",
     "ToolPolicy",
     "AnnotationBlock",
@@ -125,6 +124,7 @@ __all__ = [
     "DocumentBlock",
     "Enter",
     "CompletionBridgeError",
+    "ExecutionStateError",
     "Exit",
     "HubMessage",
     "HubRequest",
@@ -135,7 +135,6 @@ __all__ = [
     "GenerateContentResponse",
     "ImageBlock",
     "Lowerer",
-    "ExtractionError",
     "MappingError",
     "NativeAccumulator",
     "MessagesResponse",
@@ -160,6 +159,7 @@ __all__ = [
     "ToolResultBlock",
     "ToolUseBlock",
     "TransportError",
+    "VendorStreamError",
     "Usage",
     "VendorAdapter",
     "VendorBlock",

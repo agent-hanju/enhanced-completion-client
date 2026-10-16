@@ -41,6 +41,12 @@ python_version = "3.12"
 strict = true
 files = ["src"]
 
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+include = ["src", "tests", "examples"]
+extraPaths = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

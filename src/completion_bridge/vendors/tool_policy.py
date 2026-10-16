@@ -1,16 +1,20 @@
-"""Client-tool portability policy.
+"""클라이언트 도구 호출의 벤더 간 재사용 정책.
 
-Only a JSON-schema function call has a vendor-neutral execution contract. Built-in computer,
-shell, patch, approval, and similar calls carry endpoint-specific state and must stay on their
-source API. OpenAI custom tools can move between its two wire protocols but not to unrelated
-vendors.
+JSON 스키마 기반 함수 호출은 공통 실행 계약으로 재사용할 수 있다. 컴퓨터·셸·패치·승인
+호출 등은 API별 상태를 사용하므로 같은 의미로 재사용할 수 있는 대상을 별도로 판정한다.
+OpenAI custom 도구는 Chat Completions와 Responses 사이에서만 같은 호출 형식으로 재사용한다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ..blocks import ContentBlock, ServerToolBlock, ToolResultBlock, ToolUseBlock
+from completion_bridge.models.blocks import (
+    ContentBlock,
+    ServerToolBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 __all__ = ["can_replay_client_tool", "to_portable", "virtual_tool_name"]
 
@@ -21,7 +25,7 @@ def can_replay_client_tool(
     block: ToolUseBlock | ToolResultBlock,
     target: str,
 ) -> bool:
-    """Whether ``block`` can be serialized for ``target`` without changing its semantics."""
+    """블록의 호출 의미를 유지한 채 대상 API로 직렬화할 수 있는지 판정한다."""
     if block.vendor == target:
         return True
     if block.kind == "function":

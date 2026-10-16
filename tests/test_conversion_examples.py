@@ -1,4 +1,4 @@
-"""Keep the recorded conversion matrix synchronized with executable adapters."""
+"""기록된 변환 예제가 실제 어댑터의 실행 결과와 일치하는지 검증한다."""
 
 from __future__ import annotations
 

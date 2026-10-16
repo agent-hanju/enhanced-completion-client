@@ -11,17 +11,17 @@
 | ``generate_content`` | Gemini | content part에 판별자가 없다 |
 """
 
-from ..native import (
+from completion_bridge.models.native import (
     ChatCompletionsResponse,
     GenerateContentResponse,
     MessagesResponse,
     ResponsesResponse,
 )
-from .base import JsonCall, Lowerer, NativeAccumulator, VendorAdapter
-from .chat_completions import ChatCompletionsAdapter, chat_completions
-from .generate_content import GenerateContentAdapter, generate_content
-from .messages import MessagesAdapter, messages
-from .responses import ResponsesAdapter, responses
+from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator, VendorAdapter
+from completion_bridge.vendors.chat_completions import ChatCompletionsAdapter, chat_completions
+from completion_bridge.vendors.generate_content import GenerateContentAdapter, generate_content
+from completion_bridge.vendors.messages import MessagesAdapter, messages
+from completion_bridge.vendors.responses import ResponsesAdapter, responses
 
 __all__ = [
     "ChatCompletionsAdapter",

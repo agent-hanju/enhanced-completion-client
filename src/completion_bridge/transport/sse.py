@@ -12,8 +12,7 @@ __all__ = ["SseEvent", "SseParser"]
 
 @dataclass(slots=True)
 class SseEvent:
-    """SSE 전송에서의 이벤트 하나
-    """
+    """SSE 전송에서의 이벤트 하나"""
 
     data: str = ""
     event: str = ""
@@ -28,11 +27,18 @@ class SseEvent:
 
 
 class SseParser:
-    """W3C SSE 규칙으로 바이트/문자 조각을 이벤트로 자르고 남은 조각을 버퍼에 보존한다
+    """W3C SSE 규칙으로 문자열 조각을 이벤트로 변환하고 남은 조각을 버퍼에 보존한다.
     청크 경계가 라인 중간이나 ``\\r\\n`` 사이에 있어도 보정한다.
+
+    feed·flush는 한 소비자가 순차 호출해야 한다. 미완성 라인과 현재 이벤트를 보관하며
+    크기 상한은 두지 않는다. 한 조각의 처리는 버퍼 길이에 비례하고, 줄바꿈 없이 작은
+    조각을 반복하면 문자열 복사로 전체 입력 길이 n에 대해 최악 O(n²)이 될 수 있다.
+    추가 공간은 아직 완성되지 않은 이벤트 크기에 비례한다.
+    파싱 규격: https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream
     """
 
     def __init__(self) -> None:
+        """SSE 입력 버퍼·이벤트 필드·줄바꿈 해석 상태를 초기화한다."""
         self._buffer = ""
         self._data: list[str] = []
         self._event = ""
@@ -44,6 +50,8 @@ class SseParser:
 
     def feed(self, chunk: str) -> Iterator[SseEvent]:
         """조각을 넣고 완성된 이벤트를 순서대로 돌려준다."""
+        if not isinstance(chunk, str):
+            raise TypeError("SseParser.feed requires a string")
         if not chunk:
             return
 
@@ -90,14 +98,15 @@ class SseParser:
         idx_r = buffer.find("\r")
 
         if idx_n == -1 and idx_r == -1:
-            return buffer, None, buffer     # 줄바꿈 없음
+            return buffer, None, buffer  # 줄바꿈 없음
         if idx_r != -1 and (idx_n == -1 or idx_r < idx_n):
-            if idx_r + 1 < len(buffer) and buffer[idx_r + 1] == "\n":   # 줄바꿈 \r\n의 경우
+            if idx_r + 1 < len(buffer) and buffer[idx_r + 1] == "\n":  # 줄바꿈 \r\n의 경우
                 return buffer[:idx_r], "\r\n", buffer[idx_r + 2 :]
-            return buffer[:idx_r], "\r", buffer[idx_r + 1 :]        # 줄바꿈 \r의 경우
-        return buffer[:idx_n], "\n", buffer[idx_n + 1 :]        # 줄바꿈 \n의 경우
+            return buffer[:idx_r], "\r", buffer[idx_r + 1 :]  # 줄바꿈 \r의 경우
+        return buffer[:idx_n], "\n", buffer[idx_n + 1 :]  # 줄바꿈 \n의 경우
 
     def _consume_line(self, line: str) -> SseEvent | None:
+        """SSE 한 줄을 이벤트 상태에 반영하고 빈 줄이면 준비된 프레임을 반환한다."""
         if not line:
             return self._emit() if self._dirty else None
 
@@ -133,6 +142,7 @@ class SseParser:
         return None
 
     def _emit(self) -> SseEvent:
+        """누적 상태를 프레임으로 반환하고 재연결 ID를 제외한 이벤트 상태를 초기화한다."""
         event = SseEvent(
             data="\n".join(self._data),
             event=self._event,

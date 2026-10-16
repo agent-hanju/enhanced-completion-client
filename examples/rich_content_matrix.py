@@ -1,4 +1,4 @@
-"""Render rich-content conversion examples through the real adapters."""
+"""실제 어댑터로 다양한 콘텐츠의 변환 예제를 생성한다."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from completion_bridge import (
     ToolUseBlock,
 )
 from completion_bridge.errors import MappingError
-from completion_bridge.seq import finalize
+from completion_bridge.streaming.sequence import finalize
 from completion_bridge.vendors.base import VendorAdapter
 
 

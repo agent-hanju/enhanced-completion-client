@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, assert_type
 
 import pytest
 
@@ -18,7 +18,8 @@ from completion_bridge import (
 
 
 class CustomCitationBlock(ContentBlock):
-    type: Literal["custom_citation"] = "custom_citation"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["custom_citation"] = "custom_citation"  # pyright: ignore[reportIncompatibleVariableOverride]
     id: str = ""
     text: str = ""
 
@@ -37,6 +38,8 @@ class TestBuiltins:
         response = HubResponse.model_validate({"content": [{"type": "text", "text": "hi"}]})
         assert isinstance(response.content[0], TextBlock)
         assert response.text == "hi"
+        texts = assert_type(response.blocks_of(TextBlock), list[TextBlock])
+        assert texts[0].text == "hi"
 
 
 class TestRuntimeRegistration:

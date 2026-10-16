@@ -506,7 +506,7 @@ wire = bridge.build_request([message])
 
 대상 API가 네이티브 채널을 가진 유형은 그 형태로 내려간다. 없으면 **직렬화**한다. 직렬화는
 `<document>` 계열 XML-like 태그로 content의 적절한 위치에 넣는 것이고, 브리지에 그 유형의 텍스트
-전처리기가 등록되어 있으면 추출한 내용을, 없으면 **전달할 수 없다는 사실을 명시한 태그**를 넣는다.
+원본을 전달할 수 없는 경우 **전달할 수 없다는 사실을 명시한 태그**를 넣는다.
 조용히 사라지는 경우는 없다.
 
 | 유형 | 예시 media_type | Chat Completions | Responses | Messages | Gemini |
@@ -538,53 +538,15 @@ content로 받지 않는다.** Gemini의 File Search나 Responses의 file search
 물질화하기 전에는 다음 요청에 실리지 않는다. 내용을 **가진** 경우만 직렬화로 degrade하고,
 내용을 **모르는** 경우는 실패시킨다.
 
-### 직렬화 선택
+### 미디어 입력과 전처리
 
-네이티브 채널이 있어도 직렬화를 고를 수 있다. 블록 단위 플래그다.
+문서 파싱·OCR·음성 전사는 호출자가 요청 전에 수행한다. 추출한 내용은
+`DocumentBlock(text=...)` 또는 `TextBlock`으로 전달하며, 사용자 정의 블록의 변환은
+`Vocabulary`로 정의할 수 있다. Bridge는 요청 생성 중 파서를 호출하지 않는다.
 
-```python
-DocumentBlock(
-    id="d1",
-    title="분기 보고서",
-    media_type="application/pdf",
-    data=pdf_base64,
-    serialize=True,   # 네이티브 file part 대신 텍스트로 내린다
-)
-```
-
-전처리기는 브리지에 등록한다. 등록된 유형은 추출 텍스트가 태그 안에 들어가고, 등록되지 않은
-유형은 전달 불가 표시만 남는다.
-
-```python
-bridge = SyncBridge(
-    vendor=chat_completions,
-    base_url="http://127.0.0.1:8000",
-    model="qwen-3.8-27b",
-    extractors={"application/pdf": my_pdf_to_text},
-)
-```
-
-| 상황 | 결과 |
-|---|---|
-| 전처리기 등록됨 | `<document id="d1" media-type="application/pdf"><content>추출 텍스트</content></document>` |
-| 전처리기 없음 | `<document id="d1" media-type="application/pdf"><content unavailable="true">이 형식은 이 요청에 전달할 수 없다</content></document>` |
-| 평문 문서 | `<document id="d1"><content>본문</content></document>` |
-| **전처리기 실패** | `ExtractionError` |
-
-**전처리기가 없는 것과 실패한 것은 다르다.** 없는 것은 사전에 알 수 있는 설정 상태이므로 전달
-불가 표시로 degrade한다. 실패는 특정 콘텐츠에서 난 런타임 오류이고 호출자가 고칠 수 있는
-일이므로(재인코딩, 다른 파서, 의도적 제외) `ExtractionError`로 올린다. 둘을 같은 태그로 접으면
-호출자 전처리기의 결함이 전달 불가 표시 뒤에 숨는다.
-
-```python
-from completion_bridge import ExtractionError
-
-try:
-    body = bridge.build_request(messages)
-except ExtractionError as error:
-    # error.media_type으로 유형을, __cause__로 원인을 본다
-    ...
-```
+원본을 지원하는 벤더에는 미디어를 네이티브 형식으로 전달한다. 네이티브 채널이 없는 경우,
+평문 문서는 태그를 포함한 텍스트로 변환하고 원본을 전달할 수 없는 미디어에는 전달 불가 표시를
+남긴다. 텍스트로 전달하려는 내용은 호출자가 평문 블록으로 제공한다.
 
 ### 응답 멀티모달
 
@@ -736,6 +698,10 @@ annotation 좌표 및 입력 정렬 조건은 [스트리밍 명세](docs/Streami
 
 ## 검증
 
+[VS Code·가상환경 설정과 정적 검사](docs/Development.md),
+[패키지 구성과 import 변경](docs/Package-Structure.md),
+[프로젝트 지침 점검 내역](docs/Refactoring-Audit.md)을 참고한다.
+
 ```bash
 uv run ruff check src tests
 uv run mypy src
@@ -763,9 +729,14 @@ UUID4를 생성한다. [common-hitl-chat 파일 저장 설정](docs/Wire-Logging
 
 ## 모델·도구 반복 실행
 
-`CompletionRuntime`은 기존 `Bridge`로 모델 호출과 도구 실행을 반복한다.
-승인 필요 시 기록을 반환하고 종료하며, `Run.tasks`의 `HitlTask`로 일반 호출과
-백그라운드 작업의 기록·완료 대기·취소를 제공한다. 자식 에이전트와 도구 호출 제한,
-도구 결과의 최종 답변 대체도 지원한다.
+`bridge.run(request, execute_tool=callback)`은 `HubRequest`와 도구 콜백으로 모델 호출을 반복한다.
+콜백은 `(name, arguments)`만 받고 소비 앱의 정책·문맥·도구 관리자를 사용할 수 있다.
+모델용 결과가 없는 HITL 기록이 나오면 종료하며, `Run.tasks`는 작업 핸들을 포함할 수 있는
+`HitlDraft` 목록이다. 라이브러리는 승인이나 도구 서버 연결을 관리하지 않는다.
 
-실행기·정책 정의와 스트림 자원 정리는 [Completion Runtime](docs/Completion-Runtime.md)을 참고한다.
+```python
+run = await bridge.run(request, execute_tool=execute_tool)
+# 델타가 필요하면 반환된 실행 객체를 async for로 소비한다.
+```
+
+콜백 반환 계약과 스트림·작업 수명은 [모델·도구 반복 실행](docs/Completion-Runtime.md)을 참고한다.

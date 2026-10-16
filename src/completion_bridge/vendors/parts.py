@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..blocks import (
+from completion_bridge.models.blocks import (
     AudioBlock,
     ContentBlock,
     DocumentBlock,
@@ -59,12 +59,14 @@ def has_opaque_media_reference(block: ContentBlock) -> bool:
 
 
 def _native(block: ContentBlock, vendor: str) -> dict[str, Any]:
+    """발급 벤더가 일치할 때 원본 블록 필드의 사본을 반환한다."""
     if block.vendor != vendor:
         return {}
     return dict(block.native)
 
 
 def _raw(block: ServerToolBlock | VendorBlock, vendor: str) -> dict[str, Any] | None:
+    """발급 벤더가 일치하고 원본이 있을 때만 원본 필드의 사본을 반환한다."""
     if block.vendor != vendor or not block.raw:
         return None
     return dict(block.raw)
@@ -72,13 +74,13 @@ def _raw(block: ServerToolBlock | VendorBlock, vendor: str) -> dict[str, Any] | 
 
 def as_anthropic_part(block: ContentBlock) -> dict[str, Any] | None:
     """Anthropic ``ContentBlock``. 요청과 응답이 같은 유니온을 쓴다."""
-    if getattr(block, "serialize", False):
-        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
-        return None
     if isinstance(block, TextBlock) and block.vendor == "messages":
         part = _native(block, "messages")
         part.update({"type": "text", "text": block.text})
-        citations = [dict(citation.native) for citation in block.citations if citation.native]
+        citations = []
+        for citation in block.citations:
+            if citation.native:
+                citations.append(dict(citation.native))
         if citations:
             part["citations"] = citations
         return part
@@ -104,12 +106,15 @@ def as_anthropic_part(block: ContentBlock) -> dict[str, Any] | None:
     if isinstance(block, SearchResultBlock):
         # 인용 설정은 요청 단위로 정하므로 Messages 어댑터가 ``citations``를 채운다.
         part = _native(block, "messages")
+        rendered_values = []
+        for chunk in block.content:
+            rendered_values.append({"type": "text", "text": chunk})
         part.update(
             {
                 "type": "search_result",
                 "source": block.source,
                 "title": block.title,
-                "content": [{"type": "text", "text": chunk} for chunk in block.content],
+                "content": rendered_values,
             }
         )
         return part
@@ -141,6 +146,7 @@ def _anthropic_source(
     *,
     text: str | None = None,
 ) -> dict[str, Any] | None:
+    """직접 제공한 데이터 또는 URL을 Anthropic source 객체로 변환한다."""
     if data:
         return {
             "type": "base64",
@@ -156,9 +162,6 @@ def _anthropic_source(
 
 def as_chat_completions_part(block: ContentBlock) -> dict[str, Any] | None:
     """vLLM OpenAI compatible Chat Completions 요청 part."""
-    if getattr(block, "serialize", False):
-        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
-        return None
     if isinstance(block, ImageBlock):
         url = block.url or (data_url(block.media_type, block.data) if block.data else None)
         if url:
@@ -189,9 +192,6 @@ def as_responses_part(block: ContentBlock) -> dict[str, Any] | None:
 
     ``ResponseInputMessageContentListParam`` 유니온은 text/image/file만 허용한다.
     """
-    if getattr(block, "serialize", False):
-        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
-        return None
     if isinstance(block, ImageBlock):
         url = block.url or (data_url(block.media_type, block.data) if block.data else None)
         if url:
@@ -213,9 +213,6 @@ def as_responses_part(block: ContentBlock) -> dict[str, Any] | None:
 
 def as_gemini_part(block: ContentBlock) -> dict[str, Any] | None:
     """Gemini ``Part``는 type 없이 채워진 필드가 종류를 말한다."""
-    if getattr(block, "serialize", False):
-        # 호출자가 직렬화를 선택했다. 네이티브 채널이 있어도 쓰지 않는다.
-        return None
     if (
         isinstance(block, TextBlock)
         and block.vendor == "generate_content"

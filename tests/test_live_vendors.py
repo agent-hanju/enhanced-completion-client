@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
 
 import httpx
 import pytest
@@ -74,7 +75,6 @@ WEATHER_TOOL = ToolDefinition(
 )
 
 
-
 def budget(limit: int) -> Hyperparameters:
     """출력 예산. 필드 사이 전이가 없으므로 API별 필드를 각각 쓴다.
 
@@ -87,7 +87,8 @@ def budget(limit: int) -> Hyperparameters:
         max_output_tokens=limit,
     )
 
-async def _check_stream(bridge: Bridge, label: str, **params: object) -> None:
+
+async def _check_stream(bridge: Bridge, label: str, **params: Any) -> None:
     """공통 검증. 델타와 병합 결과가 일치하고 되쓸 수 있어야 한다."""
     stream = bridge.stream(["한 단어로만 답하세요: 대한민국의 수도"], **params)
     deltas = [d async for d in stream]
@@ -194,9 +195,7 @@ class TestAnthropicMessages:
         assert blocks[0]["title"] == "한국 지리"
         assert blocks[1]["type"] == "text"
 
-        cited = [
-            b for b in result.content if isinstance(b, TextBlock) and b.citations
-        ]
+        cited = [b for b in result.content if isinstance(b, TextBlock) and b.citations]
         print(f"\n[messages] text={result.text!r}")
         print(f"[messages] blocks={[b.type for b in result.content]}")
         for block in cited:
@@ -233,14 +232,9 @@ class TestAnthropicMessages:
             result = await bridge.complete(
                 [vocabulary.prompt_hint() + "\n\n" + CITE_PROMPT_DOCS], hyperparameters=budget(256)
             )
-        cited = [
-            b for b in result.content if isinstance(b, TextBlock) and b.citations
-        ]
+        cited = [b for b in result.content if isinstance(b, TextBlock) and b.citations]
         print(f"\n[messages] text={result.text!r}")
-        print(
-            "[messages] cites="
-            f"{[(c.id, b.text) for b in cited for c in b.citations]}"
-        )
+        print(f"[messages] cites={[(c.id, b.text) for b in cited for c in b.citations]}")
         if not cited:
             pytest.skip("모델이 인용 태그를 쓰지 않았다. 프롬프트 준수 문제다")
         for block in cited:

@@ -1,4 +1,4 @@
-"""Uniform adapter initialization, including model-specific URLs and credentials."""
+"""모델별 URL과 인증 정보를 포함한 어댑터 초기화의 공통 사용법을 검증한다."""
 
 import json
 
@@ -9,7 +9,7 @@ from completion_bridge import Bridge, SyncBridge, VendorAdapter
 from completion_bridge.vendors import chat_completions, generate_content, messages, responses
 from completion_bridge.vendors.generate_content import GenerateContentAdapter
 
-# Statically checked too: no casts, including the read-only Gemini path property.
+# 읽기 전용 Gemini path 속성을 포함해 cast 없이 타입 검사를 통과해야 한다.
 VENDORS: list[VendorAdapter] = [chat_completions, responses, messages, generate_content]
 
 

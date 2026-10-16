@@ -1,17 +1,7 @@
-"""스트리밍 XML-like 태그 파서.
+"""스트리밍 텍스트의 XML 형태 태그를 경로별 이벤트로 해석한다.
 
-custom content type을 wire에 직접 실을 수 없으므로 text 채널에 태그로 숨겨 나른다. 이 모듈은
-그 태그를 스트림에서 다시 들어올린다.
-
-정규식으로 풀 수 없다. ``<cite``가 ``"<ci"``와 ``"te>본문"``으로 쪼개져 도착하기 때문이다.
-태그일 수도 있는 접미사를 버퍼에 붙들고 다음 청크를 기다려야 한다.
-
-Java ``content-stream-adapter`` 0.3.0의 설계를 따른다. **의미 경로와 표면 문법을 분리**하는
-것이 핵심이다. 한 경로에 태그 이름 여러 개를 별칭으로 묶을 수 있고, 모델이 뱉는 태그가 바뀌어도
-소비 코드가 보는 경로 문자열은 그대로다.
-
-0.1.6 대비 고친 것 하나를 옮겼다. 구 버전은 패턴을 ``<cite`` 접두로만 봐서 ``<citation>``도
-걸렸다. 여기서는 태그 이름 뒤에 오는 문자가 ``>``, ``/``, 공백류 중 하나여야 태그로 본다.
+청크가 태그 중간에서 끝나면 미완성 입력을 보관한다. 스키마는 의미 경로마다 태그 이름,
+별칭과 허용 속성을 지정하며, 등록되지 않은 태그는 원문 텍스트로 반환한다.
 """
 
 from __future__ import annotations
@@ -60,7 +50,7 @@ ParseEvent = TextRun | Enter | Exit
 
 
 def parent_path(path: str) -> str:
-    """``/cite/id`` -> ``/cite``, ``/cite`` -> ``/``."""
+    """경로의 부모를 반환한다. /cite/id는 /cite로, /cite는 /로 변환한다."""
     if path == ROOT:
         return ROOT
     head, _, _ = path.rpartition("/")
@@ -77,12 +67,19 @@ class ContentSchema:
     같은 태그 이름을 같은 부모 아래 두 형제 경로에 붙이면 거부한다. 어느 경로로 전이해야 할지
     구분할 수 없기 때문이다. 이 보장 덕분에 전이 판정이 (부모 경로 -> 자식 경로) 조회 하나로
     끝난다.
+
+    동시 등록·조회는 지원하지 않는다. bind는 입력을 모두 검증한 뒤 등록하므로 검증 실패 시
+    기존 상태를 유지한다. 이름별 경로 수를 k라 하면 paths_for·open_target은 O(k),
+    closes는 집합 조회의 평균 O(1)이다.
+    속성 수를 a라 하면 allowed_attrs는 O(a), tag_names는 전체 이름 수에 비례한다.
+    bind는 입력 문자 수와 같은 이름의 기존 경로 수에 비례하며 등록 공간은 전체 등록량에
+    비례한다. could_be_tag_name은 등록 이름 전체를 검사한다.
     """
 
     def __init__(self) -> None:
+        """태그 경로와 허용 속성의 빈 등록 상태를 생성한다."""
         self._tag_to_paths: dict[str, set[str]] = {}
         self._path_attrs: dict[str, set[str]] = {}
-        self._paths: set[str] = set()
 
     def bind(
         self,
@@ -92,39 +89,52 @@ class ContentSchema:
         alias: Iterable[str] = (),
         attr: Iterable[str] = (),
     ) -> ContentSchema:
-        """경로 하나에 태그 이름과 별칭, 허용 속성을 붙인다."""
-        if not path.startswith("/") or path == ROOT:
+        """경로 하나에 태그 이름과 별칭, 허용 속성을 등록한다.
+
+        입력 검증이나 별칭·속성 순회가 실패하면 기존 등록 상태를 유지한다.
+        같은 인스턴스의 등록과 조회를 동시에 수행하는 사용은 지원하지 않는다.
+        """
+        if not isinstance(path, str) or not path.startswith("/") or path == ROOT:
             raise ValueError(f"path must start with '/' and not be root: {path!r}")
-        if not tag:
-            raise ValueError("tag must not be empty")
 
-        self._paths.add(path)
-        for name in (tag, *alias):
-            if not name:
-                raise ValueError("tag name must not be empty")
-            self._register(name, path)
-
-        allowed = self._path_attrs.setdefault(path, set())
-        allowed.update(a for a in attr if a)
-        return self
-
-    def _register(self, name: str, path: str) -> None:
-        bound = self._tag_to_paths.setdefault(name, set())
+        # 별칭·속성 순회를 모두 마친 뒤 등록해 실패 시 기존 상태를 유지한다.
+        names = (tag, *alias)
+        attributes = []
+        for attribute in attr:
+            if not isinstance(attribute, str) or not attribute:
+                raise ValueError("attribute names must be non-empty strings")
+            for character in attribute:
+                if character.isspace() or character in "<>/='\"\x00":
+                    raise ValueError("attribute names must not contain markup delimiters")
+            attributes.append(attribute)
         parent = parent_path(path)
-        for existing in bound:
-            if existing != path and parent_path(existing) == parent:
-                raise ValueError(
-                    f"tag {name!r} is already bound to sibling path {existing!r} under {parent!r}"
-                )
-        bound.add(path)
+        for name in names:
+            if not isinstance(name, str) or not name:
+                raise ValueError("tag name must not be empty and must be a string")
+            for character in name:
+                if character.isspace() or character in "<>/='\"\x00":
+                    raise ValueError("tag names must not contain markup delimiters or whitespace")
+            for existing in self._tag_to_paths.get(name, ()):
+                if existing != path and parent_path(existing) == parent:
+                    raise ValueError(
+                        f"tag {name!r} is already bound to sibling path "
+                        f"{existing!r} under {parent!r}"
+                    )
+
+        for name in names:
+            self._tag_to_paths.setdefault(name, set()).add(path)
+        self._path_attrs.setdefault(path, set()).update(attributes)
+        return self
 
     # ---- 조회 ----
 
     @property
     def tag_names(self) -> frozenset[str]:
+        """등록된 태그와 별칭 이름의 변경 불가능한 집합을 반환한다."""
         return frozenset(self._tag_to_paths)
 
     def paths_for(self, tag: str) -> frozenset[str]:
+        """태그 이름에 연결된 경로의 변경 불가능한 집합을 반환한다."""
         return frozenset(self._tag_to_paths.get(tag, ()))
 
     def open_target(self, current: str, tag: str) -> str | None:
@@ -139,6 +149,7 @@ class ContentSchema:
         return current in self._tag_to_paths.get(tag, ())
 
     def allowed_attrs(self, path: str) -> frozenset[str]:
+        """지정 경로에서 허용하는 속성 이름의 변경 불가능한 집합을 반환한다."""
         return frozenset(self._path_attrs.get(path, ()))
 
     def could_be_tag_name(self, partial: str) -> bool:
@@ -147,11 +158,16 @@ class ContentSchema:
         아니라면 더 기다릴 이유가 없으므로 바로 텍스트로 흘려보낸다. ``<citation>``이 ``cite``의
         접두를 지나 결국 태그가 아니라고 판정되는 경로가 이것이다.
         """
-        return any(name.startswith(partial) for name in self._tag_to_paths)
+        for name in self._tag_to_paths:
+            if name.startswith(partial):
+                return True
+        return False
 
 
 @dataclass(slots=True)
 class _Tag:
+    """입력 문자열에서 해석한 태그 이름·속성·원문과 시작·종료 구분."""
+
     name: str
     closing: bool
     self_closing: bool
@@ -166,9 +182,15 @@ class TagParser:
     삼키지 않기 위해서다.
 
     상태를 가지므로 스트림마다 새 인스턴스여야 한다.
+
+    feed·flush는 순차 호출하며 실행 중 스키마를 변경하지 않는다. 일반 텍스트는 확정 즉시
+    출력하고 미완성 태그만 보관한다. capture_raw=True이면 전체 원문도 보관한다.
+    미완성 태그 길이에 상한은 없으며 한 글자씩 계속 입력하면 버퍼 재검사·복사로 최악
+    O(n²) 시간이 필요하다. 공간은 미완성 태그 크기와 선택한 원문 보관량에 비례한다.
     """
 
     def __init__(self, schema: ContentSchema, *, capture_raw: bool = False) -> None:
+        """스키마와 원문 보관 옵션을 적용하고 입력 버퍼·현재 경로를 초기화한다."""
         self._schema = schema
         self._capture_raw = capture_raw
         self._buffer = ""
@@ -183,10 +205,9 @@ class TagParser:
 
     @property
     def raw(self) -> str:
-        """지금까지 들어온 원문. ``capture_raw``가 꺼져 있으면 빈 문자열.
+        """capture_raw가 활성화된 경우 지금까지 받은 원문을 반환한다.
 
-        긴 스트림에서 입력 길이에 비례해 메모리가 늘지 않도록 기본을 꺼둔다. Java 0.1.6은
-        무조건 쌓았다.
+        원문 보관에 필요한 메모리가 입력 길이에 비례하므로 기본값은 비활성화다.
         """
         return "".join(self._raw)
 
@@ -195,6 +216,8 @@ class TagParser:
 
         빈 문자열은 빈 리스트다. 스트림 도중 빈 델타를 보내는 제공자가 있다.
         """
+        if not isinstance(token, str):
+            raise TypeError("TagParser.feed requires a string")
         if not token:
             return []
         if self._capture_raw:
@@ -218,6 +241,7 @@ class TagParser:
     # ---- 내부 ----
 
     def _drain(self) -> Iterator[ParseEvent]:
+        """버퍼의 확정된 본문과 태그 이벤트를 순서대로 반환하고 미완성 입력은 유지한다."""
         while True:
             if self._in_tag:
                 events, consumed = self._consume_tag()
@@ -268,7 +292,11 @@ class TagParser:
             return [TextRun(self._path, tag.raw)], True
 
         allowed = self._schema.allowed_attrs(target)
-        attrs = {k: v for k, v in tag.attributes.items() if k in allowed}
+        attrs = {}
+        for field_name in tag.attributes:
+            field_value = tag.attributes[field_name]
+            if field_name in allowed:
+                attrs[field_name] = field_value
         if tag.self_closing:
             # 진입과 이탈을 한 번에. 경로는 제자리로 돌아온다.
             return [Enter(target, attrs), Exit(target)], True

@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .blocks import ToolResultBlock
-from .hub import ToolDefinition
-
-if TYPE_CHECKING:
-    from .runtime import Run
+from completion_bridge.models.blocks import ToolResultBlock
 
 
 class ToolPolicy(StrEnum):
@@ -59,6 +56,8 @@ class ToolCall(BaseModel):
 class HitlDraft(BaseModel):
     """도구 호출의 실행 및 정책 판정 기록."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     call: ToolCall
     created_at: datetime
     approval: HitlDecision | None = None
@@ -70,38 +69,26 @@ class HitlDraft(BaseModel):
     edited_result: Any = None
     approval_reason: str = ""
     review_reason: str = ""
+    result: ToolResultBlock | None = None
+    task: asyncio.Task[Any] | None = Field(default=None, exclude=True)
+    """콜백이 생성해 전달한 작업 핸들. 직렬화에서 제외하며 호출자가 수명을 관리한다."""
 
 
 @dataclass
 class ToolOutput:
-    """원본 기록과 모델용 결과 및 답변 대체 여부를 명시하는 실행기 반환값."""
+    """콜백의 모델용 결과와 선택적 HITL 기록·원본 실행 결과·작업 핸들.
 
-    execution: Execution
-    result: ToolResultBlock
+    result가 없으면 이번 실행을 종료한다. 백그라운드 작업을 계속하려면
+    task와 함께 모델에 전달할 접수 result를 반환한다. 정책 판정은 콜백의 책임이다.
+    draft.call은 모델이 보낸 실제 호출 정보로 교체한다.
+    """
+
+    result: ToolResultBlock | None = None
+    draft: HitlDraft | None = None
+    execution: Execution | None = None
+    task: asyncio.Task[Any] | None = None
     final: bool = False
-    child_run: Run | None = None
 
 
-class ToolExecutor(Protocol):
-    """도구 목록과 실제 실행 기능을 제공한다."""
-
-    @property
-    def definitions(self) -> Sequence[ToolDefinition]:
-        """모델에 제공할 정의를 반환한다."""
-        ...
-
-    async def execute(self, call: ToolCall) -> ToolOutput:
-        """호출을 실행해 원본 및 모델용 결과를 반환한다."""
-        ...
-
-
-class PolicyEvaluator(Protocol):
-    """각 호출의 실행 전후 판정을 제공한다."""
-
-    async def approve(self, call: ToolCall) -> HitlDecision:
-        """실행 전 정책을 판정한다."""
-        ...
-
-    async def review(self, call: ToolCall, execution: Execution) -> HitlDecision:
-        """실제 실행 결과의 모델 제공 여부를 판정한다."""
-        ...
+ToolCallback = Callable[[str, dict[str, Any]], Awaitable[ToolOutput]]
+"""도구 이름과 인자만 받고 외부 실행·정책 처리를 수행하는 비동기 콜백."""

@@ -1,4 +1,4 @@
-"""Print deterministic, executable conversion examples as Markdown tables."""
+"""실제 변환 코드의 재현 가능한 실행 결과를 Markdown 표로 출력한다."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from completion_bridge import (
     ToolDefinition,
     ToolResultBlock,
 )
-from completion_bridge.seq import finalize
+from completion_bridge.streaming.sequence import finalize
 from completion_bridge.vendors import (
     ChatCompletionsAdapter,
     GenerateContentAdapter,

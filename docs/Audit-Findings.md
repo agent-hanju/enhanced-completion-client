@@ -316,11 +316,10 @@ README 표가 기술하지만 코드에 아직 없는 것이다.
 오디오 입력 채널이 없어 `as_*_part`가 `None`을 반환하고, `_lower_documents()`가 `DocumentBlock`만
 보므로 어디에도 남지 않았다.
 
-- `ImageBlock`/`AudioBlock`/`DocumentBlock`에 `serialize` 플래그 추가. 참이면 네이티브 채널이
-  있어도 텍스트로 내린다. 네 `as_*_part` 맨 앞의 가드가 `None`을 반환해 기존 `plain` 경로를 탄다
-- `Bridge(extractors={media_type: callable})` 전처리기 레지스트리 신설. `Vocabulary`는 내림/올림
-  대칭이 규약이라 별개로 뒀다
-- `UNAVAILABLE` 표시 — 전처리기가 없으면 내용 대신 전달 불가 사실을 남긴다
+- `ImageBlock`/`AudioBlock`/`DocumentBlock`은 지원되는 네이티브 입력으로 변환한다.
+  네이티브 채널이 없는 경우에만 텍스트 표현 또는 전달 불가 표시를 사용한다
+- 문서 파싱·OCR·음성 전사는 호출자가 수행하고 완성된 블록을 전달한다
+- `UNAVAILABLE` 표시 — 원본을 전달할 수 없으면 내용 대신 전달 불가 사실을 남긴다
 - image/audio는 `<attachments>`, 문서는 기존 `<documents>`를 유지한다. 라이브 테스트까지 후자를
   계약으로 걸고 있고, 의미도 다르다. 문서는 모델이 읽을 근거이고 전달 못 한 오디오는 누락 통지다
 

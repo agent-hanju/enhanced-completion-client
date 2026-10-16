@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -28,12 +28,11 @@ CAPACITY_CODES = frozenset({429, 503})
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]
-) -> Iterator[pytest.TestReport]:
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
     """라이브 시험에서 벤더 용량 문제를 실패가 아니라 건너뜀으로 바꾼다.
 
-    429와 503은 우리 계약이 아니라 그 서비스의 그때 사정이다. 요청이 400이나 401이 아니라
-    거기까지 도달했다는 뜻이므로 요청 모양은 맞다. 이것을 실패로 두면 검증 결과가 외부
-    가용성에 묶여 우리 코드의 문제와 구분되지 않는다.
+    HTTP 429와 503은 서비스 용량 문제로 별도 분류한다. 이 결과만으로 요청 형식이나
+    인증이 올바르다고 판단하지 않는다. 건너뛴 테스트는 동작 검증을 완료한 것으로 보지 않는다.
 
     재시도로 넘기지 않는다. 이 라이브러리는 재시도 정책을 소유하지 않고 전송 계층과 소비 앱의
     몫으로 둔다. 시험도 그 경계를 지킨다.

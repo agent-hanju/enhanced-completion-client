@@ -10,6 +10,7 @@ import pytest
 import respx
 
 from completion_bridge import (
+    AnnotationBlock,
     AudioBlock,
     Bridge,
     DocumentBlock,
@@ -19,6 +20,7 @@ from completion_bridge import (
     ServerToolBlock,
     SyncBridge,
     TextBlock,
+    ThinkingBlock,
     ToolDefinition,
     ToolResultBlock,
     ToolUseBlock,
@@ -37,7 +39,7 @@ BASE = "http://contracts.test"
 GEMINI = generate_content.for_model("gemini-test")
 
 
-def build(adapter: object, history: list[HubMessage], **kwargs: object) -> dict[str, object]:
+def build(adapter: object, history: list[HubMessage], **kwargs: Any) -> dict[str, Any]:
     bridge = SyncBridge(
         vendor=adapter,  # type: ignore[arg-type]
         base_url=BASE,
@@ -242,20 +244,24 @@ class TestResponsesReplay:
         )
         result = await bridge.complete(["질문"])
         assert [block.type for block in result.content] == ["audio", "text"]
+        assert isinstance(result.content[0], AudioBlock)
         assert result.content[0].data == "WAV"
+        assert isinstance(result.content[1], TextBlock)
         assert result.content[1].text == "답"
         await bridge.aclose()
 
     def test_foreign_assistant_uses_easy_input_text_and_omits_input_only_media(self) -> None:
-        message = HubMessage(
-            role="assistant",
-            content=[
-                TextBlock(text="답"),
-                ImageBlock(url="https://example.test/image.png"),
-                AudioBlock(data="WAV", format="wav"),
-                DocumentBlock(id="doc", data="PDF", media_type="application/pdf"),
-            ],
-            phase="final_answer",
+        message = HubMessage.model_validate(
+            {
+                "role": "assistant",
+                "content": [
+                    TextBlock(text="답"),
+                    ImageBlock(url="https://example.test/image.png"),
+                    AudioBlock(data="WAV", format="wav"),
+                    DocumentBlock(id="doc", data="PDF", media_type="application/pdf"),
+                ],
+                "phase": "final_answer",
+            }
         )
 
         assert build(responses, [message])["input"] == [
@@ -321,8 +327,10 @@ class TestResponsesReplay:
             http_client=httpx.AsyncClient(),
         )
         result = await bridge.complete(["질문"])
+        assert isinstance(result.content[0], AnnotationBlock)
         assert result.content[0].id == "https://example.test/source"
-        assert result.server_side_tool_usage == {"web_searches": 1}
+        assert result.model_extra is not None
+        assert result.model_extra["server_side_tool_usage"] == {"web_searches": 1}
         await bridge.aclose()
 
     @respx.mock
@@ -352,6 +360,7 @@ class TestResponsesReplay:
             http_client=httpx.AsyncClient(),
         )
         result = await bridge.complete(["질문"])
+        assert isinstance(result.content[0], ThinkingBlock)
         assert result.content[0].thinking == "reasoning text"
         assert result.content[0].native["id"] == "rs_1"
         await bridge.aclose()
@@ -393,6 +402,7 @@ class TestResponsesReplay:
             http_client=httpx.AsyncClient(),
         )
         result = await bridge.complete(["질문"])
+        assert isinstance(result.content[0], ThinkingBlock)
         assert result.content[0].thinking == "간단한 요약"
         assert result.content[0].encrypted_content == "opaque-token"
 
@@ -545,7 +555,11 @@ class TestGeminiReplay:
             http_client=httpx.AsyncClient(),
         )
         result = await bridge.complete(["질문"])
-        assert [block.signature for block in result.content] == ["sig-call", "sig-text"]
+        signatures = []
+        for block in result.content:
+            assert isinstance(block, (ToolUseBlock, TextBlock))
+            signatures.append(block.signature)
+        assert signatures == ["sig-call", "sig-text"]
 
         parts = build(GEMINI, [HubMessage.of_response(result)])["contents"][0]["parts"]
         assert parts[0]["thoughtSignature"] == "sig-call"
@@ -756,7 +770,7 @@ class TestGeminiMediaReplay:
     @respx.mock
     async def test_non_image_media_is_not_mislabeled_as_image(
         self,
-        part: dict[str, object],
+        part: dict[str, Any],
         expected_type: type[object],
     ) -> None:
         respx.post(f"{BASE}{GEMINI.path}").mock(
@@ -863,7 +877,7 @@ class TestVendorNativeToolsAndUnknownParts:
         self,
         adapter: object,
         vendor: str,
-        wire: dict[str, object],
+        wire: dict[str, Any],
         container: str,
     ) -> None:
         tool = ToolDefinition.native(vendor, wire)
@@ -1064,6 +1078,7 @@ class TestRemoteContentReferences:
             http_client=httpx.AsyncClient(),
         )
         annotation = (await bridge.complete(["질문"])).content[0]
+        assert isinstance(annotation, AnnotationBlock)
         assert annotation.id == "https://example.test/source"
         assert annotation.title == "Source"
         assert (annotation.start_index, annotation.end_index) == (1, 4)

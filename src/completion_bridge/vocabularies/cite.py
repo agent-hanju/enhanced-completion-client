@@ -6,13 +6,25 @@ import html
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from ..blocks import AnnotationBlock, Citation, CitationBlock, ContentBlock, TextBlock
-from ..contentstream import ContentSchema, Enter, Exit, ParseEvent, TagParser, TextRun
-from ..errors import MappingError
-from ..hub import HubResponse
-from ..mapper import StreamMapper
-from ..seq import Seq
-from ..vocabulary import Vocabulary
+from completion_bridge.errors import MappingError
+from completion_bridge.models.blocks import (
+    AnnotationBlock,
+    Citation,
+    CitationBlock,
+    ContentBlock,
+    TextBlock,
+)
+from completion_bridge.models.hub import HubResponse
+from completion_bridge.streaming.content import (
+    ContentSchema,
+    Enter,
+    Exit,
+    ParseEvent,
+    TagParser,
+    TextRun,
+)
+from completion_bridge.streaming.mapping import StreamMapper, Vocabulary
+from completion_bridge.streaming.sequence import Seq
 
 __all__ = ["CITE_PATH", "Citation", "CitationBlock", "CiteVocabulary", "cite_schema"]
 
@@ -43,6 +55,7 @@ class _CiteMapper:
     """
 
     def __init__(self, schema: ContentSchema) -> None:
+        """스키마와 파서·인용 및 본문 누적 상태를 스트림별로 초기화한다."""
         self._parser = TagParser(schema)
         self._active_key: _Key | None = None
         self._active_segment: Seq | None = None
@@ -193,7 +206,8 @@ class _CiteMapper:
         segments = self._segments.get(key) or []
         if not segments:
             pending = self._pending.setdefault(key, {})
-            for name, value in fields.items():
+            for name in fields:
+                value = fields[name]
                 if name == "citations":
                     pending.setdefault(name, []).extend(value)
                 else:
@@ -201,7 +215,11 @@ class _CiteMapper:
             return []
 
         out: list[ContentBlock] = []
-        metadata = {name: value for name, value in fields.items() if name != "citations"}
+        metadata = {}
+        for name in fields:
+            value = fields[name]
+            if name != "citations":
+                metadata[name] = value
         for segment in segments:
             if metadata:
                 out.append(TextBlock(seq=segment, vendor=block.vendor, **metadata))
@@ -218,13 +236,10 @@ class _CiteMapper:
 
 
 class CiteVocabulary(Vocabulary):
-    """인용을 올리고 내리는 규칙 묶음.
+    """cite 태그와 공통 인용 모델 간 요청·응답 변환을 제공한다.
 
-        bridge = Bridge(..., vocabularies=[CiteVocabulary()])
-
-    :meth:`prompt_hint`가 있는 이유가 실측에서 나왔다. 모델은 프롬프트가 지시하지 않으면 이
-    태그를 쓰지 않는다. 어휘가 파서 스키마만 들고 프롬프트 지시를 들지 않으면, 소비 앱이 그
-    문장을 따로 관리하다 파서와 어긋난다. Java 구현이 어긋날 수 있었던 자리다.
+    태그 이름과 별칭으로 스키마 및 스트림 변환기를 생성한다. prompt_hint는
+    동일한 태그 규칙을 사용한 프롬프트 지시문을 제공한다.
     """
 
     # CitationBlock은 구 버전 저장 JSON을 읽고 내리기 위해서만 등록한다. 새 citation은
@@ -233,12 +248,14 @@ class CiteVocabulary(Vocabulary):
     name = "cite"
 
     def __init__(self, *, tag: str = "cite", alias: Iterable[str] = ("rag",)) -> None:
+        """태그 이름과 별칭을 보관하고 같은 규칙의 인용 스키마를 생성한다."""
         self._tag = tag
         self._alias = tuple(alias)
         self._schema = cite_schema(tag=tag, alias=self._alias)
 
     @property
     def schema(self) -> ContentSchema:
+        """이 어휘의 태그·속성 해석에 사용하는 스키마를 반환한다."""
         return self._schema
 
     def prompt_hint(self) -> str:
@@ -257,8 +274,15 @@ class CiteVocabulary(Vocabulary):
         대화를 이어가면 이전 답변이 요청에 되실리므로 왕복이 실제로 일어난다. 여기가 내놓는
         태그와 :attr:`schema`가 읽는 태그가 같아야 하고, 둘이 한 객체에 있으므로 어긋날 수 없다.
         """
-        legacy = [b for b in blocks if isinstance(b, CitationBlock)]
-        nested = any(isinstance(b, TextBlock) and b.citations for b in blocks)
+        legacy = []
+        for candidate_block in blocks:
+            if isinstance(candidate_block, CitationBlock):
+                legacy.append(candidate_block)
+        nested = False
+        for candidate_block in blocks:
+            if isinstance(candidate_block, TextBlock) and candidate_block.citations:
+                nested = True
+                break
         if not legacy and not nested:
             return None
 
@@ -267,18 +291,21 @@ class CiteVocabulary(Vocabulary):
             if not isinstance(block, TextBlock) or not block.citations:
                 lowered.append(block)
                 continue
-            portable = [
-                citation
-                for citation in block.citations
-                if citation.id and citation.source in (None, "cite") and not citation.native
-            ]
+            portable = []
+            for citation in block.citations:
+                if citation.id and citation.source in (None, "cite") and (not citation.native):
+                    portable.append(citation)
             text = self._wrap(portable[0].id, block.text) if portable else block.text
             lowered.append(block.model_copy(update={"text": text, "citations": []}))
 
         if not legacy:
             return lowered
 
-        full = "".join(b.text for b in lowered if isinstance(b, TextBlock))
+        text_values = []
+        for candidate_block in lowered:
+            if isinstance(candidate_block, TextBlock):
+                text_values.append(candidate_block.text)
+        full = "".join(text_values)
         merged = TextBlock(text=self._splice(full, legacy))
 
         out: list[ContentBlock] = []
@@ -320,8 +347,10 @@ class CiteVocabulary(Vocabulary):
         return "".join(parts)
 
     def _wrap(self, cite_id: str, body: str) -> str:
+        """인용 식별자를 이스케이프하고 지정 문구를 cite 태그로 표현한다."""
         safe_id = html.escape(cite_id, quote=True)
         return f'<{self._tag} id="{safe_id}">{body}</{self._tag}>'
 
     def lift_mapper(self) -> StreamMapper[Any, Any]:
+        """스트림마다 독립적인 인용 태그→허브 인용 변환기를 생성한다."""
         return _CiteMapper(self._schema)

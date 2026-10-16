@@ -18,7 +18,8 @@ import json
 from collections.abc import Generator
 from typing import Any
 
-from ..blocks import (
+from completion_bridge.errors import MappingError, VendorStreamError
+from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
     CitationBlock,
@@ -33,16 +34,15 @@ from ..blocks import (
     ToolUseBlock,
     VendorBlock,
 )
-from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
-from ..mapper import StreamMapper
-from ..native import ResponsesResponse
-from ..seq import Seq, SeqAllocator
-from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer, NativeAccumulator
-from .normalize import REFUSAL_PREFIX, stop_reason_from_responses
-from .parts import as_responses_part, has_opaque_media_reference
-from .tool_policy import can_replay_client_tool
+from completion_bridge.models.hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
+from completion_bridge.models.native import ResponsesResponse
+from completion_bridge.streaming.mapping import StreamMapper
+from completion_bridge.streaming.sequence import Seq, SeqAllocator
+from completion_bridge.transport.sse import SseEvent
+from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
+from completion_bridge.vendors.normalize import REFUSAL_PREFIX, stop_reason_from_responses
+from completion_bridge.vendors.parts import as_responses_part, has_opaque_media_reference
+from completion_bridge.vendors.tool_policy import can_replay_client_tool
 
 __all__ = ["ResponsesAdapter", "responses"]
 
@@ -125,6 +125,7 @@ class _ToHub:
     """Responses 이벤트를 허브 델타로 바꾼다."""
 
     def __init__(self) -> None:
+        """출력 Item·content part·도구 호출의 스트림별 좌표와 수신 상태를 초기화한다."""
         self._seqs = SeqAllocator(3)
         self._refusal_started = False
         self._text_streamed: set[Seq] = set()
@@ -137,7 +138,9 @@ class _ToHub:
         self._annotations_seen: set[tuple[Seq, int]] = set()
         self._done_items: set[int] = set()
 
-    def map(self, event: dict[str, Any]) -> list[HubResponse]:
+    def map(self, delta: dict[str, Any]) -> list[HubResponse]:
+        """벤더 스트림 이벤트 하나를 허브 델타 목록으로 변환한다."""
+        event = delta
         name = event.get("type")
         if not isinstance(name, str):
             return []
@@ -206,7 +209,8 @@ class _ToHub:
 
         # item 등장. 도구 호출의 식별자와 이름이 여기 실린다.
         if name == "response.output_item.added":
-            return self._item_added(event)
+            item = event.get("item") or {}
+            return self._item(item, event, final=False)
         if name == "response.output_item.done":
             return self._item_done(event)
 
@@ -235,10 +239,12 @@ class _ToHub:
         return []
 
     def flush(self) -> list[HubResponse]:
+        """이 변환기는 종료 시 보관하는 잔여 델타가 없으므로 빈 목록을 반환한다."""
         return []
 
     @staticmethod
     def _one(block: ContentBlock) -> list[HubResponse]:
+        """블록의 발급 벤더를 지정하고 허브 델타 하나로 반환한다."""
         block.vendor = SOURCE
         return [HubResponse(content=[block])]
 
@@ -310,17 +316,16 @@ class _ToHub:
         file_id = annotation.get("file_id")
         if isinstance(file_id, str) and file_id:
             fields["file_id"] = file_id
-        for key, dst in (("start_index", "start_index"), ("end_index", "end_index")):
+        field_names = {"start_index": "start_index", "end_index": "end_index"}
+        for key in field_names:
+            dst = field_names[key]
             value = annotation.get(key)
             if isinstance(value, int):
                 fields[dst] = value
         return [HubResponse(content=[AnnotationBlock(**fields)])]
 
-    def _item_added(self, event: dict[str, Any]) -> list[HubResponse]:
-        item = event.get("item") or {}
-        return self._item(item, event, final=False)
-
     def _item_done(self, event: dict[str, Any]) -> list[HubResponse]:
+        """완료된 출력 Item에서 증분 이벤트로 전달하지 않은 내용을 변환한다."""
         item = event.get("item") or {}
         output_index = event.get("output_index")
         if isinstance(output_index, int):
@@ -334,6 +339,7 @@ class _ToHub:
         *,
         final: bool,
     ) -> list[HubResponse]:
+        """출력 Item 종류에 따라 도구·메시지·추론·벤더 블록으로 변환한다."""
         kind = item.get("type")
         coords = _slot(event)
         if kind in _CLIENT_TOOL_ITEMS:
@@ -428,10 +434,17 @@ class _ToHub:
         *,
         final: bool,
     ) -> list[HubResponse]:
+        """출력 메시지의 content part와 인용을 고유 좌표의 허브 블록으로 변환한다."""
         blocks: list[ContentBlock] = []
-        item_meta = {key: value for key, value in item.items() if key != "content"}
+        item_meta = {}
+        for key in item:
+            value = item[key]
+            if key != "content":
+                item_meta[key] = value
         output_index = event.get("output_index")
-        for content_index, part in enumerate(item.get("content") or []):
+        indexed_parts = item.get("content") or []
+        for content_index in range(len(indexed_parts)):
+            part = indexed_parts[content_index]
             if not isinstance(part, dict):
                 continue
             part_event = dict(event)
@@ -445,7 +458,9 @@ class _ToHub:
                     fields["text"] = part["text"]
                     self._text_streamed.add(seq)
                 blocks.append(TextBlock(vendor=SOURCE, **fields))
-                for annotation_index, annotation in enumerate(part.get("annotations") or []):
+                indexed_annotations = part.get("annotations") or []
+                for annotation_index in range(len(indexed_annotations)):
+                    annotation = indexed_annotations[annotation_index]
                     if not isinstance(annotation, dict):
                         continue
                     annotation_event = dict(part_event)
@@ -514,10 +529,12 @@ class _ToHub:
         output = coords[0]
 
         def append_parts(entries: Any, *, part_kind: int) -> None:
+            """추론 배열의 각 내용을 좌표별 ThinkingBlock으로 변환해 출력 목록에 추가한다."""
             nonlocal native_pending
             if not isinstance(entries, list):
                 return
-            for part_index, entry in enumerate(entries):
+            for part_index in range(len(entries)):
+                entry = entries[part_index]
                 if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
                     continue
                 seq = self._seqs.coord((output, part_kind, part_index))
@@ -550,6 +567,7 @@ class _ToHub:
         return [HubResponse(content=blocks)]
 
     def _response_meta(self, event: dict[str, Any]) -> list[HubResponse]:
+        """응답의 식별자·모델·사용량 등 최상위 정보를 허브 델타로 변환한다."""
         response = event.get("response") or {}
         fields: dict[str, Any] = {}
         if isinstance(response.get("id"), str):
@@ -560,13 +578,15 @@ class _ToHub:
         return [HubResponse(**fields)]
 
     def _terminal(self, name: str, event: dict[str, Any]) -> list[HubResponse]:
+        """실패 이벤트를 예외로 전달하고 정상 종료 이벤트의 남은 응답 정보를 변환한다."""
         if name == "error":
-            detail = json.dumps(event, ensure_ascii=False)[:200]
-            raise MappingError(f"responses stream reported an error: {detail}")
+            raise VendorStreamError(SOURCE, event)
 
         response = event.get("response") or {}
         out: list[HubResponse] = []
-        for output_index, item in enumerate(response.get("output") or []):
+        indexed_items = response.get("output") or []
+        for output_index in range(len(indexed_items)):
+            item = indexed_items[output_index]
             if output_index in self._done_items or not isinstance(item, dict):
                 continue
             out.extend(self._item_done({"output_index": output_index, "item": item}))
@@ -629,6 +649,7 @@ class _ToHub:
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
+        """벤더 사용량을 허브 토큰 사용량과 원본 사용량으로 변환한다."""
         if not isinstance(raw, dict):
             return None
         fields: dict[str, Any] = {}
@@ -675,8 +696,62 @@ class _ToNative:
         return self._response
 
 
+def _native_text_part(
+    block: TextBlock,
+    annotations_by_target: dict[int, list[dict[str, Any]]],
+    legacy_annotations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """보존된 출력 part의 본문·인용·거절 문구를 현재 블록 값으로 갱신한 사본을 만든다."""
+    native_part = block.native.get("part")
+    if not isinstance(native_part, dict):
+        return None
+    part = dict(native_part)
+    if part.get("type") == "output_text":
+        part["text"] = block.text
+        annotations = (
+            annotations_by_target.get(block.index, []) if isinstance(block.index, int) else []
+        )
+        if not annotations:
+            annotations = legacy_annotations
+        if annotations and not part.get("annotations"):
+            part["annotations"] = annotations
+    elif part.get("type") == "refusal":
+        part["refusal"] = block.text.removeprefix(REFUSAL_PREFIX)
+    return part
+
+
+def _assistant_input_message(
+    blocks: list[ContentBlock], lowerer: Lowerer, phase: str | None
+) -> dict[str, Any] | None:
+    """발급된 출력 ID가 없는 assistant 이력을 텍스트 입력으로 변환한다."""
+    # 발급된 id/status가 없는 assistant 이력은 문자열 content로 제공한다.
+    # 이 요청 형식에는 input_text/input_image/input_file을 사용하지 않는다.
+    portable = []
+    for block in blocks:
+        if not isinstance(block, ImageBlock | AudioBlock) and (
+            not (
+                isinstance(block, DocumentBlock)
+                and bool(block.data)
+                and (not block.text)
+                and (not block.uri)
+            )
+        ):
+            portable.append(block)
+    text = lowerer.lower_text(portable)
+    if not text:
+        return None
+    item: dict[str, Any] = {
+        "type": "message",
+        "role": "assistant",
+        "content": text,
+    }
+    if phase in ("commentary", "final_answer"):
+        item["phase"] = phase
+    return item
+
+
 class ResponsesAdapter:
-    """``POST {base_url}/v1/responses``."""
+    """POST {base_url}/v1/responses 요청과 스트림 응답을 변환한다."""
 
     name = SOURCE
     path = "/v1/responses"
@@ -705,14 +780,15 @@ class ResponsesAdapter:
             "input": turns,
             "stream": True,
         }
-        tools = [
-            definition
-            for tool in request.tools
-            if (definition := self._tool_definition(tool)) is not None
-        ]
+        tools = []
+        for tool in request.tools:
+            definition = self._tool_definition(tool)
+            if definition is not None:
+                tools.append(definition)
         if tools:
             body["tools"] = tools
-        for key, value in params.items():
+        for key in params:
+            value = params[key]
             if key not in ("model", "input", "stream", "tools", "instructions"):
                 body[key] = value
         return body
@@ -734,6 +810,7 @@ class ResponsesAdapter:
         pending: list[ContentBlock] = []
 
         def flush() -> None:
+            """보관한 일반 블록을 메시지 Item으로 변환하고 임시 상태를 초기화한다."""
             nonlocal pending
             if not pending:
                 return
@@ -781,6 +858,7 @@ class ResponsesAdapter:
         *,
         phase: str | None = None,
     ) -> dict[str, Any] | None:
+        """역할과 원본 출력 메타데이터에 맞춰 본문·인용을 요청 메시지 Item으로 변환한다."""
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
         item_meta: dict[str, Any] = {}
@@ -798,31 +876,7 @@ class ResponsesAdapter:
             and isinstance(item_meta.get("status"), str)
         )
         if role == "assistant" and not replaying_output:
-            # EasyInputMessageParam permits prior assistant turns without server-issued
-            # id/status. The live Responses endpoint accepts those as string content; its
-            # role-sensitive part union rejects input_text/input_image/input_file here.
-            portable = [
-                block
-                for block in blocks
-                if not isinstance(block, ImageBlock | AudioBlock)
-                and not (
-                    isinstance(block, DocumentBlock)
-                    and bool(block.data)
-                    and not block.text
-                    and not block.uri
-                )
-            ]
-            text = lowerer.lower_text(portable)
-            if not text:
-                return None
-            item: dict[str, Any] = {
-                "type": "message",
-                "role": "assistant",
-                "content": text,
-            }
-            if phase in ("commentary", "final_answer"):
-                item["phase"] = phase
-            return item
+            return _assistant_input_message(blocks, lowerer, phase)
         annotations_by_target: dict[int, list[dict[str, Any]]] = {}
         legacy_annotations: list[dict[str, Any]] = []
         for candidate in blocks:
@@ -839,6 +893,7 @@ class ResponsesAdapter:
                 legacy_annotations.append(dict(candidate.native))
 
         def flush_plain() -> None:
+            """일반 블록을 입력 또는 출력 텍스트 part로 변환하고 임시 목록을 초기화한다."""
             text_parts = lowerer.lower_text_parts(plain)
             plain.clear()
             for text in text_parts:
@@ -859,26 +914,10 @@ class ResponsesAdapter:
                     parts.append(dict(native_part))
                     continue
             if isinstance(block, TextBlock) and block.vendor == SOURCE and block.native:
-                native = block.native
-                native_part = native.get("part")
-                if isinstance(native_part, dict):
+                native_part = _native_text_part(block, annotations_by_target, legacy_annotations)
+                if native_part is not None:
                     flush_plain()
-                    part = dict(native_part)
-                    if part.get("type") == "output_text":
-                        part["text"] = block.text
-                        target_index = block.index
-                        annotations = (
-                            annotations_by_target.get(target_index, [])
-                            if isinstance(target_index, int)
-                            else []
-                        )
-                        if not annotations:
-                            annotations = legacy_annotations
-                        if annotations and not part.get("annotations"):
-                            part["annotations"] = annotations
-                    elif part.get("type") == "refusal":
-                        part["refusal"] = block.text.removeprefix(REFUSAL_PREFIX)
-                    parts.append(part)
+                    parts.append(native_part)
                     continue
             # Responses의 assistant output message는 output_text/refusal만 허용한다. 출력 오디오
             # stream이나 다른 벤더의 assistant media를 input part로 위조하지 않는다. 문서는
@@ -904,6 +943,7 @@ class ResponsesAdapter:
 
     @staticmethod
     def _tool_use_item(block: ToolUseBlock) -> dict[str, Any]:
+        """허브 도구 호출을 종류별 Responses 호출 Item으로 변환한다."""
         if block.vendor == SOURCE and block.native:
             item = dict(block.native)
             if block.kind == "mcp_approval":
@@ -931,6 +971,7 @@ class ResponsesAdapter:
 
     @staticmethod
     def _tool_result_item(block: ToolResultBlock, lowerer: Lowerer) -> dict[str, Any]:
+        """원본 또는 공통 도구 결과를 Responses 결과 Item으로 변환한다."""
         if block.vendor == SOURCE and block.native:
             return dict(block.native)
         if block.kind == "mcp_approval":
@@ -947,7 +988,10 @@ class ResponsesAdapter:
         rendered_parts: list[dict[str, Any]] = []
         if block.content:
             rendered_parts.append({"type": "input_text", "text": block.content})
-        searches = [nested for nested in block.blocks if isinstance(nested, SearchResultBlock)]
+        searches = []
+        for nested in block.blocks:
+            if isinstance(nested, SearchResultBlock):
+                searches.append(nested)
         if searches:
             # 이 API에는 search result 채널이 없다. 문서와 같은 텍스트로 보낸다.
             rendered_parts.append({"type": "input_text", "text": lowerer.lower_text(searches)})
@@ -981,6 +1025,7 @@ class ResponsesAdapter:
 
     @staticmethod
     def _reasoning_input(block: ThinkingBlock) -> dict[str, Any] | None:
+        """같은 벤더의 추론 원본과 암호화 내용을 재사용할 reasoning Item으로 구성한다."""
         if block.native:
             item = dict(block.native)
             if block.encrypted_content:
@@ -995,6 +1040,7 @@ class ResponsesAdapter:
         return None
 
     def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any] | None:
+        """대상 벤더의 원본 도구 정의 또는 공통 함수 도구 정의를 반환한다."""
         native = tool.native_for(self.name)
         if native is not None:
             return native
@@ -1008,12 +1054,14 @@ class ResponsesAdapter:
         }
 
     def is_terminal(self, frame: SseEvent) -> bool:
+        """SSE 프레임이 이 API의 종료 이벤트인지 판정한다."""
         name = frame.event.strip()
         if name in TERMINAL_EVENTS:
             return True
         return self._peek_type(frame) in TERMINAL_EVENTS
 
     def decode(self, frame: SseEvent) -> dict[str, Any] | None:
+        """빈 SSE data를 제외하고 JSON 객체를 해석하며 잘못된 형식은 MappingError로 전달한다."""
         payload = frame.data.strip()
         if not payload:
             return None
@@ -1029,6 +1077,7 @@ class ResponsesAdapter:
 
     @staticmethod
     def _peek_type(frame: SseEvent) -> str:
+        """SSE data에서 이벤트 종류를 확인하며 해석할 수 없으면 빈 값을 반환한다."""
         payload = frame.data.strip()
         if not payload:
             return ""
@@ -1043,9 +1092,11 @@ class ResponsesAdapter:
         return ""
 
     def to_hub(self) -> StreamMapper[Any, Any]:
+        """스트림마다 독립적인 벤더 응답→허브 델타 변환기를 생성한다."""
         return _ToHub()
 
     def to_native(self) -> NativeAccumulator[ResponsesResponse]:
+        """스트림마다 독립적인 원본 Response 누적기를 생성한다."""
         return _ToNative()
 
     def token_count_calls(
@@ -1084,9 +1135,14 @@ class ResponsesAdapter:
                 "moderation",
             }
         )
+        selected_fields = {}
+        for key in body:
+            value = body[key]
+            if key not in excluded:
+                selected_fields[key] = value
         payload = yield JsonCall(
             "/v1/responses/input_tokens",
-            {key: value for key, value in body.items() if key not in excluded},
+            selected_fields,
         )
         input_tokens = payload.get("input_tokens")
         if not isinstance(input_tokens, int):

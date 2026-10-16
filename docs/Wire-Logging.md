@@ -37,7 +37,8 @@ result = await bridge.complete(history, request_id="chat-run-123-call-1")
 `Bridge`와 `SyncBridge`의 `stream()` / `complete()`에서 지원한다.
 ID는 벤더 요청 본문이나 헤더로 전송하지 않는다. 여러 API 호출에 같은 ID를 재사용하면
 구분할 수 없으므로 호출마다 다른 값을 사용한다. 별도 ID 보관소는 없다.
-`build_request()`와 `count_tokens()`는 이번 로깅 대상에 포함하지 않는다.
+`build_request()`와 `count_tokens()`는 원본 wire 로그 대상에 포함하지 않는다.
+`count_tokens()`의 시작·완료·실패는 아래 운영 로그로 기록한다.
 
 | 로거 | event | payload |
 |---|---|---|
@@ -48,7 +49,7 @@ ID는 벤더 요청 본문이나 헤더로 전송하지 않는다. 여러 API �
 | `completion_bridge.wire.calls` | `error` | 예외 클래스 이름 `error_type` |
 | `completion_bridge.wire.calls` | `cancelled` | 예외 클래스 이름 또는 빈 객체 |
 
-모든 이벤트는 DEBUG다. Python LogRecord의 `wire` 필드에 `event`, `request_id`,
+위 wire 이벤트는 모두 DEBUG다. Python LogRecord의 `wire` 필드에 `event`, `request_id`,
 `vendor`, `model`, `sequence`, `elapsed_ms`, `payload`가 들어간다.
 제공한 `JsonFormatter`는 여기에 UTC `timestamp`, `level`, `logger`를 추가해 JSONL로 출력한다.
 SSE 순번은 호출마다 1부터 증가한다. 다른 이벤트의 sequence는 마지막 수신 SSE 순번이다.
@@ -122,3 +123,52 @@ Response, Anthropic의 본문·thinking·서명·인용·도구 입력·usage, G
 정한다. 그때 꺼져 있었다가 종료 전에 켜지면 그 호출의 response payload는 null이다.
 로그 핸들러·직렬화 오류는 생성 요청으로 전파하지 않는다. 따라서 로그 저장 실패를 API 성공과
 동일시할 수 없으며, 이 기능은 내구성을 보장하는 감사 저장소가 아니다.
+
+## 본문을 제외한 운영 로그
+
+`completion_bridge.operations`는 모델 호출, 토큰 수 조회, 런타임 실행, 도구 실행의
+시작·완료·실패를 기록한다. 원본 wire 로그와 별도로 설정하며, 요청·응답 본문,
+도구 인자·결과, 예외 메시지·traceback은 포함하지 않는다.
+`JsonFormatter`는 LogRecord의 `operation` 정보를 JSONL로 출력한다.
+
+- `INFO`: `started`, `finished`. `operation`, `request_id`, `parent_request_id`,
+  `elapsed_ms`, 종료 `outcome`으로 호출 관계와 결과를 확인한다.
+- `DEBUG`: 원본 응답 누적 실패처럼 진단에 필요한 처리 결과를 기록한다.
+  도구 승인·검토 정책은 콜백의 책임이며 라이브러리가 판정 로그를 만들지 않는다.
+- `WARNING`: 호출 횟수 제한, 원본 응답 병합 실패 등에 실제 적용한
+  `recovery`를 함께 기록한다.
+- `ERROR`: 실패를 처리하는 계층에서 예외 종류를 기록한다. 상위 런타임은 이미 기록된
+  모델 실패를 다시 ERROR로 기록하지 않는다. 콜백 예외는 런타임에서 기록한다.
+
+`Run.request_id`는 실행마다 생성된다. 모델 호출은 이 ID와 호출 순번으로 식별하며,
+`parent_request_id`로 런타임과 연결한다. 도구 콜백에도 부모 ID가
+전달된다. 미해결 HITL은 `hitl_required`, 취소는 `cancelled`로 종료된다.
+로그 핸들러의 실패는 원래 실행 결과를 변경하지 않는다.
+
+### 환경별 출력과 보관
+
+라이브러리는 핸들러나 파일 회전을 자동 설정하지 않는다. 위 JSON 예제는 소비 앱이
+명시적으로 적용하는 파일 출력 예제이며 콘솔 출력은 사용하지 않는다.
+운영 로그는 UTF-8 `logs/bridge-operations.jsonl`, 파일당 10 MiB, 백업 5개로
+현재 파일 포함 약 60 MiB를 사용한다. 원본 calls는 20 MiB씩 약 120 MiB,
+SSE는 50 MiB씩 약 300 MiB로, 세 파일 종류의 합계는 약 480 MiB다.
+단일 레코드가 파일 제한보다 크면 이 크기를 초과할 수 있으므로 원본 로그를 켜는 앱은
+요청 크기 제한과 디스크 사용량 감시도 적용해야 한다.
+
+| 환경 | 운영 로그 | 원본 wire 로그 | 출력 |
+|---|---|---|---|
+| 개발 | DEBUG 또는 INFO | 원본 확인이 필요할 때만 DEBUG | 예제 파일 또는 앱의 콘솔 핸들러 |
+| 테스트 | 테스트가 캡처하는 DEBUG | 해당 wire 검증 테스트에서만 DEBUG | 기본 파일 생성 없음 |
+| 운영 | INFO | 기본 비활성화 | 운영 로그 파일 또는 중앙 수집기 |
+
+제공한 JSON은 원본 확인용이므로 wire 로거가 DEBUG로 활성화되어 있다.
+운영에 적용할 때는 `completion_bridge.wire.calls`와 `completion_bridge.wire.sse`의
+`level`을 WARNING으로 변경하여 원본 기록을 비활성화한다. 운영 로거는 INFO를 유지한다.
+원본 wire 로그에는 사용자가 요청한 원래 본문·인자·결과가 포함되므로 이 설정을 일반
+운영 로그처럼 취급하면 안 된다.
+
+예제는 크기와 개수 기준 보관이며 시간 기준 만료나 압축을 수행하지 않는다.
+백업 개수를 초과한 가장 오래된 파일은 회전 시 삭제한다. 기간 기준 삭제가 필요하면
+소비 앱의 로그 수집기에서 별도로 설정한다. 앱 실행 계정과 승인된 운영 계정만 로그
+디렉터리를 읽을 수 있도록 파일 권한을 설정하고, 백업에도 같은 권한을 적용한다.
+여러 프로세스가 같은 회전 파일을 공유하지 않도록 프로세스별 경로나 중앙 수집기를 사용한다.

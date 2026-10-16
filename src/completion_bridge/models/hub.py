@@ -11,8 +11,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .blocks import Block, ContentBlock, TextBlock
-from .parameters import Hyperparameters
+from completion_bridge.models.blocks import Block, ContentBlock, TextBlock
+from completion_bridge.models.parameters import Hyperparameters
 
 __all__ = [
     "HubMessage",
@@ -26,6 +26,7 @@ __all__ = [
 
 
 def _overwrite() -> dict[str, Any]:
+    """필드의 스트림 병합을 값 교체로 지정하는 메타데이터를 반환한다."""
     return {"stream": "overwrite"}
 
 
@@ -48,7 +49,8 @@ class Usage(BaseModel):
 class HubResponse(BaseModel):
     """벤더 응답의 허브 표현. 델타와 최종 결과가 같은 타입이다.
 
-    스트리밍 중에는 조각만 채워진 델타로 흐르고, :class:`~completion_bridge.merge.StreamMerger`
+    스트리밍 중에는 조각만 채워진 델타로 전달되며,
+    :class:`~completion_bridge.streaming.merge.StreamMerger`
     가 그것들을 접어 같은 타입의 최종 결과를 만든다. 소비자가 두 타입을 구분할 필요가 없다.
 
     단, content block의 식별 필드는 다르다. 델타의 블록은 ``seq``를 갖고 ``index``가 없으며,
@@ -74,11 +76,19 @@ class HubResponse(BaseModel):
     @property
     def text(self) -> str:
         """본문 블록만 이어붙인 문자열. 흔한 소비 경로라 편의로 둔다."""
-        return "".join(b.text for b in self.content if isinstance(b, TextBlock))
+        text_values = []
+        for candidate_block in self.content:
+            if isinstance(candidate_block, TextBlock):
+                text_values.append(candidate_block.text)
+        return "".join(text_values)
 
-    def blocks_of(self, block_type: type[ContentBlock]) -> list[ContentBlock]:
+    def blocks_of[B: ContentBlock](self, block_type: type[B]) -> list[B]:
         """주어진 타입의 블록만 순서대로 고른다."""
-        return [b for b in self.content if isinstance(b, block_type)]
+        blocks: list[B] = []
+        for block in self.content:
+            if isinstance(block, block_type):
+                blocks.append(block)
+        return blocks
 
 
 class HubMessage(BaseModel):
@@ -96,22 +106,26 @@ class HubMessage(BaseModel):
 
     @model_validator(mode="after")
     def validate_synthetic_role(self) -> HubMessage:
+        """synthetic 선언을 assistant 역할에만 허용하고 잘못된 조합은 거부한다."""
         if self.synthetic and self.role != "assistant":
             raise ValueError("synthetic=True requires role='assistant'")
         return self
 
     @classmethod
     def user(cls, text: str) -> HubMessage:
+        """본문 텍스트를 포함하는 user 메시지를 생성한다."""
         return cls(role="user", content=[TextBlock(text=text)])
 
     @classmethod
     def system(cls, text: str) -> HubMessage:
+        """지시문 텍스트를 포함하는 system 메시지를 생성한다."""
         return cls(role="system", content=[TextBlock(text=text)])
 
     @classmethod
     def assistant(
         cls, text: str | None = None, *, blocks: list[Any] | None = None, synthetic: bool = False
     ) -> HubMessage:
+        """지정 블록 또는 텍스트를 포함하는 assistant 메시지를 생성한다."""
         if blocks is None:
             blocks = [TextBlock(text=text or "")]
         return cls(role="assistant", content=blocks, synthetic=synthetic)
@@ -145,6 +159,7 @@ class ToolDefinition(BaseModel):
         return cls(name=str(name), vendor=vendor, wire=dict(wire))
 
     def native_for(self, vendor: str) -> dict[str, Any] | None:
+        """요청 벤더가 일치할 때만 원본 도구 정의의 사본을 반환한다."""
         if self.vendor == vendor and self.wire:
             return dict(self.wire)
         return None

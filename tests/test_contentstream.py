@@ -6,7 +6,7 @@ Java ``EnhancedCompletionDeltaMapperTest`` 1,027줄의 계약을 옮긴다. 핵�
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import pytest
 
@@ -222,6 +222,36 @@ class TestNestedPaths:
 
 
 class TestSchemaValidation:
+    @pytest.mark.parametrize("failure", ["collision", "empty_alias", "alias", "attr"])
+    @pytest.mark.parametrize("path", ["/existing", "/new"])
+    def test_failed_binding_preserves_existing_state(self, failure: str, path: str) -> None:
+        """충돌·잘못된 입력·입력 순회 실패에도 기존 등록을 유지한다."""
+        sch = ContentSchema().bind("/existing", tag="old", attr=("id",))
+        sch.bind("/sibling", tag="taken")
+
+        def broken_values() -> Iterator[str]:
+            """유효한 첫 원소를 제공한 뒤 입력 순회를 실패시킨다."""
+            yield "new"
+            raise ValueError("input iteration failed")
+
+        aliases = ("new", "taken") if failure == "collision" else ("new", "")
+        alias_input = broken_values() if failure == "alias" else aliases
+        attributes = broken_values() if failure == "attr" else iter(("title",))
+        if failure == "attr":
+            alias_input = iter(("new",))
+
+        with pytest.raises(ValueError):
+            sch.bind(path, tag="candidate", alias=alias_input, attr=attributes)
+
+        assert sch.tag_names == frozenset({"old", "taken"})
+        assert sch.paths_for("old") == frozenset({"/existing"})
+        assert sch.paths_for("taken") == frozenset({"/sibling"})
+        assert sch.paths_for("candidate") == frozenset()
+        assert sch.paths_for("new") == frozenset()
+        assert sch.allowed_attrs("/existing") == frozenset({"id"})
+        assert sch.allowed_attrs("/new") == frozenset()
+        assert sch.open_target("/", "candidate") is None
+
     def test_sibling_conflict_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="sibling path"):
             ContentSchema().bind("/a", tag="x").bind("/b", tag="x")
@@ -256,3 +286,16 @@ class TestRawCapture:
         parser.feed("<cite ")
         parser.feed('id="d1">x</cite>')
         assert parser.raw == '<cite id="d1">x</cite>'
+
+
+@pytest.mark.parametrize("name", [None, 1, "", "bad name", "bad/name", "bad>name", "bad\x00name"])
+def test_invalid_schema_names_do_not_mutate_existing_registration(name):
+    """해석 불가능한 태그·속성 이름은 기존 등록 상태를 유지하며 거부한다."""
+    sch = ContentSchema().bind("/old", tag="old", attr=("id",))
+    with pytest.raises(ValueError):
+        sch.bind("/new", tag=name)
+    with pytest.raises(ValueError):
+        sch.bind("/new", tag="new", attr=(name,))
+    assert sch.tag_names == frozenset({"old"})
+    assert sch.allowed_attrs("/old") == frozenset({"id"})
+    assert sch.allowed_attrs("/new") == frozenset()

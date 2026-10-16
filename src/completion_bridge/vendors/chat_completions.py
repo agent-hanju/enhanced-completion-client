@@ -15,7 +15,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..blocks import (
+from completion_bridge.errors import MappingError
+from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
     ContentBlock,
@@ -28,8 +29,7 @@ from ..blocks import (
     ToolUseBlock,
     VendorBlock,
 )
-from ..errors import MappingError
-from ..hub import (
+from completion_bridge.models.hub import (
     HubMessage,
     HubRequest,
     HubResponse,
@@ -38,19 +38,19 @@ from ..hub import (
     ToolDefinition,
     Usage,
 )
-from ..mapper import StreamMapper
-from ..native import (
+from completion_bridge.models.native import (
     ChatCompletionsChoice,
     ChatCompletionsMessage,
     ChatCompletionsResponse,
     ChatCompletionsToolCall,
 )
-from ..seq import Seq, SeqAllocator
-from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer, NativeAccumulator
-from .normalize import REFUSAL_PREFIX, stop_reason_from_chat
-from .parts import as_chat_completions_part, has_opaque_media_reference
-from .tool_policy import can_replay_client_tool
+from completion_bridge.streaming.mapping import StreamMapper
+from completion_bridge.streaming.sequence import Seq, SeqAllocator
+from completion_bridge.transport.sse import SseEvent
+from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
+from completion_bridge.vendors.normalize import REFUSAL_PREFIX, stop_reason_from_chat
+from completion_bridge.vendors.parts import as_chat_completions_part, has_opaque_media_reference
+from completion_bridge.vendors.tool_policy import can_replay_client_tool
 
 __all__ = ["ChatCompletionsAdapter", "chat_completions"]
 
@@ -71,6 +71,7 @@ class _ToHub:
     """
 
     def __init__(self, vendor: str) -> None:
+        """벤더 이름과 스트림별 채널·호출 좌표·인용 구간 상태를 초기화한다."""
         self._vendor = vendor
         self._seqs = SeqAllocator(1)
         self._next_index = 0
@@ -93,7 +94,9 @@ class _ToHub:
             self._channel_seq = self._allocate()
         return self._channel_seq
 
-    def map(self, chunk: dict[str, Any]) -> list[HubResponse]:
+    def map(self, delta: dict[str, Any]) -> list[HubResponse]:
+        """벤더 스트림 이벤트 하나를 허브 델타 목록으로 변환한다."""
+        chunk = delta
         choices = chunk.get("choices") or []
         head: dict[str, Any] = choices[0] if choices else {}
         delta = head.get("delta") or head.get("message") or {}
@@ -146,7 +149,9 @@ class _ToHub:
             if isinstance(annotation, dict):
                 blocks.append(self._annotation(annotation))
 
-        for position, call in enumerate(delta.get("tool_calls") or []):
+        indexed_calls = delta.get("tool_calls") or []
+        for position in range(len(indexed_calls)):
+            call = indexed_calls[position]
             if not isinstance(call, dict):
                 continue
             blocks.append(self._tool_block(call, position))
@@ -165,6 +170,7 @@ class _ToHub:
         return [response]
 
     def flush(self) -> list[HubResponse]:
+        """이 변환기는 종료 시 보관하는 잔여 델타가 없으므로 빈 목록을 반환한다."""
         return []
 
     def _tool_block(self, call: dict[str, Any], position: int) -> ToolUseBlock:
@@ -226,10 +232,12 @@ class _ToHub:
         for key in ("start_index", "end_index"):
             if isinstance(detail.get(key), int):
                 fields[key] = detail[key]
-        # Wire offsets address concatenated content; hub offsets address the target block.
+        # 벤더 오프셋은 연결된 본문 기준이고 허브 오프셋은 대상 블록 기준이다.
         start, end = fields.get("start_index"), fields.get("end_index")
         if isinstance(start, int) and isinstance(end, int):
-            for seq, (left, right) in self._text_ranges.items():
+            for seq in self._text_ranges:
+                left = self._text_ranges[seq][0]
+                right = self._text_ranges[seq][1]
                 if left <= start < end <= right:
                     fields.update(target_seq=seq, start_index=start - left, end_index=end - left)
                     break
@@ -240,6 +248,7 @@ class _ToHub:
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
+        """벤더 사용량을 허브 토큰 사용량과 원본 사용량으로 변환한다."""
         if not isinstance(raw, dict):
             return None
         return Usage(
@@ -402,7 +411,7 @@ class _ToNative:
 
 
 class ChatCompletionsAdapter:
-    """``POST {base_url}/v1/chat/completions``."""
+    """POST {base_url}/v1/chat/completions 요청과 스트림 응답을 변환한다."""
 
     path = "/v1/chat/completions"
     parameter_family = "chat_completions"
@@ -417,29 +426,33 @@ class ChatCompletionsAdapter:
         self.reasoning_input_field = reasoning_input_field
 
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
+        """허브 메시지·도구·설정으로 스트리밍 Chat Completions 요청을 구성한다."""
         body: dict[str, Any] = {
             "model": request.model,
             "messages": self._messages(request.messages, lowerer),
             "stream": True,
         }
-        tools = [
-            definition
-            for tool in request.tools
-            if (definition := self._tool_definition(tool)) is not None
-        ]
+        tools = []
+        for tool in request.tools:
+            definition = self._tool_definition(tool)
+            if definition is not None:
+                tools.append(definition)
         if tools:
             body["tools"] = tools
         params = request.parameters_for(self.parameter_family, vendor_name=self.name)
-        for key, value in params.items():
+        for key in params:
+            value = params[key]
             if key in _RESERVED:
                 continue
             body[key] = value
         return body
 
     def is_terminal(self, frame: SseEvent) -> bool:
+        """SSE 프레임이 이 API의 종료 이벤트인지 판정한다."""
         return frame.data.strip() == DONE
 
     def decode(self, frame: SseEvent) -> dict[str, Any] | None:
+        """빈 프레임과 종료 표식을 제외하고 SSE data의 JSON을 해석한다."""
         payload = frame.data.strip()
         if not payload or payload == DONE:
             return None
@@ -452,9 +465,11 @@ class ChatCompletionsAdapter:
         return parsed
 
     def to_hub(self) -> StreamMapper[Any, Any]:
+        """스트림마다 독립적인 벤더 응답→허브 델타 변환기를 생성한다."""
         return _ToHub(self.name)
 
     def to_native(self) -> NativeAccumulator[ChatCompletionsResponse]:
+        """스트림마다 독립적인 원본 Response 누적기를 생성한다."""
         return _ToNative()
 
     def token_count_calls(
@@ -490,18 +505,19 @@ class ChatCompletionsAdapter:
     # ---- 요청 쪽 내림 ----
 
     def _messages(self, messages: list[HubMessage], lowerer: Lowerer) -> list[dict[str, Any]]:
-        """허브 메시지를 wire 메시지로 펼친다.
+        """허브 메시지 목록을 Chat Completions 메시지 목록으로 변환한다.
 
-        한 허브 메시지가 여러 wire 메시지가 될 수 있다. ``tool_result`` 블록이 role ``tool``의
-        별도 메시지로 나가야 하기 때문이다. Java 초기 구현의 ``toMessage()``가 단일 반환이라
-        이 경우를 표현할 수 없었고, ``streambind-base``에서 ``toMessages()``로 바뀐 이유가 이것이다.
+        한 허브 메시지에 도구 결과가 있으면 role이 tool인 별도 요청 메시지를 생성한다.
         """
         out: list[dict[str, Any]] = []
         for message in messages:
             pending: list[ContentBlock] = []
             blocks = list(message.content)
-            # Only dense order indices are sortable; vocabulary/vendor keys are opaque.
-            if blocks and {block.index for block in blocks} == set(range(len(blocks))):
+            # 0부터 연속하는 최종 index만 순서 비교에 사용한다.
+            selected_keys = set()
+            for block in blocks:
+                selected_keys.add(block.index)
+            if blocks and selected_keys == set(range(len(blocks))):
                 blocks.sort(key=lambda block: block.index if block.index is not None else 0)
             for block in blocks:
                 if not isinstance(block, ToolResultBlock):
@@ -528,20 +544,26 @@ class ChatCompletionsAdapter:
     def _message(
         self, role: str, blocks: list[ContentBlock], lowerer: Lowerer
     ) -> dict[str, Any] | None:
-        tool_calls = [
-            b
-            for b in blocks
-            if isinstance(b, ToolUseBlock) and can_replay_client_tool(b, self.name)
-        ]
-        reasoning = [
-            b.thinking
-            for b in blocks
-            if isinstance(b, ThinkingBlock) and b.vendor == self.name and self.reasoning_input_field
-        ]
+        """동일 역할의 블록을 도구 호출·추론·멀티모달 본문을 보존하는 메시지로 변환한다."""
+        tool_calls = []
+        for candidate_block in blocks:
+            if isinstance(candidate_block, ToolUseBlock) and can_replay_client_tool(
+                candidate_block, self.name
+            ):
+                tool_calls.append(candidate_block)
+        reasoning = []
+        for candidate_block in blocks:
+            if (
+                isinstance(candidate_block, ThinkingBlock)
+                and candidate_block.vendor == self.name
+                and self.reasoning_input_field
+            ):
+                reasoning.append(candidate_block.thinking)
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
 
         def flush_plain() -> None:
+            """보관한 일반 블록을 텍스트 part로 변환한 뒤 임시 목록을 초기화한다."""
             text_parts = lowerer.lower_text_parts(plain)
             plain.clear()
             for text in text_parts:
@@ -587,29 +609,38 @@ class ChatCompletionsAdapter:
             return None
         wire: dict[str, Any] = {"role": role}
         if parts:
-            if all(part.get("type") == "text" for part in parts) and (
-                role == "assistant" or len(parts) == 1
-            ):
-                wire["content"] = "".join(part["text"] for part in parts)
+            all_text_parts = True
+            for part in parts:
+                if not (part.get("type") == "text"):
+                    all_text_parts = False
+                    break
+            if all_text_parts and (role == "assistant" or len(parts) == 1):
+                text_contents = []
+                for part in parts:
+                    text_contents.append(part["text"])
+                wire["content"] = "".join(text_contents)
             else:
                 wire["content"] = parts
         elif tool_calls:
             wire["content"] = None
         if tool_calls:
-            wire["tool_calls"] = [self._tool_call(block) for block in tool_calls]
+            wire_calls = []
+            for block in tool_calls:
+                wire_calls.append(self._tool_call(block))
+            wire["tool_calls"] = wire_calls
         if reasoning and self.reasoning_input_field:
             wire[self.reasoning_input_field] = "".join(reasoning)
         return wire
 
     def _tool_call(self, block: ToolUseBlock) -> dict[str, Any]:
+        """원본 호출 식별자와 인자를 요청용 도구 호출로 변환한다."""
+        call: dict[str, Any]
         if block.vendor == self.name and block.native:
             call = dict(block.native)
-            # ``index`` identifies a tool-call delta inside a streamed response.
-            # It is not part of an assistant tool call accepted in request history.
+            # index는 스트림 델타의 도구 호출 좌표이며 요청 이력의 호출 필드가 아니다.
             call.pop("index", None)
-            # A streamed tool call carries its ``id`` on the first delta only, and merging
-            # keeps the last ``native`` seen, so the id is usually absent here. The server
-            # rejects an assistant tool call without one.
+            # native에는 마지막 델타만 남을 수 있으므로
+            # 최초 델타의 호출 ID를 공통 필드에서 복원한다.
             if not call.get("id") and block.id:
                 call["id"] = block.id
         else:
@@ -629,11 +660,13 @@ class ChatCompletionsAdapter:
         ``structured_content``는 보내지 않는다. 없으면 ``structured_content`` JSON, 그것도
         없으면 ``content``를 쓴다.
         """
-        nested = lowerer.lower_text(
-            b
-            for b in block.blocks
-            if not isinstance(b, ContentBlock) or not has_opaque_media_reference(b)
-        )
+        portable_blocks = []
+        for candidate_block in block.blocks:
+            if not isinstance(candidate_block, ContentBlock) or not has_opaque_media_reference(
+                candidate_block
+            ):
+                portable_blocks.append(candidate_block)
+        nested = lowerer.lower_text(portable_blocks)
         if nested:
             return f"{block.content}\n{nested}" if block.content else nested
         if block.structured_content is not None:
@@ -641,6 +674,7 @@ class ChatCompletionsAdapter:
         return block.content
 
     def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any] | None:
+        """대상 벤더의 원본 도구 정의 또는 공통 함수 도구 정의를 반환한다."""
         native = tool.native_for(self.name)
         if native is not None:
             return native

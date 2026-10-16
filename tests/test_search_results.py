@@ -22,7 +22,7 @@ from completion_bridge import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from completion_bridge.seq import finalize
+from completion_bridge.streaming.sequence import finalize
 from completion_bridge.vendors import (
     GenerateContentAdapter,
     chat_completions,

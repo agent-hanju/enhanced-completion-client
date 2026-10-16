@@ -1,8 +1,9 @@
-"""Wire logging observes calls without changing the vendor request."""
+"""원본 통신 로깅이 벤더 요청을 변경하지 않고 호출을 기록하는지 검증한다."""
 
 import json
 import logging
 import logging.config
+from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from uuid import UUID
 
@@ -62,6 +63,7 @@ async def test_close_records_cancelled(caplog, sync):
             iterator = iter(stream)
             next(iterator)
             stream.close()
+            assert isinstance(iterator, Generator)
             iterator.close()
     else:
         async with httpx.AsyncClient(transport=transport) as client:
@@ -71,6 +73,7 @@ async def test_close_records_cancelled(caplog, sync):
             iterator = stream.__aiter__()
             await anext(iterator)
             await stream.aclose()
+            assert isinstance(iterator, AsyncGenerator)
             await iterator.aclose()
     events = [r.wire["event"] for r in caplog.records if hasattr(r, "wire")]
     assert events == ["request", "sse", "cancelled"]
@@ -121,7 +124,7 @@ def test_file_configuration(tmp_path):
 
 
 def test_disabled_logging_skips_payload(monkeypatch):
-    from completion_bridge.wire_logging import WireLog
+    from completion_bridge.logging import WireLog
 
     monkeypatch.setattr(logging.Logger, "isEnabledFor", lambda self, level: False)
     wire = WireLog(None, "test", "m", "https://test", {})

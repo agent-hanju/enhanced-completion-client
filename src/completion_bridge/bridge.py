@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import copy
 import html
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
+import logging
+import sys
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel
 
-from .blocks import (
+from completion_bridge.errors import (
+    ExecutionStateError,
+    MappingError,
+    StreamNotFinished,
+)
+from completion_bridge.logging import OperationLog, WireLog
+from completion_bridge.models.blocks import (
     UNAVAILABLE,
     AnnotationBlock,
     AudioBlock,
@@ -26,44 +34,49 @@ from .blocks import (
     ToolResultBlock,
     VendorBlock,
 )
-from .errors import ExtractionError, MappingError, StreamNotFinished
-from .hub import HubMessage, HubRequest, HubResponse, TokenCount, ToolDefinition
-from .mapper import StreamMapper, compose
-from .merge import StreamMerger
-from .parameters import Hyperparameters
-from .seq import finalize
-from .transport.http import apost_json, astream_sse, post_json, stream_sse
-from .transport.sse import SseEvent
-from .vendors.base import NativeAccumulator, VendorAdapter
-from .vendors.tool_policy import to_portable
-from .vocabulary import Vocabulary
-from .wire_logging import WireLog
+from completion_bridge.models.hub import (
+    HubMessage,
+    HubRequest,
+    HubResponse,
+    TokenCount,
+    ToolDefinition,
+)
+from completion_bridge.models.parameters import Hyperparameters
+from completion_bridge.models.tools import ToolCallback
+from completion_bridge.runtime.execution import RuntimeExecution
+from completion_bridge.streaming.mapping import StreamMapper, Vocabulary, compose
+from completion_bridge.streaming.merge import StreamMerger
+from completion_bridge.streaming.sequence import finalize
+from completion_bridge.transport.http import apost_json, astream_sse, post_json, stream_sse
+from completion_bridge.transport.sse import SseEvent
+from completion_bridge.vendors.base import NativeAccumulator, VendorAdapter
+from completion_bridge.vendors.tool_policy import to_portable
 
 __all__ = ["AsyncStream", "Bridge", "SyncBridge", "SyncStream"]
 
 MessageInput = HubMessage | str | Mapping[str, Any]
-#: media_type을 텍스트로 뽑는 전처리기. 등록되지 않은 유형은 전달 불가로 표시된다.
-Extractor = Callable[[Any], str | None]
 
 
 def _attrs(**pairs: object) -> str:
     """빈 값을 뺀 XML-like 속성 문자열."""
-    rendered = [
-        f' {name}="{html.escape(str(value), quote=True)}"'
-        for name, value in pairs.items()
-        if value not in (None, "")
-    ]
+    rendered = []
+    for name in pairs:
+        value = pairs[name]
+        if value not in (None, ""):
+            rendered.append(f' {name}="{html.escape(str(value), quote=True)}"')
     return "".join(rendered)
 
 
 def _grounding_lines(block: GroundingBlock) -> list[str]:
     """구간-출처 그래프를 평탄화하지 않고 두 종류의 줄로 내린다."""
-    lines = [
-        f"<source{_attrs(index=source.index, uri=source.uri, title=source.title)}/>"
-        for source in block.sources
-    ]
+    lines = []
+    for source in block.sources:
+        lines.append(f"<source{_attrs(index=source.index, uri=source.uri, title=source.title)}/>")
     for support in block.supports:
-        refs = ",".join(str(i) for i in support.source_indices)
+        source_references = []
+        for i in support.source_indices:
+            source_references.append(str(i))
+        refs = ",".join(source_references)
         attrs = _attrs(sources=refs, start=support.start_index, end=support.end_index)
         lines.append(f"<support{attrs}>{html.escape(support.text or '')}</support>")
     for query in block.search_queries:
@@ -82,13 +95,13 @@ class _Lowerer:
         self,
         vocabularies: Sequence[Vocabulary],
         vendor_name: str,
-        extractors: Mapping[str, Extractor] | None = None,
     ) -> None:
+        """블록 변환에 사용할 어휘와 벤더 이름을 보관한다."""
         self._vocabularies = vocabularies
         self._vendor = vendor_name
-        self._extractors = dict(extractors or {})
 
     def lower_text(self, blocks: Any) -> str:
+        """블록별 텍스트 변환 결과를 하나의 문자열로 결합한다."""
         return "".join(self.lower_text_parts(blocks))
 
     def lower_text_parts(self, blocks: Any) -> list[str]:
@@ -102,7 +115,10 @@ class _Lowerer:
             replaced = vocabulary.lower(current)
             if replaced is not None:
                 current = list(replaced)
-        parts = [self._lower_citations(b) for b in current if isinstance(b, TextBlock) and b.text]
+        parts = []
+        for candidate_block in current:
+            if isinstance(candidate_block, TextBlock) and candidate_block.text:
+                parts.append(self._lower_citations(candidate_block))
         documents = self._lower_documents(current)
         attachments = self._lower_attachments(current)
         references = self._lower_references(current)
@@ -163,7 +179,7 @@ class _Lowerer:
         """네이티브 채널이 없어 못 내려간 이미지·음성을 태그로 남긴다.
 
         지금까지 이것들은 조용히 사라졌다. 호출자는 보냈다고 믿고 모델은 받지 못한다.
-        전처리기가 등록되어 있으면 추출 텍스트를, 없으면 전달 불가 표시를 남긴다.
+        원본을 전달할 수 없는 미디어에는 전달 불가 표시를 남긴다.
         """
         lines: list[str] = []
         for block in blocks:
@@ -176,34 +192,12 @@ class _Lowerer:
                 )
             else:
                 continue
-            extracted = self._extract(media, block)
             attrs = _attrs(**{"media-type": media})
-            if extracted is not None:
-                lines.append(f"<{tag}{attrs}>{html.escape(extracted)}</{tag}>")
-            else:
-                lines.append(f'<{tag}{attrs} unavailable="true">{UNAVAILABLE}</{tag}>')
+            lines.append(f'<{tag}{attrs} unavailable="true">{UNAVAILABLE}</{tag}>')
         if not lines:
             return ""
         body = "\n".join(lines)
         return f"<attachments>\n{body}\n</attachments>"
-
-    def _extract(self, media_type: str | None, block: ContentBlock) -> str | None:
-        """등록된 전처리기로 내용을 텍스트로 뽑는다. 없으면 ``None``.
-
-        전처리기가 던진 예외는 :class:`ExtractionError`로 감싸 올린다. 전달 불가 표시로
-        degrade하지 않는다 — 그것은 전처리기가 없다는 설정 상태의 뜻이고, 실패를 같은 태그로
-        접으면 호출자 코드의 결함이 그 뒤에 숨는다.
-        """
-        extractor = self._extractors.get(media_type or "")
-        if extractor is None:
-            return None
-        try:
-            return extractor(block)
-        except Exception as exc:
-            raise ExtractionError(
-                f"extractor for {media_type or 'unknown media type'} failed",
-                media_type=media_type,
-            ) from exc
 
     def _lower_documents(self, blocks: list[ContentBlock]) -> str:
         """네이티브 문서 채널이 없는 벤더에서 문서를 본문에 실는다.
@@ -219,15 +213,16 @@ class _Lowerer:
 
         :class:`SearchResultBlock`도 같은 ``<documents>`` 묶음에 블록 순서대로 들어간다.
         """
-        documents = [b for b in blocks if isinstance(b, DocumentBlock | SearchResultBlock)]
+        documents = []
+        for candidate_block in blocks:
+            if isinstance(candidate_block, DocumentBlock | SearchResultBlock):
+                documents.append(candidate_block)
         if not documents:
             return ""
-        rendered = "\n".join(
-            d.to_prompt(extracted=self._extract(d.media_type, d))
-            if isinstance(d, DocumentBlock)
-            else d.to_prompt()
-            for d in documents
-        )
+        document_texts = []
+        for document in documents:
+            document_texts.append(document.to_prompt())
+        rendered = "\n".join(document_texts)
         return f"<documents>\n{rendered}\n</documents>"
 
 
@@ -238,6 +233,7 @@ class _Pipeline:
     """
 
     def __init__(self, vendor: VendorAdapter, vocabularies: Sequence[Vocabulary]) -> None:
+        """벤더 매퍼와 활성화된 어휘 매퍼를 스트림별 변환기로 구성한다."""
         stages: list[StreamMapper[Any, Any]] = [vendor.to_hub()]
         for vocabulary in vocabularies:
             lift = vocabulary.lift_mapper()
@@ -246,20 +242,23 @@ class _Pipeline:
         self._mapper = compose(*stages)
 
     def map(self, chunk: Any) -> list[HubResponse]:
+        """벤더 이벤트를 등록된 변환 단계에 적용하고 허브 델타 목록을 반환한다."""
         return list(self._mapper.map(chunk))
 
     def flush(self) -> list[HubResponse]:
+        """각 변환 단계의 잔여 출력을 순서대로 처리한다."""
         return list(self._mapper.flush())
 
 
 class _StreamBase:
-    """델타를 흘리면서 같은 델타를 병합해 최종 결과를 만든다.
+    """모델 스트림의 델타 전달과 최종 응답 누적을 함께 관리한다.
 
-    하나의 스트림이 두 갈래로 소비된다. 소비자는 조각을 받고, 병합기는 같은 조각을 접는다.
-    Java ``StreamHandle``의 핵심 성질이고 여기서도 유지한다.
+    호출자에게 전달하는 각 델타를 병합기에도 적용한다. 상태를 공유하므로 하나의
+    스트림을 여러 소비자가 동시에 순회하는 사용은 지원하지 않는다.
     """
 
     def __init__(self, vendor: VendorAdapter, vocabularies: Sequence[Vocabulary]) -> None:
+        """스트림별 변환기·병합기와 원본 응답·로깅 상태를 초기화한다."""
         self._vendor = vendor
         self._pipeline = _Pipeline(vendor, vocabularies)
         self._merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
@@ -268,6 +267,8 @@ class _StreamBase:
         self._wire: WireLog | None = None
         self._native: NativeAccumulator[BaseModel] | None = None
         self._native_failure: Exception | None = None
+        self._operation = OperationLog("completion")
+        self._claimed = False
 
     @property
     def result(self) -> HubResponse:
@@ -326,8 +327,13 @@ class _StreamBase:
         """요청을 기록하고, 요청·응답 로그가 켜져 있으면 원본 응답 누적기를 만든다."""
         if self._wire is not None:
             self._wire.start()
+        self._operation.start(vendor=self._vendor.name)
+        if self._wire is not None:
             if self._native is None and self._wire.calls_enabled():
-                self._native = self._vendor.to_native()
+                try:
+                    self._native = self._vendor.to_native()
+                except Exception as exc:
+                    self._native_failure = exc
 
     def _log_end(self, event: str, error: BaseException | None = None) -> None:
         """종료 기록을 남긴다. 호출당 첫 기록만 남는다.
@@ -337,6 +343,12 @@ class _StreamBase:
         실패하면 ``response`` 대신 ``merge_error``를 예외 클래스 이름과 메시지로 기록한다.
         ``error``와 ``cancelled``의 payload는 예외 클래스 이름 또는 빈 객체다.
         """
+        level = logging.ERROR if event == "error" else logging.INFO
+        self._operation.finish(
+            event,
+            level=level,
+            error_type=type(error).__name__ if error is not None else None,
+        )
         if self._wire is None:
             return
         if event != "response":
@@ -356,6 +368,12 @@ class _StreamBase:
 
         failure = self._native_failure
         if failure is not None:
+            self._operation.emit(
+                logging.WARNING,
+                "native_merge_failed",
+                error_type=type(failure).__name__,
+                recovery="hub_response_preserved",
+            )
             self._wire.finish(
                 "merge_error",
                 lambda: {"error_type": type(failure).__name__, "message": str(failure)},
@@ -371,9 +389,11 @@ class _StreamBase:
             )
 
     def _finish(self) -> list[HubResponse]:
+        """변환기에 남은 델타를 배출하고 병합기에 적용한 목록을 반환한다."""
         return self._emit(self._pipeline.flush())
 
     def _emit(self, deltas: Iterable[HubResponse]) -> list[HubResponse]:
+        """각 델타를 병합기에 적용하고 입력 순서대로 반환한다."""
         out: list[HubResponse] = []
         for delta in deltas:
             self._merger.apply(delta)
@@ -397,6 +417,10 @@ class AsyncStream(_StreamBase):
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[HubResponse]:
+        """SSE 프레임을 허브 델타로 전달하며 종료·실패 시 모델 연결을 정리한다."""
+        if self._claimed or self._closed:
+            raise ExecutionStateError("A model stream can only be consumed once")
+        self._claimed = True
         self._log_start()
         try:
             async for frame in self._frames:
@@ -413,23 +437,39 @@ class AsyncStream(_StreamBase):
             self._log_end("error" if isinstance(exc, Exception) else "cancelled", exc)
             raise
         finally:
-            await self._release()
+            await self._release(sys.exception())
 
     async def aclose(self) -> None:
         """스트림을 끊는다. 매퍼를 flush해 부분 결과를 :attr:`partial`에 남긴다."""
         if self._closed:
             return
-        self._finish()
-        await self._release()
+        try:
+            self._finish()
+        except Exception as exc:
+            self._log_end("error", exc)
+            raise
+        finally:
+            await self._release(sys.exception())
 
-    async def _release(self) -> None:
+    async def _release(self, error: BaseException | None = None) -> None:
+        """연결을 한 번만 정리하고 프레임 공급기의 비동기 종료를 수행한다."""
         if self._closed:
             return
         self._closed = True
         self._log_end("cancelled")
-        aclose = getattr(self._frames, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        try:
+            aclose = getattr(self._frames, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        except Exception as cleanup_error:
+            self._operation.emit(
+                logging.WARNING if error is not None else logging.ERROR,
+                "cleanup_failed",
+                error_type=type(cleanup_error).__name__,
+                recovery="original_error_preserved" if error is not None else "caller_notified",
+            )
+            if error is None:
+                raise
 
 
 class SyncStream(_StreamBase):
@@ -445,6 +485,9 @@ class SyncStream(_StreamBase):
         self._frames = frames
 
     def __iter__(self) -> Iterator[HubResponse]:
+        if self._claimed or self._closed:
+            raise ExecutionStateError("A model stream can only be consumed once")
+        self._claimed = True
         self._log_start()
         try:
             for frame in self._frames:
@@ -459,30 +502,48 @@ class SyncStream(_StreamBase):
             self._log_end("error" if isinstance(exc, Exception) else "cancelled", exc)
             raise
         finally:
-            self._release()
+            self._release(sys.exception())
 
     def close(self) -> None:
         """스트림을 끊는다."""
         if self._closed:
             return
-        self._finish()
-        self._release()
+        try:
+            self._finish()
+        except Exception as exc:
+            self._log_end("error", exc)
+            raise
+        finally:
+            self._release(sys.exception())
 
-    def _release(self) -> None:
+    def _release(self, error: BaseException | None = None) -> None:
+        """연결을 한 번만 정리하고 프레임 공급기의 동기 종료를 수행한다."""
         if self._closed:
             return
         self._closed = True
         self._log_end("cancelled")
-        close = getattr(self._frames, "close", None)
-        if close is not None:
-            close()
+        try:
+            close = getattr(self._frames, "close", None)
+            if close is not None:
+                close()
+        except Exception as cleanup_error:
+            self._operation.emit(
+                logging.WARNING if error is not None else logging.ERROR,
+                "cleanup_failed",
+                error_type=type(cleanup_error).__name__,
+                recovery="original_error_preserved" if error is not None else "caller_notified",
+            )
+            if error is None:
+                raise
 
 
 @runtime_checkable
 class _ModelBindable(Protocol):
     """모델별 경로가 필요한 어댑터의 선택적 계약. 원본을 변경하지 않는다."""
 
-    def for_model(self, model: str) -> VendorAdapter: ...
+    def for_model(self, model: str) -> VendorAdapter:
+        """지정한 모델을 대상으로 하는 어댑터를 반환한다."""
+        ...
 
 
 class _BridgeBase:
@@ -497,10 +558,10 @@ class _BridgeBase:
         api_key: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
-        extractors: Mapping[str, Extractor] | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: float = 120.0,
     ) -> None:
+        """벤더·모델·인증·기본 설정을 보관하고 어휘의 블록 타입을 등록한다."""
         self._vendor = (
             vendor.for_model(model) if model and isinstance(vendor, _ModelBindable) else vendor
         )
@@ -515,18 +576,21 @@ class _BridgeBase:
         for vocabulary in self._vocabularies:
             vocabulary.register()
 
-        self._lowerer = _Lowerer(self._vocabularies, vendor.name, extractors)
+        self._lowerer = _Lowerer(self._vocabularies, vendor.name)
 
     @property
     def url(self) -> str:
+        """기본 URL과 현재 벤더 경로로 요청 URL을 만든다."""
         return f"{self._base_url}{self._vendor.path}"
 
     def _request_vendor(self, model: str | None) -> VendorAdapter:
+        """호출별 모델 설정이 있으면 해당 모델에 맞춘 어댑터를 반환한다."""
         if model and isinstance(self._vendor, _ModelBindable):
             return self._vendor.for_model(model)
         return self._vendor
 
     def _request_url(self, model: str | None) -> str:
+        """호출별 모델을 반영한 벤더 경로로 요청 URL을 만든다."""
         return f"{self._base_url}{self._request_vendor(model).path}"
 
     def build_request(
@@ -539,12 +603,18 @@ class _BridgeBase:
         **params: Any,
     ) -> dict[str, Any]:
         """전송할 wire body를 만들어 돌려준다. 진단과 통과 경로에 쓴다."""
-        normalized_messages = [_coerce_message(m) for m in messages]
+        normalized_messages = []
+        for input_message in messages:
+            normalized_messages.append(_coerce_message(input_message))
         _reject_remote_content_references(normalized_messages, self._vendor.name)
-        normalized_messages = [
-            message.model_copy(update={"content": to_portable(message.content, self._vendor.name)})
-            for message in normalized_messages
-        ]
+        converted_normalized_messages = []
+        for message in normalized_messages:
+            converted_normalized_messages.append(
+                message.model_copy(
+                    update={"content": to_portable(message.content, self._vendor.name)}
+                )
+            )
+        normalized_messages = converted_normalized_messages
         request = HubRequest(
             model=model or self._model,
             messages=normalized_messages,
@@ -572,7 +642,7 @@ class _BridgeBase:
         )
         vendor_headers = getattr(self._vendor, "request_headers", None)
         if callable(vendor_headers):
-            headers.update(vendor_headers())
+            headers.update(cast(Mapping[str, str], vendor_headers()))
         if self._api_key:
             api_key_header = getattr(self._vendor, "api_key_header", "Authorization")
             if str(api_key_header).lower() == "authorization":
@@ -603,11 +673,11 @@ class Bridge(_BridgeBase):
         api_key: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
-        extractors: Mapping[str, Extractor] | None = None,
         headers: Mapping[str, str] | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 120.0,
     ) -> None:
+        """비동기 브리지를 구성하고 주입한 HTTP 클라이언트의 소유권을 구분한다."""
         super().__init__(
             vendor=vendor,
             base_url=base_url,
@@ -615,7 +685,6 @@ class Bridge(_BridgeBase):
             api_key=api_key,
             hyperparameters=hyperparameters,
             vocabularies=vocabularies,
-            extractors=extractors,
             headers=headers,
             timeout=timeout,
         )
@@ -623,6 +692,7 @@ class Bridge(_BridgeBase):
         self._owns_client = http_client is None
 
     def _get_client(self) -> httpx.AsyncClient:
+        """주입한 비동기 클라이언트를 반환하거나 필요한 시점에 내부 클라이언트를 생성한다."""
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         return self._client
@@ -656,7 +726,23 @@ class Bridge(_BridgeBase):
             self._request_url(model),
             body,
         )
+        stream._operation = OperationLog("completion", request_id=stream._wire.request_id)
         return stream
+
+    def run(
+        self,
+        request: HubRequest,
+        *,
+        execute_tool: ToolCallback,
+        max_tool_calls: int = 32,
+    ) -> RuntimeExecution:
+        """콜백의 도구 결과로 모델 요청을 반복하며 델타와 실행 기록을 제공한다.
+
+        입력을 즉시 복사하고 첫 비동기 소비 또는 await 때 실행한다.
+        콜백이 모델용 결과를 제공하지 않으면 HITL 기록을 반환하고 종료한다.
+        정책·도구 연결·백그라운드 작업 생성은 콜백이 담당한다.
+        """
+        return RuntimeExecution(self.stream, request, execute_tool, max_tool_calls)
 
     async def complete(
         self,
@@ -700,26 +786,39 @@ class Bridge(_BridgeBase):
             TransportError: 토큰 수 엔드포인트가 2xx가 아닌 상태를 돌려줄 때.
             MappingError: 응답이 JSON 객체가 아니거나 어댑터가 기대한 필드가 없을 때.
         """
-        body = self.build_request(
-            messages,
-            tools=tools,
-            model=model,
-            hyperparameters=hyperparameters,
-            **params,
-        )
-        client = self._get_client()
-        headers = self._request_headers(accept="application/json")
-        calls = self._request_vendor(model).token_count_calls(body)
+        operation = OperationLog("count_tokens")
+        operation.start(vendor=self._vendor.name)
+        outcome = "completed"
+        level = logging.INFO
+        error_type = None
         try:
-            call = next(calls)
-            while True:
-                payload = await apost_json(
-                    client, f"{self._base_url}{call.path}", json=call.body, headers=headers
-                )
-                call = calls.send(payload)
-        except StopIteration as finished:
-            result: TokenCount = finished.value
-            return result
+            body = self.build_request(
+                messages,
+                tools=tools,
+                model=model,
+                hyperparameters=hyperparameters,
+                **params,
+            )
+            client = self._get_client()
+            headers = self._request_headers(accept="application/json")
+            calls = self._request_vendor(model).token_count_calls(body)
+            try:
+                call = next(calls)
+                while True:
+                    payload = await apost_json(
+                        client, f"{self._base_url}{call.path}", json=call.body, headers=headers
+                    )
+                    call = calls.send(payload)
+            except StopIteration as finished:
+                result: TokenCount = finished.value
+                return result
+        except BaseException as exc:
+            outcome = "error" if isinstance(exc, Exception) else "cancelled"
+            level = logging.ERROR if isinstance(exc, Exception) else logging.INFO
+            error_type = type(exc).__name__
+            raise
+        finally:
+            operation.finish(outcome, level=level, error_type=error_type)
 
     async def aclose(self) -> None:
         """직접 만든 클라이언트만 닫는다. 주입받은 것은 호출자 소관이다."""
@@ -749,11 +848,11 @@ class SyncBridge(_BridgeBase):
         api_key: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         vocabularies: Sequence[Vocabulary] = (),
-        extractors: Mapping[str, Extractor] | None = None,
         headers: Mapping[str, str] | None = None,
         http_client: httpx.Client | None = None,
         timeout: float = 120.0,
     ) -> None:
+        """동기 브리지를 구성하고 주입한 HTTP 클라이언트의 소유권을 구분한다."""
         super().__init__(
             vendor=vendor,
             base_url=base_url,
@@ -761,7 +860,6 @@ class SyncBridge(_BridgeBase):
             api_key=api_key,
             hyperparameters=hyperparameters,
             vocabularies=vocabularies,
-            extractors=extractors,
             headers=headers,
             timeout=timeout,
         )
@@ -769,6 +867,7 @@ class SyncBridge(_BridgeBase):
         self._owns_client = http_client is None
 
     def _get_client(self) -> httpx.Client:
+        """주입한 동기 클라이언트를 반환하거나 필요한 시점에 내부 클라이언트를 생성한다."""
         if self._client is None:
             self._client = httpx.Client(timeout=self._timeout)
         return self._client
@@ -783,6 +882,7 @@ class SyncBridge(_BridgeBase):
         request_id: str | None = None,
         **params: Any,
     ) -> SyncStream:
+        """입력으로 요청을 구성하고 소비 시 전송을 시작하는 동기 스트림을 반환한다."""
         body = self.build_request(
             messages,
             tools=tools,
@@ -801,6 +901,7 @@ class SyncBridge(_BridgeBase):
             self._request_url(model),
             body,
         )
+        stream._operation = OperationLog("completion", request_id=stream._wire.request_id)
         return stream
 
     def complete(
@@ -813,6 +914,7 @@ class SyncBridge(_BridgeBase):
         request_id: str | None = None,
         **params: Any,
     ) -> HubResponse:
+        """동기 스트림을 끝까지 소비하고 병합된 최종 허브 응답을 반환한다."""
         stream = self.stream(
             messages,
             request_id=request_id,
@@ -835,28 +937,42 @@ class SyncBridge(_BridgeBase):
         **params: Any,
     ) -> TokenCount:
         """:meth:`Bridge.count_tokens`의 동기판."""
-        body = self.build_request(
-            messages,
-            tools=tools,
-            model=model,
-            hyperparameters=hyperparameters,
-            **params,
-        )
-        client = self._get_client()
-        headers = self._request_headers(accept="application/json")
-        calls = self._request_vendor(model).token_count_calls(body)
+        operation = OperationLog("count_tokens")
+        operation.start(vendor=self._vendor.name)
+        outcome = "completed"
+        level = logging.INFO
+        error_type = None
         try:
-            call = next(calls)
-            while True:
-                payload = post_json(
-                    client, f"{self._base_url}{call.path}", json=call.body, headers=headers
-                )
-                call = calls.send(payload)
-        except StopIteration as finished:
-            result: TokenCount = finished.value
-            return result
+            body = self.build_request(
+                messages,
+                tools=tools,
+                model=model,
+                hyperparameters=hyperparameters,
+                **params,
+            )
+            client = self._get_client()
+            headers = self._request_headers(accept="application/json")
+            calls = self._request_vendor(model).token_count_calls(body)
+            try:
+                call = next(calls)
+                while True:
+                    payload = post_json(
+                        client, f"{self._base_url}{call.path}", json=call.body, headers=headers
+                    )
+                    call = calls.send(payload)
+            except StopIteration as finished:
+                result: TokenCount = finished.value
+                return result
+        except BaseException as exc:
+            outcome = "error" if isinstance(exc, Exception) else "cancelled"
+            level = logging.ERROR if isinstance(exc, Exception) else logging.INFO
+            error_type = type(exc).__name__
+            raise
+        finally:
+            operation.finish(outcome, level=level, error_type=error_type)
 
     def close(self) -> None:
+        """브리지가 직접 생성한 동기 HTTP 클라이언트만 종료한다."""
         if self._owns_client and self._client is not None:
             self._client.close()
             self._client = None
@@ -889,17 +1005,23 @@ def _reject_remote_content_references(messages: Sequence[HubMessage], target: st
     """
 
     def has_remote_key(value: Any) -> bool:
+        """중첩된 매핑과 목록에 외부 저장 참조 식별자가 있는지 확인한다."""
         if isinstance(value, Mapping):
-            for key, nested in value.items():
+            for key in value:
+                nested = value[key]
                 if key in {"file_id", "container_id"} and nested:
                     return True
                 if has_remote_key(nested):
                     return True
         elif isinstance(value, list | tuple):
-            return any(has_remote_key(item) for item in value)
+            for item in value:
+                if has_remote_key(item):
+                    return True
+            return False
         return False
 
     def check(block: ContentBlock) -> None:
+        """다른 벤더에서 재사용할 수 없는 저장 참조를 가진 블록이면 예외를 발생시킨다."""
         same_or_unscoped = block.vendor is None or block.vendor == target
         if (
             same_or_unscoped

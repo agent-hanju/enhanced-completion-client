@@ -4,6 +4,6 @@
 Messages)는 이 어휘 없이 어댑터가 바로 허브 블록을 만든다.
 """
 
-from .cite import CITE_PATH, CiteVocabulary, cite_schema
+from completion_bridge.vocabularies.cite import CITE_PATH, CiteVocabulary, cite_schema
 
 __all__ = ["CITE_PATH", "CiteVocabulary", "cite_schema"]

@@ -15,7 +15,8 @@ import json
 from collections.abc import Generator, Mapping, Sequence
 from typing import Any
 
-from ..blocks import (
+from completion_bridge.errors import MappingError, VendorStreamError
+from completion_bridge.models.blocks import (
     Citation,
     CitationBlock,
     ContentBlock,
@@ -29,16 +30,22 @@ from ..blocks import (
     ToolUseBlock,
     VendorBlock,
 )
-from ..errors import MappingError
-from ..hub import HubMessage, HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
-from ..mapper import StreamMapper
-from ..native import MessagesContentBlock, MessagesResponse, MessagesUsage
-from ..seq import Seq, SeqAllocator
-from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer, NativeAccumulator
-from .normalize import INSTRUCTION_ROLES
-from .parts import as_anthropic_part, has_opaque_media_reference
-from .tool_policy import can_replay_client_tool
+from completion_bridge.models.hub import (
+    HubMessage,
+    HubRequest,
+    HubResponse,
+    TokenCount,
+    ToolDefinition,
+    Usage,
+)
+from completion_bridge.models.native import MessagesContentBlock, MessagesResponse, MessagesUsage
+from completion_bridge.streaming.mapping import StreamMapper
+from completion_bridge.streaming.sequence import Seq, SeqAllocator
+from completion_bridge.transport.sse import SseEvent
+from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
+from completion_bridge.vendors.normalize import INSTRUCTION_ROLES
+from completion_bridge.vendors.parts import as_anthropic_part, has_opaque_media_reference
+from completion_bridge.vendors.tool_policy import can_replay_client_tool
 
 __all__ = ["MessagesAdapter", "messages"]
 
@@ -81,7 +88,9 @@ class _ToHub:
         self._kinds: dict[int, str] = {}
         self._seqs = SeqAllocator(1)
 
-    def map(self, event: dict[str, Any]) -> list[HubResponse]:
+    def map(self, delta: dict[str, Any]) -> list[HubResponse]:
+        """벤더 스트림 이벤트 하나를 허브 델타 목록으로 변환한다."""
+        event = delta
         name = event.get("type")
         if name == "message_start":
             return self._message_start(event.get("message") or {})
@@ -94,16 +103,17 @@ class _ToHub:
         if name in ("content_block_stop", *IGNORED_EVENTS, *TERMINAL_EVENTS):
             return []
         if name == "error":
-            detail = json.dumps(event.get("error") or {}, ensure_ascii=False)
-            raise MappingError(f"messages stream reported an error: {detail[:200]}")
+            raise VendorStreamError(SOURCE, event.get("error") or {})
         return []
 
     def flush(self) -> list[HubResponse]:
+        """이 변환기는 종료 시 보관하는 잔여 델타가 없으므로 빈 목록을 반환한다."""
         return []
 
     # ---- 이벤트별 ----
 
     def _message_start(self, message: dict[str, Any]) -> list[HubResponse]:
+        """메시지 시작 이벤트의 식별자·모델·역할·초기 사용량을 허브 델타로 변환한다."""
         return [
             HubResponse(
                 id=message.get("id"),
@@ -126,6 +136,7 @@ class _ToHub:
         return self._seqs.coord((index,))
 
     def _block_start(self, event: dict[str, Any]) -> list[HubResponse]:
+        """content block의 좌표와 종류를 기억하고 시작 내용을 허브 블록으로 변환한다."""
         seq = self._block_seq(event)
         block = event.get("content_block") or {}
         kind = block.get("type") or ""
@@ -133,6 +144,7 @@ class _ToHub:
         return [HubResponse(content=[self._seed(kind, block, seq)])]
 
     def _seed(self, kind: str, block: dict[str, Any], seq: Seq) -> ContentBlock:
+        """content block 종류에 맞는 초기 허브 블록을 생성하고 원본 필드를 보존한다."""
         common: dict[str, Any] = {
             "seq": seq,
             "vendor": SOURCE,
@@ -140,11 +152,10 @@ class _ToHub:
         }
         if kind == "text":
             text = block.get("text")
-            citations = [
-                self._citation_model(citation)
-                for citation in block.get("citations") or []
-                if isinstance(citation, dict)
-            ]
+            citations = []
+            for citation in block.get("citations") or []:
+                if isinstance(citation, dict):
+                    citations.append(self._citation_model(citation))
             fields: dict[str, Any] = {"citations": citations} if citations else {}
             if text:
                 fields["text"] = text
@@ -199,6 +210,7 @@ class _ToHub:
         return VendorBlock(type=kind or "unknown", raw=dict(block), **common)
 
     def _block_delta(self, event: dict[str, Any]) -> list[HubResponse]:
+        """기존 블록 좌표에 텍스트·추론·도구 인자·인용의 증분을 적용할 델타를 만든다."""
         seq = self._block_seq(event)
         delta = event.get("delta") or {}
         kind = delta.get("type")
@@ -235,6 +247,7 @@ class _ToHub:
 
     @staticmethod
     def _citation_model(citation: dict[str, Any]) -> Citation:
+        """벤더 인용의 위치와 출처를 공통 인용 모델로 변환하고 원본을 보존한다."""
         fields: dict[str, Any] = {
             "type": str(citation.get("type") or "citation"),
             "source": SOURCE,
@@ -276,14 +289,16 @@ class _ToHub:
         encrypted_index = citation.get("encrypted_index")
         if isinstance(encrypted_index, str) and encrypted_index:
             fields["encrypted_index"] = encrypted_index
-        for src, dst in (
-            ("start_char_index", "source_start"),
-            ("end_char_index", "source_end"),
-            ("start_page_number", "source_start"),
-            ("end_page_number", "source_end"),
-            ("start_block_index", "source_start"),
-            ("end_block_index", "source_end"),
-        ):
+        field_names = {
+            "start_char_index": "source_start",
+            "end_char_index": "source_end",
+            "start_page_number": "source_start",
+            "end_page_number": "source_end",
+            "start_block_index": "source_start",
+            "end_block_index": "source_end",
+        }
+        for src in field_names:
+            dst = field_names[src]
             value = citation.get(src)
             if isinstance(value, int):
                 fields[dst] = value
@@ -292,9 +307,11 @@ class _ToHub:
 
     @staticmethod
     def _one(block: ContentBlock) -> list[HubResponse]:
+        """블록 하나를 포함하는 허브 델타 하나를 목록으로 반환한다."""
         return [HubResponse(content=[block])]
 
     def _message_delta(self, event: dict[str, Any]) -> list[HubResponse]:
+        """메시지 종료 사유와 증분 사용량을 허브 델타로 변환한다."""
         delta = event.get("delta") or {}
         fields: dict[str, Any] = {}
         reason = delta.get("stop_reason")
@@ -307,6 +324,7 @@ class _ToHub:
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
+        """벤더 사용량을 허브 토큰 사용량과 원본 사용량으로 변환한다."""
         if not isinstance(raw, dict):
             return None
         fields: dict[str, Any] = {}
@@ -510,6 +528,7 @@ class MessagesAdapter:
         max_tokens: int = 4096,
         betas: Sequence[str] = (),
     ) -> None:
+        """기본 출력 토큰 수와 beta·확장 헤더 설정을 보관한다."""
         self.version = version
         self.max_tokens = max_tokens
         self.betas = tuple(betas)
@@ -522,16 +541,21 @@ class MessagesAdapter:
         """
         system: list[str] = []
         turns: list[dict[str, Any]] = []
-        documents = [
-            block
-            for message in request.messages
-            for block in message.content
-            if isinstance(block, DocumentBlock)
-        ]
-        citations_enabled = any(document.citations_enabled for document in documents)
-        search_citations_enabled = any(
-            result.citations_enabled for result in self._search_results(request.messages)
-        )
+        documents = []
+        for message in request.messages:
+            for block in message.content:
+                if isinstance(block, DocumentBlock):
+                    documents.append(block)
+        citations_enabled = False
+        for document in documents:
+            if document.citations_enabled:
+                citations_enabled = True
+                break
+        search_citations_enabled = False
+        for result in self._search_results(request.messages):
+            if result.citations_enabled:
+                search_citations_enabled = True
+                break
         for message in request.messages:
             if message.role in INSTRUCTION_ROLES:
                 text = lowerer.lower_text(message.content)
@@ -556,14 +580,15 @@ class MessagesAdapter:
         }
         if system:
             body["system"] = "\n\n".join(system)
-        tools = [
-            definition
-            for tool in request.tools
-            if (definition := self._tool_definition(tool)) is not None
-        ]
+        tools = []
+        for tool in request.tools:
+            definition = self._tool_definition(tool)
+            if definition is not None:
+                tools.append(definition)
         if tools:
             body["tools"] = tools
-        for key, value in params.items():
+        for key in params:
+            value = params[key]
             if key not in ("model", "messages", "stream", "tools", "system"):
                 body[key] = value
         self._reject_invalid_combinations(
@@ -584,7 +609,9 @@ class MessagesAdapter:
                 if isinstance(block, SearchResultBlock):
                     found.append(block)
                 elif isinstance(block, ToolResultBlock):
-                    found.extend(b for b in block.blocks if isinstance(b, SearchResultBlock))
+                    for candidate_block in block.blocks:
+                        if isinstance(candidate_block, SearchResultBlock):
+                            found.append(candidate_block)
         return found
 
     @staticmethod
@@ -602,16 +629,14 @@ class MessagesAdapter:
             )
 
         if body.get("mcp_servers"):
-            declared = {
-                tool.get("mcp_server_name")
-                for tool in body.get("tools") or []
-                if isinstance(tool, Mapping) and tool.get("type") == "mcp_toolset"
-            }
-            missing = [
-                str(server.get("name"))
-                for server in body["mcp_servers"]
-                if isinstance(server, Mapping) and server.get("name") not in declared
-            ]
+            declared = set()
+            for tool in body.get("tools") or []:
+                if isinstance(tool, Mapping) and tool.get("type") == "mcp_toolset":
+                    declared.add(tool.get("mcp_server_name"))
+            missing = []
+            for server in body["mcp_servers"]:
+                if isinstance(server, Mapping) and server.get("name") not in declared:
+                    missing.append(str(server.get("name")))
             if missing:
                 raise MappingError(
                     "mcp_servers requires a matching mcp_toolset tool for each server: "
@@ -633,6 +658,7 @@ class MessagesAdapter:
         pending_role: str | None = None
 
         def flush() -> None:
+            """보관한 같은 역할의 일반 블록을 메시지로 변환하고 임시 상태를 초기화한다."""
             nonlocal pending
             if not pending or pending_role is None:
                 return
@@ -667,12 +693,14 @@ class MessagesAdapter:
         citations_enabled: bool,
         search_citations_enabled: bool,
     ) -> str | list[dict[str, Any]] | None:
+        """허브 블록을 Messages content 목록으로 변환하며 문서와 도구 결과를 처리한다."""
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
         last_text_part: dict[str, Any] | None = None
         text_parts_by_index: dict[int, dict[str, Any]] = {}
 
         def flush_plain() -> None:
+            """일반 블록을 텍스트로 변환하고 마지막 텍스트 part 및 임시 목록을 갱신한다."""
             nonlocal last_text_part
             text_parts = lowerer.lower_text_parts(plain)
             plain.clear()
@@ -738,15 +766,23 @@ class MessagesAdapter:
             MappingError: search result와 ``content``나 다른 블록이 함께 있을 때.
         """
         part: dict[str, Any] = {"type": "tool_result", "tool_use_id": block.tool_use_id}
-        searches = [b for b in block.blocks if isinstance(b, SearchResultBlock)]
+        searches = []
+        for candidate_block in block.blocks:
+            if isinstance(candidate_block, SearchResultBlock):
+                searches.append(candidate_block)
         if searches:
             if block.content or len(searches) != len(block.blocks):
                 raise MappingError(
                     f"tool_result {block.tool_use_id!r} mixes search results with other "
                     "content; messages requires every tool_result block to be a search_result"
                 )
-            rendered = [as_anthropic_part(result) for result in searches]
-            inner = [search for search in rendered if search is not None]
+            rendered = []
+            for result in searches:
+                rendered.append(as_anthropic_part(result))
+            inner = []
+            for search in rendered:
+                if search is not None:
+                    inner.append(search)
             for search in inner:
                 search["citations"] = {"enabled": search_citations_enabled}
             part["content"] = inner
@@ -763,12 +799,17 @@ class MessagesAdapter:
             if block.is_error:
                 part["is_error"] = True
             return part
-        nested = [
-            {"type": "text", "text": b.text} if isinstance(b, TextBlock) else as_anthropic_part(b)
-            for b in block.blocks
-            if not isinstance(b, ContentBlock) or not has_opaque_media_reference(b)
-        ]
-        inner = [p for p in nested if p is not None]
+        inner = []
+        rendered_part: dict[str, Any] | None
+        for nested_block in block.blocks:
+            if isinstance(nested_block, ContentBlock) and has_opaque_media_reference(nested_block):
+                continue
+            if isinstance(nested_block, TextBlock):
+                rendered_part = {"type": "text", "text": nested_block.text}
+            else:
+                rendered_part = as_anthropic_part(nested_block)
+            if rendered_part is not None:
+                inner.append(rendered_part)
         if block.content:
             inner.insert(0, {"type": "text", "text": block.content})
         part["content"] = inner if inner else ""
@@ -776,34 +817,8 @@ class MessagesAdapter:
             part["is_error"] = True
         return part
 
-    @staticmethod
-    def _document_blocks(documents: list[DocumentBlock]) -> list[dict[str, Any]]:
-        """문서를 네이티브 ``document`` content block으로.
-
-        ``citations``를 켜면 응답의 text 블록이 구조화된 인용을 들고 온다. beta 헤더는 필요
-        없다. 예전에는 ``citations-2025-01-31``이 있었지만 지금은 GA다.
-
-        한 요청 안에서 ``citations``는 전부 켜거나 전부 꺼야 한다. 섞으면 거절된다. 그래서
-        문서 하나라도 켜져 있으면 전체를 켠다.
-
-        ``output_config.format``과는 함께 쓸 수 없다. 구조화 출력과 인용을 같이 요구하면
-        400이 온다.
-        """
-        if not documents:
-            return []
-        enabled = any(d.citations_enabled for d in documents)
-        blocks: list[dict[str, Any]] = []
-        for document in documents:
-            if has_opaque_media_reference(document):
-                continue
-            part = as_anthropic_part(document)
-            if part is None:
-                continue
-            part["citations"] = {"enabled": enabled}
-            blocks.append(part)
-        return blocks
-
     def _tool_definition(self, tool: ToolDefinition) -> dict[str, Any] | None:
+        """대상 벤더의 원본 도구 정의 또는 공통 함수 도구 정의를 반환한다."""
         native = tool.native_for(self.name)
         if native is not None:
             return native
@@ -826,11 +841,13 @@ class MessagesAdapter:
         return headers
 
     def is_terminal(self, frame: SseEvent) -> bool:
+        """SSE 프레임이 이 API의 종료 이벤트인지 판정한다."""
         if frame.event.strip() in TERMINAL_EVENTS:
             return True
         return self._peek_type(frame) in TERMINAL_EVENTS
 
     def decode(self, frame: SseEvent) -> dict[str, Any] | None:
+        """빈 SSE data를 제외하고 JSON 객체를 해석하며 잘못된 형식은 MappingError로 전달한다."""
         payload = frame.data.strip()
         if not payload:
             return None
@@ -847,6 +864,7 @@ class MessagesAdapter:
 
     @staticmethod
     def _peek_type(frame: SseEvent) -> str:
+        """SSE data에서 이벤트 종류를 확인하며 해석할 수 없으면 빈 값을 반환한다."""
         payload = frame.data.strip()
         if not payload:
             return ""
@@ -861,9 +879,11 @@ class MessagesAdapter:
         return ""
 
     def to_hub(self) -> StreamMapper[Any, Any]:
+        """스트림마다 독립적인 벤더 응답→허브 델타 변환기를 생성한다."""
         return _ToHub()
 
     def to_native(self) -> NativeAccumulator[MessagesResponse]:
+        """스트림마다 독립적인 원본 Response 누적기를 생성한다."""
         return _ToNative()
 
     def token_count_calls(
@@ -896,9 +916,14 @@ class MessagesAdapter:
                 "betas",
             }
         )
+        selected_fields = {}
+        for key in body:
+            value = body[key]
+            if key not in excluded:
+                selected_fields[key] = value
         payload = yield JsonCall(
             "/v1/messages/count_tokens",
-            {key: value for key, value in body.items() if key not in excluded},
+            selected_fields,
         )
         input_tokens = payload.get("input_tokens")
         if not isinstance(input_tokens, int):

@@ -12,7 +12,7 @@ from completion_bridge import (
     ThinkingBlock,
     ToolUseBlock,
 )
-from completion_bridge.seq import SeqAllocator, finalize
+from completion_bridge.streaming.sequence import SeqAllocator, finalize
 
 
 class TestSeqAllocator:
@@ -136,3 +136,30 @@ class TestFinalize:
         finalize(response)
         assert response.content[0].seq == (0, 0)
         assert response.content[0].index is None
+
+
+@pytest.mark.parametrize("invalid", [True, False, 0, -1, 1.5, "1", None])
+def test_invalid_width_rejected(invalid) -> None:
+    """정수 양수가 아닌 좌표 폭을 즉시 거부한다."""
+    with pytest.raises(ValueError):
+        SeqAllocator(invalid)
+
+
+@pytest.mark.parametrize("invalid", [[1], (True,), (1.5,), ("1",), (), (1, 2)])
+def test_invalid_coordinate_preserves_sequence(invalid) -> None:
+    """잘못된 좌표 입력이 기존 발급 순서를 변경하지 않는다."""
+    allocator = SeqAllocator(1)
+    assert allocator.coord((2,)) == (2, 0)
+    with pytest.raises(ValueError):
+        allocator.coord(invalid)
+    assert allocator.after() == (2, 1)
+
+
+@pytest.mark.parametrize("invalid", [[2, 0], (2, True), (2, 0.5), (2,), (2, 0, 0)])
+def test_invalid_anchor_preserves_counter(invalid) -> None:
+    """잘못된 기준 좌표는 후속 발급 카운터를 소비하지 않는다."""
+    allocator = SeqAllocator(1)
+    assert allocator.after((2, 0)) == (2, 1)
+    with pytest.raises(ValueError):
+        allocator.after(invalid)
+    assert allocator.after((2, 0)) == (2, 2)

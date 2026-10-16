@@ -1124,13 +1124,11 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "native": {},
       "media_type": "image/png",
       "data": "iVBORw0KGgo=",
-      "detail": "low",
-      "serialize": false
+      "detail": "low"
     },
     {
       "type": "audio",
       "native": {},
-      "serialize": false,
       "data": "UklGRg==",
       "format": "wav",
       "media_type": "audio/wav"
@@ -1138,7 +1136,6 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "document",
       "native": {},
-      "serialize": false,
       "id": "report.pdf",
       "title": "보고서.pdf",
       "text": "",
@@ -1149,7 +1146,6 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
     {
       "type": "document",
       "native": {},
-      "serialize": false,
       "id": "facts",
       "title": "사실표",
       "text": "서울=25도",
@@ -1711,13 +1707,11 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
             "type": "image",
             "native": {},
             "media_type": "image/png",
-            "data": "iVBORw0KGgo=",
-            "serialize": false
+            "data": "iVBORw0KGgo="
           },
           {
             "type": "document",
             "native": {},
-            "serialize": false,
             "id": "result.pdf",
             "title": "결과.pdf",
             "text": "",
@@ -1976,7 +1970,6 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         "transcript": "서울은 25도다.",
         "expires_at": 1893456000
       },
-      "serialize": false,
       "data": "UklGRg==",
       "file_id": "audio-1",
       "transcript": "서울은 25도다.",
@@ -2912,7 +2905,6 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
       "index": 3,
       "vendor": "responses",
       "native": {},
-      "serialize": false,
       "data": "UklGRg==",
       "transcript": "서울은 25도다."
     },
@@ -3410,8 +3402,7 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
         }
       },
       "media_type": "image/png",
-      "data": "iVBORw0KGgo=",
-      "serialize": false
+      "data": "iVBORw0KGgo="
     },
     {
       "type": "document",
@@ -3423,7 +3414,6 @@ text, base64 image, base64 audio, base64 PDF, 평문 문서를 한 HubMessage에
           "fileUri": "gs://example/result.pdf"
         }
       },
-      "serialize": false,
       "id": "",
       "text": "",
       "uri": "gs://example/result.pdf",

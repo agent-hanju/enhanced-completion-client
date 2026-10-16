@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
 
@@ -21,7 +23,7 @@ from completion_bridge.vendors import (
 BASE = "https://params.invalid"
 
 
-def body(adapter: object, parameters: Hyperparameters) -> dict[str, object]:
+def body(adapter: object, parameters: Hyperparameters) -> dict[str, Any]:
     return SyncBridge(
         vendor=adapter,  # type: ignore[arg-type]
         base_url=BASE,
@@ -230,9 +232,7 @@ class TestMergeAndValidation:
             model="m",
             hyperparameters=Hyperparameters(temperature=0.2, max_completion_tokens=256),
         )
-        cleared = bridge.build_request(
-            ["질문"], hyperparameters=Hyperparameters(temperature=None)
-        )
+        cleared = bridge.build_request(["질문"], hyperparameters=Hyperparameters(temperature=None))
         assert "temperature" not in cleared
         assert cleared["max_completion_tokens"] == 256
 
@@ -322,7 +322,7 @@ class TestGeminiResponseFormat:
 
     SCHEMA = {"type": "object"}
 
-    def _config(self, **kwargs: object) -> dict[str, object]:
+    def _config(self, **kwargs: Any) -> dict[str, Any]:
         params = Hyperparameters(**kwargs)  # type: ignore[arg-type]
         return body(GEMINI, params).get("generationConfig", {})
 

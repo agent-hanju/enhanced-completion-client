@@ -9,9 +9,9 @@ from __future__ import annotations
 from collections.abc import Hashable
 from typing import Any
 
-from .blocks import AnnotationBlock, ContentBlock
-from .errors import MappingError
-from .hub import HubResponse
+from completion_bridge.errors import MappingError
+from completion_bridge.models.blocks import AnnotationBlock, ContentBlock
+from completion_bridge.models.hub import HubResponse
 
 __all__ = ["Seq", "SeqAllocator", "finalize"]
 
@@ -22,9 +22,17 @@ Seq = tuple[int, ...]
 class SeqAllocator:
     """어댑터 하나가 스트림 하나 동안 쓰는 seq 발급 상태.
 
+    같은 인스턴스에서 좌표를 발급하는 호출은 순차적으로 수행해야 한다.
     발급하는 seq는 ``(좌표..., after)`` 모양이고 좌표 개수는 생성할 때 정한 ``width``로
     고정된다. 좌표가 있는 블록은 :meth:`coord`, 좌표가 없거나 다른 블록 뒤에 와야 하는 블록은
     :meth:`after`로 받는다.
+
+    폭을 w, 발급한 기준 좌표·식별 키 수를 n이라 하면 coord와 after는 평균 O(w),
+    전체 저장 공간은 O(n*w)다. 딕셔너리 조회는 평균 O(1)을 전제로 한다.
+    잘못된 좌표·기준 좌표는 상태 변경 전에 거부한다. 스레드 간 공유는 지원하지 않는다.
+    동일 키는 최초 seq를 재사용하고, 새 after는 기준 좌표별 카운터를 증가시키므로
+    같은 기준의 서로 다른 after 값이 중복되지 않는다. seq 비교는 정수 튜플의 사전식 순서다.
+    비교 규칙: https://docs.python.org/3/reference/expressions.html#value-comparisons
     """
 
     def __init__(self, width: int) -> None:
@@ -34,9 +42,9 @@ class SeqAllocator:
             width: seq의 좌표 성분 개수. after 성분은 포함하지 않는다.
 
         Raises:
-            ValueError: ``width``가 1보다 작을 때.
+            ValueError: ``width``가 정수 양수가 아닐 때. bool도 허용하지 않는다.
         """
-        if width < 1:
+        if type(width) is not int or width < 1:
             raise ValueError(f"seq width must be at least 1, got {width}")
         self._width = width
         self._last: Seq | None = None
@@ -53,12 +61,17 @@ class SeqAllocator:
             coordinates: ``width``개의 정수 좌표.
 
         Raises:
-            ValueError: 좌표 개수가 ``width``와 다를 때.
+            ValueError: 정수 튜플이 아니거나 좌표 개수가 ``width``와 다를 때.
         """
+        if not isinstance(coordinates, tuple):
+            raise ValueError("seq coordinates must be a tuple of integers")
         if len(coordinates) != self._width:
             raise ValueError(
                 f"expected {self._width} seq coordinates, got {len(coordinates)}: {coordinates}"
             )
+        for coordinate in coordinates:
+            if type(coordinate) is not int:
+                raise ValueError("seq coordinates must be integers")
         seq = (*coordinates, 0)
         self._observe(seq)
         return seq
@@ -72,14 +85,21 @@ class SeqAllocator:
         Args:
             anchor: 기준 블록의 seq. ``None``이면 지금까지 발급한 seq 중 가장 큰 것을 쓰고,
                 발급한 seq가 없으면 앞 성분을 ``(-1, 0, …)``으로 둔다.
+                마지막 성분이 0인 좌표 seq 또는 이 인스턴스가 발급한 after seq를 사용한다.
+                다른 발급기의 after 카운터는 병합하지 않는다.
             key: 여러 delta로 이어지는 블록의 식별 키. 같은 키로 다시 부르면 처음 발급한
                 seq를 그대로 돌려준다.
 
         Raises:
-            ValueError: ``anchor``의 길이가 ``width + 1``과 다를 때.
+            ValueError: ``anchor``가 정수 튜플이 아니거나 길이가 ``width + 1``과 다를 때.
+            TypeError: ``key``가 해시 가능하지 않을 때. 상태는 변경하지 않는다.
         """
-        if anchor is not None and len(anchor) != self._width + 1:
-            raise ValueError(f"expected an anchor seq of length {self._width + 1}, got {anchor}")
+        if anchor is not None:
+            if not isinstance(anchor, tuple) or len(anchor) != self._width + 1:
+                raise ValueError(f"expected an anchor seq of length {self._width + 1}")
+            for coordinate in anchor:
+                if type(coordinate) is not int:
+                    raise ValueError("anchor coordinates must be integers")
         if key is not None:
             known = self._keyed.get(key)
             if known is not None:
@@ -113,13 +133,16 @@ def finalize(response: HubResponse) -> HubResponse:
         남지 않는다.
 
     Args:
-        response: :class:`~completion_bridge.merge.StreamMerger`가 만든 병합 결과.
+        response: :class:`~completion_bridge.streaming.merge.StreamMerger`가 만든 병합 결과.
 
     Returns:
         블록 순서와 ``index``가 확정된 새 응답. ``response``는 바뀌지 않는다.
 
     Raises:
         MappingError: ``seq``가 없는 블록이 있을 때.
+
+    블록 수 n에 대해 정렬 O(n log n), 위치 조회·복사 O(n), 추가 공간 O(n)이다.
+    입력 객체를 변경하지 않으므로 실패 시에도 입력 상태를 유지한다.
     """
     keyed: list[tuple[Seq, ContentBlock]] = []
     for block in response.content:
@@ -127,10 +150,14 @@ def finalize(response: HubResponse) -> HubResponse:
             raise MappingError(f"content block {block.type!r} has no seq")
         keyed.append((block.seq, block))
     keyed.sort(key=lambda pair: pair[0])
-    positions = {seq: position for position, (seq, _) in enumerate(keyed)}
+    positions = {}
+    for position in range(len(keyed)):
+        seq = keyed[position][0]
+        positions[seq] = position
 
     content: list[ContentBlock] = []
-    for position, (_, block) in enumerate(keyed):
+    for position in range(len(keyed)):
+        block = keyed[position][1]
         update: dict[str, Any] = {"index": position, "seq": None}
         cleared = ["seq"]
         if isinstance(block, AnnotationBlock):

@@ -32,6 +32,7 @@ from completion_bridge import (
     ToolChoice,
     ToolDefinition,
     ToolUseBlock,
+    VendorStreamError,
 )
 from completion_bridge.vendors import generate_content, messages, responses
 
@@ -86,7 +87,7 @@ def make(adapter: object, **kwargs: object) -> Bridge:
 
 
 # =============================================================================
-# Anthropic Messages
+# Anthropic Messages 변환 검증
 # =============================================================================
 
 MSG_URL = f"{BASE}/v1/messages"
@@ -160,7 +161,7 @@ class TestMessages:
         calls = []
         for record in caplog.records:
             if hasattr(record, "wire"):
-                calls.append(record.wire)
+                calls.append(record.__dict__["wire"])
         assert calls[-1]["event"] == "response"
         assert calls[-1]["payload"]["content"] == [{"type": "text", "text": "안녕하세요"}]
         assert calls[-1]["payload"]["usage"] == {"input_tokens": 12, "output_tokens": 5}
@@ -499,7 +500,7 @@ class TestMessages:
 
 
 # =============================================================================
-# OpenAI Responses
+# OpenAI Responses 변환 검증
 # =============================================================================
 
 RESP_URL = f"{BASE}/v1/responses"
@@ -779,11 +780,11 @@ class TestResponses:
 
 
 # =============================================================================
-# Gemini GenerateContent
+# Gemini GenerateContent 변환 검증
 # =============================================================================
 
 GEMINI = generate_content.for_model("gemini-2.5-flash", api_key="k")
-# The shared Bridge helper selects model="m", overriding the adapter default.
+# 공통 Bridge 생성 함수가 model="m"을 지정하므로 어댑터 기본 모델보다 우선한다.
 GEMINI_URL = f"{BASE}/v1beta/models/m:streamGenerateContent?alt=sse"
 
 
@@ -960,8 +961,10 @@ class TestGenerateContent:
     async def test_error_payload_raises(self) -> None:
         payload = sse((None, {"error": {"code": 429, "message": "quota"}}))
         respx.post(GEMINI_URL).mock(return_value=httpx.Response(200, content=payload))
-        with pytest.raises(MappingError, match="quota"):
+        with pytest.raises(VendorStreamError, match="429") as caught:
             await make(GEMINI).complete(["x"])
+        assert caught.value.detail == {"code": 429, "message": "quota"}
+        assert "quota" not in str(caught.value)
 
     def test_body_uses_contents_and_model_role(self) -> None:
         body = make(GEMINI).build_request(

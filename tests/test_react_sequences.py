@@ -1,4 +1,4 @@
-"""ReAct-style repeated reasoning/tool sequences keep their semantic order."""
+"""추론·도구 호출이 반복되는 ReAct 실행의 의미상 순서를 검증한다."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from completion_bridge import (
     ToolUseBlock,
     VendorBlock,
 )
-from completion_bridge.seq import finalize
+from completion_bridge.streaming.sequence import finalize
 from completion_bridge.vendors import (
     GenerateContentAdapter,
     MessagesAdapter,
@@ -96,7 +96,11 @@ def test_same_type_complete_blocks_without_indexes_are_appended() -> None:
     merger.apply(HubResponse(content=[TextBlock(text="second")]))
 
     result = merger.build()
-    assert [block.text for block in result.content] == ["first", "second"]
+    texts = []
+    for block in result.content:
+        assert isinstance(block, TextBlock)
+        texts.append(block.text)
+    assert texts == ["first", "second"]
 
 
 def test_repeated_text_blocks_remain_distinct_in_every_request() -> None:
@@ -153,7 +157,11 @@ def test_anthropic_repeated_text_blocks_remain_distinct() -> None:
             },
         ],
     )
-    assert [block.text for block in result.content] == ["first", "second"]
+    texts = []
+    for block in result.content:
+        assert isinstance(block, TextBlock)
+        texts.append(block.text)
+    assert texts == ["first", "second"]
     replay = build(adapter, [HubMessage.of_response(result)])["messages"][0]["content"]
     assert replay == [
         {"type": "text", "text": "first"},
@@ -219,8 +227,16 @@ def test_responses_repeated_text_and_reasoning_parts_remain_distinct() -> None:
         "text",
         "text",
     ]
-    assert [block.thinking for block in result.content[:2]] == ["think one", "think two"]
-    assert [block.text for block in result.content[2:]] == ["first", "second"]
+    thoughts = []
+    for block in result.content[:2]:
+        assert isinstance(block, ThinkingBlock)
+        thoughts.append(block.thinking)
+    assert thoughts == ["think one", "think two"]
+    texts = []
+    for block in result.content[2:]:
+        assert isinstance(block, TextBlock)
+        texts.append(block.text)
+    assert texts == ["first", "second"]
     replay = build(adapter, [HubMessage.of_response(result)])["input"]
     assert replay == [reasoning, message]
 
@@ -228,7 +244,11 @@ def test_responses_repeated_text_and_reasoning_parts_remain_distinct() -> None:
 def test_gemini_repeated_text_parts_remain_distinct() -> None:
     parts = [{"text": "first"}, {"text": "second"}]
     result = merge(GEMINI, [{"candidates": [{"content": {"role": "model", "parts": parts}}]}])
-    assert [block.text for block in result.content] == ["first", "second"]
+    texts = []
+    for block in result.content:
+        assert isinstance(block, TextBlock)
+        texts.append(block.text)
+    assert texts == ["first", "second"]
     replay = build(GEMINI, [HubMessage.of_response(result)])["contents"][0]["parts"]
     assert replay == parts
 
@@ -242,6 +262,7 @@ def test_chat_unindexed_text_deltas_form_one_protocol_channel() -> None:
         ],
     )
     assert len(result.content) == 1
+    assert isinstance(result.content[0], TextBlock)
     assert result.content[0].text == "firstsecond"
 
 
@@ -468,8 +489,12 @@ def test_chat_repeated_reasoning_and_parallel_tool_deltas_do_not_collide() -> No
     ]
     assert [block.index for block in result.content] == [0, 1, 2, 3]
     thinking, first, later_thinking, second = result.content
+    assert isinstance(thinking, ThinkingBlock)
     assert thinking.thinking == "first; "
+    assert isinstance(later_thinking, ThinkingBlock)
     assert later_thinking.thinking == "second"
+    assert isinstance(second, ToolUseBlock)
+    assert isinstance(first, ToolUseBlock)
     assert [(first.id, first.input_json), (second.id, second.input_json)] == [
         ("c1", '{"step":1}'),
         ("c2", '{"step":2}'),
@@ -701,7 +726,7 @@ def test_chat_channel_switches_preserve_order_and_replay(first: str) -> None:
         "C",
         "D",
     ]
-    # Order indices also restore a caller-reordered block list.
+    # 호출자가 블록 목록의 순서를 바꿔도 index로 원래 순서를 복원한다.
     message = HubMessage(role="assistant", content=list(reversed(result.content)))
     wire = build(adapter, [message])["messages"][0]
     assert wire[first] == "ABD"
@@ -738,6 +763,7 @@ def test_chat_same_event_order_and_annotation_target() -> None:
     assert [block.index for block in result.content] == [0, 1, 2, 3]
     assert [block.type for block in result.content] == ["text", "thinking", "text", "annotation"]
     annotation = result.content[3]
+    assert isinstance(annotation, AnnotationBlock)
     assert annotation.target_index == 2
     assert (annotation.start_index, annotation.end_index) == (0, 2)
     assert annotation.native["url_citation"]["start_index"] == 2
@@ -750,7 +776,11 @@ def test_chat_sparse_tool_indices_and_unindexed_complete_calls() -> None:
     ]:
         result = merge(chat_completions, [{"choices": [{"message": {"tool_calls": calls}}]}])
         assert [block.index for block in result.content] == [0, 1]
-        assert [block.id for block in result.content] == ["a", "b"]
+        call_ids = []
+        for block in result.content:
+            assert isinstance(block, ToolUseBlock)
+            call_ids.append(block.id)
+        assert call_ids == ["a", "b"]
 
 
 def test_chat_refusal_audio_and_metadata_keep_dense_indices() -> None:
@@ -766,8 +796,11 @@ def test_chat_refusal_audio_and_metadata_keep_dense_indices() -> None:
         ],
     )
     assert [block.index for block in result.content] == [0, 1, 2]
+    assert isinstance(result.content[0], TextBlock)
     assert result.content[0].text.endswith("no thanks")
+    assert isinstance(result.content[1], AudioBlock)
     assert result.content[1].data == "ab"
+    assert isinstance(result.content[2], TextBlock)
     assert result.content[2].text.endswith("again")
 
 
@@ -784,7 +817,11 @@ def responses_text(output_index: int, delta: str) -> dict[str, Any]:
 def test_responses_final_order_follows_output_index_not_arrival() -> None:
     """뒤 item의 이벤트가 먼저 와도 최종 결과는 벤더 좌표 순서다."""
     result = merge(ResponsesAdapter(), [responses_text(1, "B"), responses_text(0, "A")])
-    assert [block.text for block in result.content] == ["A", "B"]
+    texts = []
+    for block in result.content:
+        assert isinstance(block, TextBlock)
+        texts.append(block.text)
+    assert texts == ["A", "B"]
     assert [block.index for block in result.content] == [0, 1]
 
 

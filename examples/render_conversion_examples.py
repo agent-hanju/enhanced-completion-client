@@ -1,4 +1,4 @@
-"""Regenerate the checked-in conversion examples from executable adapters."""
+"""실제 어댑터 실행으로 저장소의 변환 예제 문서를 다시 생성한다."""
 
 from __future__ import annotations
 

@@ -18,7 +18,6 @@ from completion_bridge import (
     Bridge,
     Citation,
     DocumentBlock,
-    ExtractionError,
     GroundingBlock,
     HubMessage,
     ImageBlock,
@@ -390,7 +389,11 @@ class TestResponsesReasoning:
         respx.post(f"{BASE}/v1/responses").mock(return_value=httpx.Response(200, content=payload))
         blocks = (await make(responses).complete(["x"])).content
         assert all(isinstance(block, ThinkingBlock) for block in blocks)
-        assert [block.thinking for block in blocks] == ["첫 줄", "둘째 줄"]
+        thoughts = []
+        for block in blocks:
+            assert isinstance(block, ThinkingBlock)
+            thoughts.append(block.thinking)
+        assert thoughts == ["첫 줄", "둘째 줄"]
 
     @respx.mock
     async def test_encrypted_content_is_kept_when_no_summary(self) -> None:
@@ -675,8 +678,8 @@ class TestMultimodalRequest:
         assert [b["type"] for b in result["content"]] == ["text", "image"]
 
 
-class TestSerializationFallback:
-    """네이티브 채널이 없거나 호출자가 고르면 텍스트로 내린다. 조용히 사라지지 않는다."""
+class TestCompatibilityFallback:
+    """네이티브 채널이 없으면 텍스트 표현 또는 전달 불가 표시를 사용한다."""
 
     PDF = DocumentBlock(id="d1", data="PDFBYTES", media_type="application/pdf")
 
@@ -690,36 +693,6 @@ class TestSerializationFallback:
 
     def test_native_channel_is_used_by_default(self) -> None:
         assert "<document>" in self._content(self.PDF)
-
-    def test_serialize_flag_overrides_the_native_channel(self) -> None:
-        forced = self.PDF.model_copy(update={"serialize": True})
-        content = self._content(forced)
-        assert "<documents>" in content
-        assert 'unavailable="true"' in content
-
-    def test_extractor_supplies_the_text(self) -> None:
-        forced = self.PDF.model_copy(update={"serialize": True})
-        content = self._content(
-            forced, extractors={"application/pdf": lambda block: "1장. 서울의 기후"}
-        )
-        assert '<content media-type="application/pdf">1장. 서울의 기후</content>' in content
-        assert "unavailable" not in content
-
-    def test_extractor_failure_is_a_distinct_state(self) -> None:
-        """전처리기 실패는 전달 불가와 다르다. degrade하지 않고 명시적으로 올린다.
-
-        없는 것은 사전에 알 수 있는 설정 상태이고, 실패는 특정 콘텐츠의 런타임 오류다.
-        같은 태그로 접으면 호출자 코드의 결함이 그 뒤에 숨는다.
-        """
-
-        def boom(block: object) -> str:
-            raise RuntimeError("PDF 헤더가 깨짐")
-
-        forced = self.PDF.model_copy(update={"serialize": True})
-        with pytest.raises(ExtractionError) as info:
-            self._content(forced, extractors={"application/pdf": boom})
-        assert info.value.media_type == "application/pdf"
-        assert isinstance(info.value.__cause__, RuntimeError)
 
     def test_unsupported_audio_leaves_a_notice(self) -> None:
         """오디오 입력 채널이 없는 대상에서 조용히 버리지 않는다."""

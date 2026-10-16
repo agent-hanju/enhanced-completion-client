@@ -1,4 +1,4 @@
-"""Message-level authorship affects request lowering, never response streaming."""
+"""메시지 작성 주체가 요청 변환에 반영되고 응답 스트리밍에는 영향을 주지 않는지 검증한다."""
 
 import json
 

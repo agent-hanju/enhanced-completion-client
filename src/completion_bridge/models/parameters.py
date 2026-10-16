@@ -85,7 +85,7 @@ _VLLM_ONLY = (
     "stop",
     "reasoning_effort",
     "logit_bias",
-    # vLLM sampling
+    # vLLM 샘플링 설정
     "min_p",
     "repetition_penalty",
     "length_penalty",
@@ -103,7 +103,7 @@ _VLLM_ONLY = (
     "truncation_side",
     "thinking_token_budget",
     "repetition_detection",
-    # vLLM extra
+    # vLLM 확장 설정
     "chat_template",
     "chat_template_kwargs",
     "add_generation_prompt",
@@ -193,6 +193,7 @@ _GEMINI_TOP = {
     "gemini_service_tier": "serviceTier",
 }
 
+
 class Hyperparameters(BaseModel):
     """네 API의 요청 옵션을 한 모델에 선언한다.
 
@@ -221,7 +222,7 @@ class Hyperparameters(BaseModel):
     tool_choice: ToolChoice | None = None
     response_format: ResponseFormat | None = None
 
-    # ---- vLLM Chat Completions ----
+    # ---- vLLM Chat Completions 설정 ----
     max_completion_tokens: int | None = None
     stop: list[str] | None = None
     reasoning_effort: str | None = None
@@ -259,7 +260,7 @@ class Hyperparameters(BaseModel):
     include_reasoning: bool | None = None
     stream_interval: int | None = None
 
-    # ---- OpenAI Responses ----
+    # ---- OpenAI Responses 설정 ----
     background: bool | None = None
     conversation: str | dict[str, Any] | None = None
     include: list[str] | None = None
@@ -278,7 +279,7 @@ class Hyperparameters(BaseModel):
     text: dict[str, Any] | None = None
     truncation: Literal["auto", "disabled"] | None = None
 
-    # ---- Anthropic Messages ----
+    # ---- Anthropic Messages 설정 ----
     anthropic_metadata: dict[str, Any] | None = None
     anthropic_service_tier: Literal["auto", "standard_only"] | None = None
     betas: list[str] | None = None
@@ -291,7 +292,7 @@ class Hyperparameters(BaseModel):
     speed: Literal["fast"] | None = None
     thinking: dict[str, Any] | None = None
 
-    # ---- Gemini GenerateContent ----
+    # ---- Gemini GenerateContent 설정 ----
     audio_transcription_config: dict[str, Any] | None = None
     cached_content: str | None = None
     gemini_logprobs: int | None = None
@@ -331,6 +332,7 @@ class Hyperparameters(BaseModel):
 
     @classmethod
     def coerce(cls, value: Hyperparameters | Mapping[str, Any] | None) -> Hyperparameters:
+        """설정 객체·매핑·생략값을 Hyperparameters로 변환하고 유효성을 검증한다."""
         if value is None:
             return cls()
         if isinstance(value, cls):
@@ -372,6 +374,7 @@ class Hyperparameters(BaseModel):
     # ---- 계열별 선택 ----
 
     def _chat(self) -> dict[str, Any]:
+        """Chat Completions가 소유하는 설정과 함수 호출·출력 형식을 요청 필드로 변환한다."""
         out = self._owned("chat_completions")
         out.update(self._select(_VLLM_ONLY))
         _put(out, "tool_choice", _tool_choice(self.tool_choice, "chat_completions"))
@@ -379,6 +382,7 @@ class Hyperparameters(BaseModel):
         return out
 
     def _responses(self) -> dict[str, Any]:
+        """Responses가 소유하는 설정과 도구 선택·출력 형식을 요청 필드로 변환한다."""
         out = self._owned("responses")
         out.update(self._select(_RESPONSES_ONLY))
         _put(out, "tool_choice", _tool_choice(self.tool_choice, "responses"))
@@ -386,6 +390,7 @@ class Hyperparameters(BaseModel):
         return out
 
     def _messages(self) -> dict[str, Any]:
+        """Messages 설정과 도구 선택·출력 형식을 해당 요청 필드로 변환한다."""
         out = self._owned("messages")
         for field in _MESSAGES_ONLY:
             _put(out, _MESSAGES_WIRE.get(field, field), getattr(self, field))
@@ -402,14 +407,17 @@ class Hyperparameters(BaseModel):
         return out
 
     def _gemini(self) -> dict[str, Any]:
+        """Gemini 설정을 generationConfig와 최상위 요청 필드로 변환한다."""
         generation: dict[str, Any] = {}
-        for field, wire in _GEMINI_GENERATION.items():
+        for field in _GEMINI_GENERATION:
+            wire = _GEMINI_GENERATION[field]
             if field in _SHARED and "generate_content" not in _SHARED[field]:
                 continue
             _put(generation, wire, getattr(self, field))
 
         out: dict[str, Any] = {}
-        for field, wire in _GEMINI_TOP.items():
+        for field in _GEMINI_TOP:
+            wire = _GEMINI_TOP[field]
             _put(out, wire, getattr(self, field))
 
         # ``responseFormat``은 흩어져 있던 출력 형식 필드를 modality별로 모은 새 구조다.
@@ -430,13 +438,16 @@ class Hyperparameters(BaseModel):
         return out
 
     def _owned(self, family: str) -> dict[str, Any]:
+        """지정 API 계열이 소유하는 공통 설정 중 값이 있는 필드만 선택한다."""
         out: dict[str, Any] = {}
-        for field, owners in _SHARED.items():
+        for field in _SHARED:
+            owners = _SHARED[field]
             if family in owners:
                 _put(out, field, getattr(self, field))
         return out
 
     def _select(self, fields: tuple[str, ...]) -> dict[str, Any]:
+        """명시한 필드 목록에서 값이 있는 설정만 선택한다."""
         selected: dict[str, Any] = {}
         for field in fields:
             _put(selected, field, getattr(self, field))
@@ -456,13 +467,16 @@ def _nest(target: dict[str, Any], outer: str, inner: str, value: Any) -> None:
 
 
 def _put(target: dict[str, Any], key: str, value: Any) -> None:
+    """값이 None이 아닐 때만 대상 매핑의 지정 키에 기록한다."""
     if value is not None:
         target[key] = value
 
 
 def _merge(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+    """두 설정 매핑을 재귀 병합한 사본을 반환하며 오른쪽 값을 우선한다."""
     merged = dict(left)
-    for key, value in right.items():
+    for key in right:
+        value = right[key]
         current = merged.get(key)
         if isinstance(current, Mapping) and isinstance(value, Mapping):
             merged[key] = _merge(current, value)
@@ -472,6 +486,7 @@ def _merge(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _tool_choice(choice: ToolChoice | None, family: str) -> str | dict[str, Any] | None:
+    """공통 도구 선택을 대상 API의 표현으로 변환하고 이름 없는 지정 호출은 거부한다."""
     if choice is None:
         return None
     if family in {"chat_completions", "responses"}:
@@ -502,6 +517,7 @@ def _tool_choice(choice: ToolChoice | None, family: str) -> str | dict[str, Any]
 
 
 def _response_format(fmt: ResponseFormat | None, family: str) -> dict[str, Any] | None:
+    """공통 출력 형식을 대상 API의 표현으로 변환하고 필수 스키마를 확인한다."""
     if fmt is None:
         return None
     if fmt.type in {"text", "json_object"}:

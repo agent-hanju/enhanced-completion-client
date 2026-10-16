@@ -21,7 +21,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..blocks import (
+from completion_bridge.errors import MappingError, VendorStreamError
+from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
     ContentBlock,
@@ -38,21 +39,24 @@ from ..blocks import (
     ToolUseBlock,
     VendorBlock,
 )
-from ..errors import MappingError
-from ..hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
-from ..mapper import StreamMapper
-from ..native import (
+from completion_bridge.models.hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
+from completion_bridge.models.native import (
     GenerateContentCandidate,
     GenerateContentContent,
     GenerateContentPart,
     GenerateContentResponse,
 )
-from ..seq import Seq, SeqAllocator
-from ..transport.sse import SseEvent
-from .base import JsonCall, Lowerer, NativeAccumulator
-from .normalize import INSTRUCTION_ROLES, normalize_role, stop_reason_from_gemini
-from .parts import as_gemini_part, has_opaque_media_reference
-from .tool_policy import can_replay_client_tool
+from completion_bridge.streaming.mapping import StreamMapper
+from completion_bridge.streaming.sequence import Seq, SeqAllocator
+from completion_bridge.transport.sse import SseEvent
+from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
+from completion_bridge.vendors.normalize import (
+    INSTRUCTION_ROLES,
+    normalize_role,
+    stop_reason_from_gemini,
+)
+from completion_bridge.vendors.parts import as_gemini_part, has_opaque_media_reference
+from completion_bridge.vendors.tool_policy import can_replay_client_tool
 
 __all__ = ["GenerateContentAdapter", "generate_content"]
 
@@ -88,15 +92,66 @@ _PART_FIELDS = frozenset(
 )
 
 
-def _parse_args(raw: str) -> dict[str, Any]:
-    """도구 인수를 객체로. 이 API는 문자열이 아니라 객체를 요구한다."""
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+def _gemini_media_block(part: dict[str, Any], seq: Seq) -> ContentBlock | None:
+    """inlineData·fileData를 이미지·음성·문서로 변환하고 원본 Part를 보존한다."""
+    # inlineData는 이미지 또는 음성이다. MIME으로 갈린다.
+    inline = part.get("inlineData")
+    if isinstance(inline, dict):
+        mime = str(inline.get("mimeType") or "")
+        data = inline.get("data")
+        if mime.startswith("audio/"):
+            return AudioBlock(
+                media_type=mime,
+                data=data,
+                native=dict(part),
+                seq=seq,
+                vendor=SOURCE,
+            )
+        if mime.startswith("image/"):
+            return ImageBlock(
+                media_type=mime,
+                data=data,
+                native=dict(part),
+                seq=seq,
+                vendor=SOURCE,
+            )
+        return DocumentBlock(
+            media_type=mime or "application/octet-stream",
+            data=data,
+            native=dict(part),
+            seq=seq,
+            vendor=SOURCE,
+        )
+
+    file_data = part.get("fileData")
+    if isinstance(file_data, dict):
+        mime = str(file_data.get("mimeType") or "")
+        uri = file_data.get("fileUri")
+        if mime.startswith("image/"):
+            return ImageBlock(
+                media_type=mime,
+                url=uri,
+                native=dict(part),
+                seq=seq,
+                vendor=SOURCE,
+            )
+        if mime.startswith("audio/"):
+            return AudioBlock(
+                media_type=mime,
+                uri=uri,
+                native=dict(part),
+                seq=seq,
+                vendor=SOURCE,
+            )
+        return DocumentBlock(
+            media_type=mime or "application/octet-stream",
+            uri=uri,
+            native=dict(part),
+            seq=seq,
+            vendor=SOURCE,
+        )
+
+    return None
 
 
 class _ToHub:
@@ -108,12 +163,15 @@ class _ToHub:
     """
 
     def __init__(self) -> None:
+        """스트림별 블록 순서와 마지막 채널 좌표를 초기화한다."""
         self._seqs = SeqAllocator(1)
         self._next_index = 0
         self._last_stream_key: str | None = None
         self._last_stream_index: int | None = None
 
-    def map(self, chunk: dict[str, Any]) -> list[HubResponse]:
+    def map(self, delta: dict[str, Any]) -> list[HubResponse]:
+        """벤더 스트림 이벤트 하나를 허브 델타 목록으로 변환한다."""
+        chunk = delta
         candidates = chunk.get("candidates") or []
         head: dict[str, Any] = candidates[0] if candidates else {}
         content = head.get("content") or {}
@@ -131,16 +189,19 @@ class _ToHub:
                     seq=self._seqs.after(),
                 )
             )
-        for position, part in enumerate(content.get("parts") or []):
+        indexed_parts = content.get("parts") or []
+        for position in range(len(indexed_parts)):
+            part = indexed_parts[position]
             if isinstance(part, dict):
                 seq = self._seqs.coord((self._part_index(part, position=position),))
                 block = self._part(part, seq)
                 if block is not None:
                     blocks.append(block)
 
-        text_seqs = [
-            block.seq for block in blocks if isinstance(block, TextBlock) and block.seq is not None
-        ]
+        text_seqs = []
+        for block in blocks:
+            if isinstance(block, TextBlock) and block.seq is not None:
+                text_seqs.append(block.seq)
         target_seq = text_seqs[0] if len(set(text_seqs)) == 1 else None
         blocks.extend(self._citations(head.get("citationMetadata"), target_seq))
         grounding = self._grounding(head.get("groundingMetadata"))
@@ -171,6 +232,7 @@ class _ToHub:
         return [HubResponse(content=blocks, **fields)]
 
     def flush(self) -> list[HubResponse]:
+        """이 변환기는 종료 시 보관하는 잔여 델타가 없으므로 빈 목록을 반환한다."""
         return []
 
     def _citations(self, metadata: Any, target_seq: Seq | None) -> list[ContentBlock]:
@@ -188,7 +250,9 @@ class _ToHub:
         if not isinstance(metadata, dict):
             return []
         out: list[ContentBlock] = []
-        for position, source in enumerate(metadata.get("citationSources") or []):
+        indexed_sources = metadata.get("citationSources") or []
+        for position in range(len(indexed_sources)):
+            source = indexed_sources[position]
             if not isinstance(source, dict):
                 continue
             fields: dict[str, Any] = {
@@ -205,7 +269,9 @@ class _ToHub:
             title = source.get("title")
             if isinstance(title, str) and title:
                 fields["title"] = title
-            for key, dst in (("startIndex", "start_index"), ("endIndex", "end_index")):
+            field_names = {"startIndex": "start_index", "endIndex": "end_index"}
+            for key in field_names:
+                dst = field_names[key]
                 value = source.get(key)
                 if isinstance(value, int):
                     fields[dst] = value
@@ -222,13 +288,17 @@ class _ToHub:
             return None
 
         sources: list[GroundingSource] = []
-        for index, chunk in enumerate(metadata.get("groundingChunks") or []):
+        indexed_chunks = metadata.get("groundingChunks") or []
+        for index in range(len(indexed_chunks)):
+            chunk = indexed_chunks[index]
             if not isinstance(chunk, dict):
                 continue
-            kind = next(
-                (name for name, value in chunk.items() if isinstance(value, dict)),
-                "unknown",
-            )
+            kind = "unknown"
+            for name in chunk:
+                value = chunk[name]
+                if isinstance(value, dict):
+                    kind = name
+                    break
             detail = chunk.get(kind)
             detail = detail if isinstance(detail, dict) else {}
             sources.append(
@@ -242,21 +312,21 @@ class _ToHub:
             )
 
         supports: list[GroundingSupport] = []
-        for index, support in enumerate(metadata.get("groundingSupports") or []):
+        indexed_supports = metadata.get("groundingSupports") or []
+        for index in range(len(indexed_supports)):
+            support = indexed_supports[index]
             if not isinstance(support, dict):
                 continue
             segment = support.get("segment")
             segment = segment if isinstance(segment, dict) else {}
-            source_indices = [
-                value
-                for value in support.get("groundingChunkIndices") or []
-                if isinstance(value, int)
-            ]
-            confidence_scores = [
-                float(value)
-                for value in support.get("confidenceScores") or []
-                if isinstance(value, int | float) and not isinstance(value, bool)
-            ]
+            source_indices = []
+            for value in support.get("groundingChunkIndices") or []:
+                if isinstance(value, int):
+                    source_indices.append(value)
+            confidence_scores = []
+            for value in support.get("confidenceScores") or []:
+                if isinstance(value, int | float) and (not isinstance(value, bool)):
+                    confidence_scores.append(float(value))
             supports.append(
                 GroundingSupport(
                     index=index,
@@ -277,9 +347,10 @@ class _ToHub:
                 )
             )
 
-        queries = [
-            query for query in metadata.get("webSearchQueries") or [] if isinstance(query, str)
-        ]
+        queries = []
+        for query in metadata.get("webSearchQueries") or []:
+            if isinstance(query, str):
+                queries.append(query)
         search_entry = metadata.get("searchEntryPoint")
         retrieval = metadata.get("retrievalMetadata")
         return GroundingBlock(
@@ -339,7 +410,11 @@ class _ToHub:
             ):
                 return self._last_stream_index
         else:
-            key = next((field for field in _PART_FIELDS if field in part), "unknown")
+            key = "unknown"
+            for field in _PART_FIELDS:
+                if field in part:
+                    key = field
+                    break
 
         index = self._next_index
         self._next_index += 1
@@ -406,62 +481,9 @@ class _ToHub:
                 vendor=SOURCE,
             )
 
-        # inlineData는 이미지 또는 음성이다. MIME으로 갈린다.
-        inline = part.get("inlineData")
-        if isinstance(inline, dict):
-            mime = str(inline.get("mimeType") or "")
-            data = inline.get("data")
-            if mime.startswith("audio/"):
-                return AudioBlock(
-                    media_type=mime,
-                    data=data,
-                    native=dict(part),
-                    seq=seq,
-                    vendor=SOURCE,
-                )
-            if mime.startswith("image/"):
-                return ImageBlock(
-                    media_type=mime,
-                    data=data,
-                    native=dict(part),
-                    seq=seq,
-                    vendor=SOURCE,
-                )
-            return DocumentBlock(
-                media_type=mime or "application/octet-stream",
-                data=data,
-                native=dict(part),
-                seq=seq,
-                vendor=SOURCE,
-            )
-
-        file_data = part.get("fileData")
-        if isinstance(file_data, dict):
-            mime = str(file_data.get("mimeType") or "")
-            uri = file_data.get("fileUri")
-            if mime.startswith("image/"):
-                return ImageBlock(
-                    media_type=mime,
-                    url=uri,
-                    native=dict(part),
-                    seq=seq,
-                    vendor=SOURCE,
-                )
-            if mime.startswith("audio/"):
-                return AudioBlock(
-                    media_type=mime,
-                    uri=uri,
-                    native=dict(part),
-                    seq=seq,
-                    vendor=SOURCE,
-                )
-            return DocumentBlock(
-                media_type=mime or "application/octet-stream",
-                uri=uri,
-                native=dict(part),
-                seq=seq,
-                vendor=SOURCE,
-            )
+        media = _gemini_media_block(part, seq)
+        if media is not None:
+            return media
 
         for field in _SERVER_TOOL_FIELDS:
             value = part.get(field)
@@ -491,6 +513,7 @@ class _ToHub:
         part: dict[str, Any],
         seq: Seq,
     ) -> ToolUseBlock:
+        """함수 이름·인자·ID를 허브 도구 호출로 변환하고 호출 좌표를 유지한다."""
         fields: dict[str, Any] = {
             "seq": seq,
             "vendor": SOURCE,
@@ -512,6 +535,7 @@ class _ToHub:
 
     @staticmethod
     def _function_response_blocks(raw: Any) -> list[ContentBlock]:
+        """함수 응답의 inlineData Part를 MIME에 따라 이미지·음성·문서 블록으로 변환한다."""
         blocks: list[ContentBlock] = []
         for part in raw or []:
             if not isinstance(part, dict):
@@ -531,6 +555,7 @@ class _ToHub:
 
     @staticmethod
     def _usage(raw: Any) -> Usage | None:
+        """벤더 사용량을 허브 토큰 사용량과 원본 사용량으로 변환한다."""
         if not isinstance(raw, dict):
             return None
         fields: dict[str, Any] = {}
@@ -668,12 +693,14 @@ class GenerateContentAdapter:
     api_key_header = "x-goog-api-key"
 
     def __init__(self, *, model: str = "", api_key: str = "", version: str = "v1beta") -> None:
+        """모델 이름·API 키·API 버전을 보관한다."""
         self.model = model
         self.api_key = api_key
         self.version = version
 
     @property
     def path(self) -> str:
+        """선택한 모델을 포함하는 streamGenerateContent 요청 경로를 반환한다."""
         model = self.model or "{model}"
         return f"/{self.version}/models/{model}:streamGenerateContent?alt=sse"
 
@@ -686,6 +713,7 @@ class GenerateContentAdapter:
         )
 
     def request_headers(self) -> dict[str, str]:
+        """설정한 인증 정보로 벤더가 요구하는 추가 요청 헤더를 만든다."""
         return {"x-goog-api-key": self.api_key} if self.api_key else {}
 
     def build_body(self, request: HubRequest, lowerer: Lowerer) -> dict[str, Any]:
@@ -727,7 +755,8 @@ class GenerateContentAdapter:
             body["tools"] = tools
 
         # ``for_vendor``가 generationConfig 중첩까지 만들어 준다. 여기서 옮길 것이 없다.
-        for key, value in params.items():
+        for key in params:
+            value = params[key]
             if key not in ("contents", "tools", "systemInstruction"):
                 body[key] = value
 
@@ -755,6 +784,7 @@ class GenerateContentAdapter:
         pending_role: str | None = None
 
         def flush() -> None:
+            """보관한 같은 역할의 메시지들을 Content 하나로 변환하고 임시 상태를 초기화한다."""
             nonlocal pending
             if not pending or pending_role is None:
                 return
@@ -792,10 +822,12 @@ class GenerateContentAdapter:
         *,
         synthetic: bool = False,
     ) -> list[dict[str, Any]]:
+        """허브 블록을 Gemini Part 목록으로 변환하며 일반 텍스트의 순서를 보존한다."""
         parts: list[dict[str, Any]] = []
         plain: list[ContentBlock] = []
 
         def flush_plain() -> None:
+            """보관한 일반 블록을 텍스트 Part로 변환하고 임시 목록을 초기화한다."""
             text_parts = lowerer.lower_text_parts(plain)
             plain.clear()
             for text in text_parts:
@@ -813,11 +845,16 @@ class GenerateContentAdapter:
                 plain.append(block)
                 continue
             if synthetic and isinstance(block, ToolUseBlock) and not part.get("thoughtSignature"):
-                # Official exception for client-authored calls; never mutate stored blocks.
+                # 직접 작성한 호출의 원본 블록을 변경하지 않고 요청용 사본을 사용한다.
                 part["thoughtSignature"] = "skip_thought_signature_validator"
+            has_native_field = False
+            for field in _PART_FIELDS:
+                if field in part:
+                    has_native_field = True
+                    break
             if (
                 isinstance(block, ServerToolBlock | VendorBlock)
-                and not any(field in part for field in _PART_FIELDS)
+                and not has_native_field
                 and not block.native
             ):
                 # candidate 메타데이터는 Part가 아니므로 이력에 넣지 않는다.
@@ -844,11 +881,18 @@ class GenerateContentAdapter:
             return dict(block.native)
 
         name = block.name or call_names.get(block.tool_use_id) or block.tool_use_id
-        searches = [b for b in block.blocks if isinstance(b, SearchResultBlock)]
+        searches = []
+        for candidate_block in block.blocks:
+            if isinstance(candidate_block, SearchResultBlock):
+                searches.append(candidate_block)
         response: Any
         if block.blocks:
             texts = [block.content, lowerer.lower_text(searches) if searches else ""]
-            response = {"result": "\n".join(text for text in texts if text)}
+            non_empty_texts = []
+            for text in texts:
+                if text:
+                    non_empty_texts.append(text)
+            response = {"result": "\n".join(non_empty_texts)}
         elif block.structured_content is None:
             response = {"result": block.content}
         elif isinstance(block.structured_content, dict):
@@ -859,17 +903,21 @@ class GenerateContentAdapter:
         function_response: dict[str, Any] = {"name": name, "response": response}
         if block.tool_use_id:
             function_response["id"] = block.tool_use_id
-        nested = [
-            as_gemini_part(part)
-            for part in block.blocks
-            if not isinstance(part, SearchResultBlock) and not has_opaque_media_reference(part)
-        ]
-        rendered = [part for part in nested if part is not None]
+        rendered: list[dict[str, Any]] = []
+        for nested_block in block.blocks:
+            if isinstance(nested_block, SearchResultBlock) or has_opaque_media_reference(
+                nested_block
+            ):
+                continue
+            rendered_part = as_gemini_part(nested_block)
+            if rendered_part is not None:
+                rendered.append(rendered_part)
         if rendered:
             function_response["parts"] = rendered
         return {"functionResponse": function_response}
 
     def _tools(self, tools: list[ToolDefinition]) -> list[dict[str, Any]]:
+        """공통 함수 도구와 Gemini 원본 도구를 요청의 tools 목록으로 구성한다."""
         native: list[dict[str, Any]] = []
         declarations: list[dict[str, Any]] = []
         for tool in tools:
@@ -898,6 +946,7 @@ class GenerateContentAdapter:
         return False
 
     def decode(self, frame: SseEvent) -> dict[str, Any] | None:
+        """빈 프레임과 종료 표식을 제외하고 SSE data의 JSON을 해석한다."""
         payload = frame.data.strip()
         if not payload or payload == "[DONE]":
             return None
@@ -908,14 +957,15 @@ class GenerateContentAdapter:
         if not isinstance(parsed, dict):
             raise MappingError("generate_content chunk must be a JSON object")
         if "error" in parsed:
-            detail = json.dumps(parsed["error"], ensure_ascii=False)[:200]
-            raise MappingError(f"generate_content stream reported an error: {detail}")
+            raise VendorStreamError(SOURCE, parsed["error"])
         return parsed
 
     def to_hub(self) -> StreamMapper[Any, Any]:
+        """스트림마다 독립적인 벤더 응답→허브 델타 변환기를 생성한다."""
         return _ToHub()
 
     def to_native(self) -> NativeAccumulator[GenerateContentResponse]:
+        """스트림마다 독립적인 원본 Response 누적기를 생성한다."""
         return _ToNative()
 
     def token_count_calls(

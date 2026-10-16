@@ -8,9 +8,9 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
-from ..hub import HubRequest, TokenCount
-from ..mapper import StreamMapper
-from ..transport.sse import SseEvent
+from completion_bridge.models.hub import HubRequest, TokenCount
+from completion_bridge.streaming.mapping import StreamMapper
+from completion_bridge.transport.sse import SseEvent
 
 __all__ = ["JsonCall", "Lowerer", "NativeAccumulator", "VendorAdapter"]
 
@@ -126,7 +126,8 @@ class VendorAdapter(Protocol):
         """:meth:`build_body`가 만든 생성 body로 입력 토큰 수를 재는 요청 순서.
 
         보낼 요청을 :class:`JsonCall`로 ``yield``한다. 호출자는 그 요청을 보내고 응답 JSON
-        객체를 ``send``로 돌려준다. 요청이 끝나면 :class:`~completion_bridge.hub.TokenCount`를
+        객체를 ``send``로 돌려준다. 요청이 끝나면
+        :class:`~completion_bridge.models.hub.TokenCount`를
         반환한다. 이 메서드는 I/O를 하지 않는다.
         """
         ...

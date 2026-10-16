@@ -1,8 +1,6 @@
 """실제 엔드포인트 대상 시험.
 
-환경변수가 없으면 건너뛴다. 엔드포인트와 모델명을 코드에 넣지 않는다. 지금 Java E2E 시험에
-사내 주소와 모델명이 박혀 있고 비활성화 어노테이션이 주석 처리되어 CI에서 돌면 실패하는데,
-그것을 반복하지 않는다.
+환경변수가 없으면 건너뛴다. 엔드포인트와 모델명은 환경변수에서 읽는다.
 
     ECC_LIVE_BASE_URL=http://host:port ECC_LIVE_MODEL=luxia-3.5 \
         uv run pytest -m live -s
@@ -19,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
 
 import httpx
 import pytest
@@ -53,10 +52,8 @@ SHORT = 24
 # thinking 모델에서 추론을 끈다. 켜두면 짧은 예산을 추론이 다 써서 content가 비고
 # stop_reason이 length가 된다. 실제로 qwen3-8b에서 그렇다.
 #
-# 이것은 vLLM 전용 확장이다. 같은 필드를 OpenAI에 보내면 요청이 통째로 400으로 거절된다.
-# common-hitl-chat이 LlmDialect라는 seam을 따로 둔 이유가 이것이고, 그 저장소 주석에 실제
-# 사고 기록이 있다. 여기서는 벤더가 하나라 호출 인자로 넘긴다.
-NO_THINKING: dict[str, object] = {"chat_template_kwargs": {"enable_thinking": False}}
+# vLLM 전용 확장이므로 이 옵션을 지원하는 엔드포인트에만 전달한다.
+NO_THINKING: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": False}}
 
 # 추론을 끝내고 본문까지 받으려면 예산이 필요하다. 실측에서 qwen3-8b가 "1+1은?"에도 추론에
 # 900자 남짓을 쓴다. 600 토큰이면 stop_reason이 stop으로 끝난다.
@@ -74,11 +71,7 @@ def _relift(vocabulary: CiteVocabulary, text: str) -> list[TextBlock]:
     merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
     for delta in deltas:
         merger.apply(delta)
-    return [
-        b
-        for b in merger.build().content
-        if isinstance(b, TextBlock) and b.citations
-    ]
+    return [b for b in merger.build().content if isinstance(b, TextBlock) and b.citations]
 
 
 def _bridge(client: httpx.AsyncClient) -> Bridge:
@@ -244,9 +237,7 @@ class TestLiveStreaming:
                 history, max_completion_tokens=SHORT, temperature=0.0, **NO_THINKING
             )
 
-        cited = [
-            b for b in first.content if isinstance(b, TextBlock) and b.citations
-        ]
+        cited = [b for b in first.content if isinstance(b, TextBlock) and b.citations]
         assistant = body["messages"][1]
         assert isinstance(assistant, dict)
         lowered = assistant["content"]

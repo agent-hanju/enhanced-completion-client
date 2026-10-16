@@ -1,21 +1,8 @@
-"""델타 병합. 조각으로 도착한 스트림을 하나의 최종 객체로 접는다.
+"""Pydantic 필드의 타입과 메타데이터에 따라 스트림 델타를 누적한다.
 
-병합 규칙의 기본값이 **이어붙이기**인 것이 핵심이다. OpenAI 델타 스트림에서 실제로 누적되는
-필드는 본문, 추론, 도구 인수 셋뿐이고 나머지는 전부 덮어쓰기다. 기본을 반대로 잡으면 표시가
-서른 개 붙는다. 이쪽으로 잡으면 아홉 개면 된다.
-
-Java ``streambind``의 규칙을 그대로 따르되 ``TypeVariableResolver``에 해당하는 층은 없다.
-제네릭 소거가 없어 ``model_fields``가 실제 타입을 들고 있기 때문이다.
-
-| 필드 종류 | 동작 |
-|---|---|
-| ``str`` | 이어붙이기 |
-| ``int`` / ``float`` | 더하기 |
-| 모델 | 재귀 병합 |
-| 원시값 리스트 | 뒤에 추가 |
-| 모델 리스트 | 인덱스 키로 짝지어 병합 |
-| ``Literal`` 필드 | 덮어쓰기 (자동) |
-| ``{"stream": "overwrite"}`` | 덮어쓰기 |
+문자열은 연결하고 수치는 합산한다. 모델과 목록은 재귀 병합하며 Literal 필드와
+명시적인 overwrite 필드는 값을 교체한다. 리스트 모델 원소는 지정한 식별 필드로
+같은 원소를 찾는다. 누적 상태는 매핑으로 관리하고 build에서 모델로 검증한다.
 """
 
 from __future__ import annotations
@@ -37,6 +24,7 @@ DEFAULT_INDEX_FIELD = "index"
 
 
 def _meta(field: FieldInfo) -> str | None:
+    """Pydantic 필드에 선언된 스트림 병합 전략 문자열을 조회한다."""
     extra = field.json_schema_extra
     if isinstance(extra, dict):
         value = extra.get(STREAM_META_KEY)
@@ -53,14 +41,13 @@ def _unwrap_optional(annotation: Any) -> Any:
     """
     if get_origin(annotation) not in (Union, UnionType):
         return annotation
-    args = [a for a in get_args(annotation) if a is not type(None)]
+    args = []
+    for a in get_args(annotation):
+        if a is not type(None):
+            args.append(a)
     if len(args) == 1:
         return args[0]
     return annotation
-
-
-def _is_literal(annotation: Any) -> bool:
-    return get_origin(_unwrap_optional(annotation)) is Literal
 
 
 def _is_overwrite(name: str, field: FieldInfo) -> bool:
@@ -76,35 +63,19 @@ def _is_overwrite(name: str, field: FieldInfo) -> bool:
         return True
     if name == DEFAULT_INDEX_FIELD:
         return True
-    return _is_literal(field.annotation)
-
-
-def _model_of(annotation: Any) -> type[BaseModel] | None:
-    inner = _unwrap_optional(annotation)
-    if isinstance(inner, type) and issubclass(inner, BaseModel):
-        return inner
-    return None
-
-
-def _list_element(annotation: Any) -> Any | None:
-    """``list[X]``에서 ``X``를 꺼낸다. 리스트가 아니면 ``None``."""
-    inner = _unwrap_optional(annotation)
-    if get_origin(inner) is list:
-        args = get_args(inner)
-        return args[0] if args else Any
-    return None
+    return get_origin(_unwrap_optional(field.annotation)) is Literal
 
 
 def _index_field_name(value: Any) -> str | None:
-    """리스트 원소를 짝지을 필드 이름을 정한다.
+    """모델 리스트 원소를 식별할 필드를 선택한다.
 
-    ``{"stream": "index"}`` 표시가 있으면 그 필드를, 없으면 ``index``라는 이름의 정수 필드를
-    쓴다. Java에서 ``ToolCall.index``와 ``Choice.index``가 어노테이션 없이 이 규칙에 걸렸다.
+    stream 메타데이터가 index인 필드를 우선하고, 없으면 index라는 필드 이름을 사용한다.
     """
     if not isinstance(value, BaseModel):
         return None
     fields = type(value).model_fields
-    for name, field in fields.items():
+    for name in fields:
+        field = fields[name]
         if _meta(field) == INDEX:
             return name
     if DEFAULT_INDEX_FIELD in fields:
@@ -115,8 +86,15 @@ def _index_field_name(value: Any) -> str | None:
 class StreamMerger[M: BaseModel]:
     """같은 타입의 델타들을 누적해 하나로 만든다.
 
+    같은 인스턴스의 apply·build 호출은 순차적으로 수행해야 한다.
     누적은 모델 인스턴스가 아니라 딕셔너리에 한다. 조각만 채워진 델타는 필수 필드를 만족하지
     못해 중간 상태를 모델로 들 수 없기 때문이다. :meth:`build`에서 한 번에 검증한다.
+
+    입력은 선언한 모델 타입의 델타여야 한다. apply는 해당 필드만 순차적으로 갱신하며
+    트랜잭션이나 스레드 간 동시 접근을 제공하지 않는다. build 검증 실패는 누적 상태를
+    변경하지 않는다. 식별 목록의 원소 탐색은 선형이므로 n개 원소를 각각 적용하면
+    최악 O(n²) 탐색이 필요하다. 문자열 연결은 누적 문자열 길이에 비례하며,
+    저장 공간은 누적 응답 크기에 비례한다.
     """
 
     def __init__(self, model: type[M]) -> None:
@@ -136,19 +114,14 @@ class StreamMerger[M: BaseModel]:
     # ---- 내부 ----
 
     def _merge_model(self, acc: dict[str, Any], delta: BaseModel) -> None:
-        """델타의 필드를 누적 상태에 적용한다.
+        """모델의 필드와 확장 필드를 누적 상태에 반영한다.
 
-        "이 필드가 델타에 실렸는가"를 ``model_fields_set``으로 판단한다. Java는 모든 필드를
-        nullable로 만들어 ``null``을 "변경 없음"으로 썼는데, Python에서 같은 짓을 하면 소비자가
-        매번 None 검사를 해야 한다. Pydantic이 명시적으로 주어진 필드를 알려주므로 편한 기본값을
-        유지하면서 같은 구분을 얻는다.
-
-        기본값은 처음 등장할 때만 자리를 채운다. ``type`` 같은 판별자가 그 경로로 들어온다.
-        어댑터가 ``TextBlock(text=...)``만 써도 ``type``이 누적 상태에 남아야 유니온 조회가
-        된다. 반면 두 번째 델타의 기본값이 누적된 값을 덮어쓰면 안 된다.
+        model_fields_set에 있는 필드는 선언된 전략으로 병합한다. 생략된 기본값은
+        최초 등장 시에만 보존한다. None은 변경 없음으로 처리한다.
         """
         provided = delta.model_fields_set
-        for name, field in type(delta).model_fields.items():
+        for name in type(delta).model_fields:
+            field = type(delta).model_fields[name]
             value = getattr(delta, name, None)
             if value is None:
                 continue
@@ -158,12 +131,15 @@ class StreamMerger[M: BaseModel]:
                 acc[name] = self._seed(field, value)
 
         # extra="allow"로 들어온 선언 밖 필드도 잃지 않는다.
-        for name, value in (delta.__pydantic_extra__ or {}).items():
+        mapped_fields = delta.__pydantic_extra__ or {}
+        for name in mapped_fields:
+            value = mapped_fields[name]
             if value is None:
                 continue
             acc[name] = self._replace(acc.get(name), value)
 
     def _merge_field(self, acc: dict[str, Any], name: str, field: FieldInfo, value: Any) -> None:
+        """새 필드·값 교체·누적 전략에 따라 필드 하나를 누적 상태에 반영한다."""
         if name not in acc:
             acc[name] = self._seed(field, value)
             return
@@ -191,6 +167,7 @@ class StreamMerger[M: BaseModel]:
         return value
 
     def _replace(self, _current: Any, value: Any) -> Any:
+        """모델 값은 누적용 매핑으로 변환하고 그 밖의 값은 그대로 반환한다."""
         if isinstance(value, BaseModel):
             nested: dict[str, Any] = {}
             self._merge_model(nested, value)
@@ -198,6 +175,7 @@ class StreamMerger[M: BaseModel]:
         return value
 
     def _combine(self, current: Any, value: Any, field: FieldInfo) -> Any:
+        """문자열·수치·모델·매핑·목록의 타입에 맞는 병합 연산을 수행한다."""
         if isinstance(current, str) and isinstance(value, str):
             return current + value
         if isinstance(current, bool) or isinstance(value, bool):
@@ -217,6 +195,7 @@ class StreamMerger[M: BaseModel]:
         return value
 
     def _extend_list(self, acc: list[Any], deltas: list[Any]) -> None:
+        """원시 원소는 추가하고 모델 원소는 식별 필드가 같으면 같은 누적 원소에 반영한다."""
         for item in deltas:
             if not isinstance(item, BaseModel):
                 acc.append(item)
@@ -234,11 +213,9 @@ class StreamMerger[M: BaseModel]:
             self._merge_model(slot, item)
 
     def _slot_for(self, acc: list[Any], key_name: str | None, key: Any) -> dict[str, Any]:
-        """같은 인덱스 키를 가진 누적 슬롯을 찾거나 새로 만든다.
+        """식별값이 같은 누적 원소를 찾거나 새 매핑을 추가한다.
 
-        Java 구현은 리스트를 인덱스 값으로 직접 주소 지정해 빈 자리를 ``null``로 채웠다.
-        여기서는 도착 순서를 보존한다. 벤더가 인덱스를 0부터 촘촘히 주지 않는 경우가 있고,
-        순서가 곧 의미인 블록 리스트에서는 도착 순서가 더 안전하다.
+        기존 원소의 도착 순서를 유지하며 원소 수에 비례해 순회한다.
         """
         for slot in acc:
             if isinstance(slot, dict) and key_name and slot.get(key_name) == key:

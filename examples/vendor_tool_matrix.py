@@ -1,4 +1,4 @@
-"""Render a multi-model conversation and its per-vendor request conversions.
+"""여러 모델의 대화 이력과 벤더별 요청 변환 예제를 생성한다.
 
 한 대화의 turn 마다 다른 모델이 답하고, 각 모델은 자기 벤더에만 있는 서버 실행 도구를
 쓴다. 그렇게 쌓인 이력을 네 API로 다시 내보낼 때 무엇이 보존되고 무엇이 이름을 바꾸며

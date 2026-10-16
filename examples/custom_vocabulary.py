@@ -1,4 +1,4 @@
-"""Executable example of a non-citation XML-like custom vocabulary."""
+"""인용 이외의 XML 형태 사용자 정의 어휘를 구현한 실행 예제."""
 
 from __future__ import annotations
 
@@ -24,15 +24,16 @@ from completion_bridge import (
     compose,
 )
 from completion_bridge.errors import MappingError
-from completion_bridge.seq import Seq, finalize
+from completion_bridge.streaming.sequence import Seq, finalize
 from completion_bridge.vendors import chat_completions, generate_content, messages, responses
 from completion_bridge.vendors.base import VendorAdapter
 
 
 class BadgeBlock(ContentBlock):
-    """Application-defined JSON content block."""
+    """소비 애플리케이션이 정의한 JSON 콘텐츠 블록."""
 
-    type: Literal["badge"] = "badge"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["badge"] = "badge"  # pyright: ignore[reportIncompatibleVariableOverride]
     level: str = "info"
     text: str = ""
 
@@ -105,7 +106,9 @@ class _BadgeMapper:
                 self._text_seq = self._piece(parent)
             return [TextBlock(text=event.content, vendor=vendor, seq=self._text_seq)]
         if isinstance(event, Enter) and event.path == BADGE_PATH:
-            closed = [self._close()] if self._level is not None else []
+            closed: list[ContentBlock] = []
+            if self._level is not None:
+                closed.append(self._close())
             self._level = html.unescape(event.attributes.get("level", "info"))
             self._text = []
             self._vendor = vendor
@@ -138,7 +141,7 @@ class _BadgeMapper:
 
 
 class BadgeVocabulary(Vocabulary):
-    """Map ``BadgeBlock`` to and from an XML-like text representation."""
+    """BadgeBlock과 XML 형태 텍스트 사이의 요청·응답 변환을 제공한다."""
 
     blocks = (BadgeBlock,)
     name = "badge"
@@ -220,7 +223,7 @@ def _cell(value: Any) -> str:
 
 def render_document() -> str:
     vocabulary = BadgeVocabulary()
-    # Bridge registration makes the Pydantic content union runtime-open for stored JSON too.
+    # Bridge 등록을 통해 저장된 JSON도 등록된 사용자 정의 블록으로 해석한다.
     _bridge(chat_completions, vocabulary)
     restored = HubMessage.model_validate(
         {

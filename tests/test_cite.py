@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -22,7 +23,7 @@ from completion_bridge import (
     TextBlock,
     ThinkingBlock,
 )
-from completion_bridge.seq import finalize
+from completion_bridge.streaming.sequence import finalize
 from completion_bridge.vendors import chat_completions
 
 BASE = "http://llm.test"
@@ -55,11 +56,7 @@ def merge(*deltas: HubResponse) -> HubResponse:
 
 
 def cited_blocks(response: HubResponse) -> list[TextBlock]:
-    return [
-        block
-        for block in response.content
-        if isinstance(block, TextBlock) and block.citations
-    ]
+    return [block for block in response.content if isinstance(block, TextBlock) and block.citations]
 
 
 def chat_text(content: object) -> str:
@@ -291,7 +288,7 @@ class TestLowering:
         assert body["messages"] == [{"role": "user", "content": "질문"}]
 
     @staticmethod
-    def _request(message: HubMessage) -> dict[str, object]:
+    def _request(message: HubMessage) -> dict[str, Any]:
         return SyncBridge(
             vendor=chat_completions,
             base_url=BASE,

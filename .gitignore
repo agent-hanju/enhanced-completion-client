@@ -1,18 +1,18 @@
-# IDE - JetBrains
+# JetBrains IDE 설정
 .idea/
 
-# IDE - VS Code
+# VS Code 설정
 .vscode/
 
-# Log files
+# 로그 파일
 *.log
 
-# Archives
+# 압축 파일
 *.zip
 *.tar.gz
 *.rar
 
-# OS generated files
+# 운영체제가 생성하는 파일
 .DS_Store
 .DS_Store?
 ._*
@@ -21,13 +21,13 @@
 ehthumbs.db
 Thumbs.db
 
-# Local configuration
+# 로컬 설정
 local.properties
 *.local
 .env
 !.env.example
 
-# Python
+# Python 실행 환경과 캐시
 __pycache__/
 *.py[cod]
 .venv/

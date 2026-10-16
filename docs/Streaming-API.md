@@ -61,7 +61,6 @@ bridge = Bridge(
 | `api_key` | `None`. 인증에 사용할 키 |
 | `hyperparameters` | `None`. `Hyperparameters` 또는 mapping |
 | `vocabularies` | `()`. 생성 시 등록하며 요청 lowering과 응답 lifting에 사용 |
-| `extractors` | `None`. media type별 텍스트 추출 함수 mapping |
 | `headers` | `None`. 기본 헤더와 벤더 헤더를 덮는 사용자 헤더 |
 | `http_client` | `None`. 비동기는 `httpx.AsyncClient`, 동기는 `httpx.Client` |
 | `timeout` | `120.0`. 내부 HTTP client 생성 시 전달 |
@@ -231,7 +230,7 @@ delta, 부분 결과, 최종 결과는 모두 같은 타입이다. delta는 이�
 | `citation` | 구 저장 데이터 호환용. 새 인용은 `text.citations` 또는 `annotation` 사용 |
 | 기타 | 등록된 사용자 블록 또는 원형을 보존하는 `VendorBlock` |
 
-블록별 전체 필드·타입은 [blocks.py](../src/completion_bridge/blocks.py)에 정의되어 있다.
+블록별 전체 필드·타입은 [blocks.py](../src/completion_bridge/models/blocks.py)에 정의되어 있다.
 
 `tool_result.blocks`는 `list[Block]`이다. JSON에서 읽을 때 `type`으로 등록된 블록 클래스로
 복원되므로 저장할 때 중첩 블록의 `type`이 남아 있어야 한다.
@@ -410,7 +409,6 @@ flush하지 않는다. 예외 경로의 `finally`는 리소스를 해제하지�
 | 연결·읽기 timeout 등 | 전송 계층 예외가 그대로 전파될 수 있음 |
 | 응답 디코딩·매핑 실패 | 어댑터의 `MappingError` 등 전파 |
 | 입력 모델 검증 실패 | 모델 검증 예외 등 전파 |
-| 등록된 extractor 실패 | 원래 예외를 원인으로 가진 `ExtractionError` |
 | 완료 전 `result` 조회 | `StreamNotFinished` |
 
 벤더 오류가 응답의 `stop_reason="error"` 등으로 표현되는 경우도 있으므로 모든 실패가
@@ -491,9 +489,9 @@ partial = stream.partial
 ## 8. 구현 및 검증 근거
 
 - [bridge.py](../src/completion_bridge/bridge.py): 공개 메서드, pipeline, 스트림 수명
-- [hub.py](../src/completion_bridge/hub.py): 요청·응답 모델
-- [blocks.py](../src/completion_bridge/blocks.py): 블록 필드 및 도구 인수 파싱
-- [merge.py](../src/completion_bridge/merge.py): delta 병합
+- [hub.py](../src/completion_bridge/models/hub.py): 요청·응답 모델
+- [blocks.py](../src/completion_bridge/models/blocks.py): 블록 필드 및 도구 인수 파싱
+- [merge.py](../src/completion_bridge/streaming/merge.py): delta 병합
 - [transport/http.py](../src/completion_bridge/transport/http.py): HTTP 전송 및 오류
 - [test_bridge.py](../tests/test_bridge.py): EOF 완료, 부분 결과, usage, HTTP 오류
 - [test_merge.py](../tests/test_merge.py): 병합 규칙
@@ -515,7 +513,7 @@ HTTP 호출 없이도 사용할 수 있으며, `apply()`로 디코딩된 chunk�
 | `generate_content` | `GenerateContentResponse` | `response.candidates[0].content.parts` |
 
 네 응답 타입은 `completion_bridge`와 `completion_bridge.vendors`에서 import할 수 있다.
-하위 모델은 `completion_bridge.native`에서 제공한다. 공식 SDK 타입이 아닌 이 라이브러리의
+하위 모델은 `completion_bridge.models.native`에서 제공한다. 공식 SDK 타입이 아닌 이 라이브러리의
 응답 타입이며, SDK 의존성을 추가하지 않는다. Google 응답 속성은 `usageMetadata`,
 `thoughtSignature`처럼 REST JSON 필드명을 사용한다.
 

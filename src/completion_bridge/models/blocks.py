@@ -44,7 +44,7 @@ __all__ = [
     "resolve_block",
 ]
 
-#: 전처리기가 없어 내용을 옮길 수 없을 때 직렬화 태그에 남기는 표시.
+#: 대상 API에 원본을 전달할 수 없을 때 직렬화 태그에 사용하는 표시.
 #: 조용히 사라지는 것보다 전달되지 않았다는 사실이 남는 편이 낫다.
 UNAVAILABLE = "이 형식은 이 요청에 전달할 수 없다"
 
@@ -54,10 +54,12 @@ OVERWRITE = "overwrite"
 
 
 def _overwrite() -> dict[str, Any]:
+    """필드의 스트림 병합을 값 교체로 지정하는 메타데이터를 반환한다."""
     return {STREAM_META_KEY: OVERWRITE}
 
 
 def _index() -> dict[str, Any]:
+    """리스트 원소를 식별하는 필드의 스트림 병합 메타데이터를 반환한다."""
     return {STREAM_META_KEY: "index"}
 
 
@@ -76,7 +78,8 @@ class ContentBlock(BaseModel):
     index: int | None = Field(default=None, json_schema_extra=_overwrite())
     """최종 결과에서 이 블록의 위치. 0부터 1씩 증가한다.
 
-    :func:`~completion_bridge.seq.finalize`가 ``seq`` 순서로 채운다. delta에는 값이 없다.
+    :func:`~completion_bridge.streaming.sequence.finalize`가 ``seq`` 순서로 채운다.
+    delta에는 값이 없다.
     """
 
     seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=_index())
@@ -132,7 +135,8 @@ class Citation(BaseModel):
 class TextBlock(ContentBlock):
     """사용자에게 보이는 본문과 그 본문 블록에 붙는 인용."""
 
-    type: Literal["text"] = "text"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["text"] = "text"  # pyright: ignore[reportIncompatibleVariableOverride]
     text: str = ""
     signature: str | None = Field(default=None, json_schema_extra=_overwrite())
     citations: list[Citation] = Field(default_factory=list)
@@ -145,7 +149,8 @@ class ThinkingBlock(ContentBlock):
     Responses의 reasoning은 암호화되어 발급 응답에 묶인다. 다른 벤더로 내릴 때는 생략한다.
     """
 
-    type: Literal["thinking"] = "thinking"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["thinking"] = "thinking"  # pyright: ignore[reportIncompatibleVariableOverride]
     thinking: str = ""
     signature: str | None = Field(default=None, json_schema_extra=_overwrite())
     encrypted_content: str | None = Field(default=None, json_schema_extra=_overwrite())
@@ -157,7 +162,8 @@ class ToolUseBlock(ContentBlock):
     ``input_json``은 조각으로 도착하므로 이어붙인다. 파싱은 조립이 끝난 뒤에 한다.
     """
 
-    type: Literal["tool_use"] = "tool_use"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["tool_use"] = "tool_use"  # pyright: ignore[reportIncompatibleVariableOverride]
     id: str = Field(default="", json_schema_extra=_overwrite())
     name: str = Field(default="", json_schema_extra=_overwrite())
     kind: str = Field(default="function", json_schema_extra=_overwrite())
@@ -178,7 +184,7 @@ class ToolUseBlock(ContentBlock):
 
         상태 변경:
             ``input``에 대입할 때 그 이름을 ``model_fields_set``에서 제거한다. 이 블록을
-            :class:`~completion_bridge.merge.StreamMerger`에 델타로 넣으면 ``input``은
+            :class:`~completion_bridge.streaming.merge.StreamMerger`에 델타로 넣으면 ``input``은
             명시된 필드로 취급되지 않는다.
 
         호출 조건:
@@ -210,7 +216,8 @@ class ToolResultBlock(ContentBlock):
     보내지 않는다. ``structured_content``는 ``blocks``가 없을 때만 모델 입력이 된다.
     """
 
-    type: Literal["tool_result"] = "tool_result"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["tool_result"] = "tool_result"  # pyright: ignore[reportIncompatibleVariableOverride]
     tool_use_id: str = Field(default="", json_schema_extra=_overwrite())
     name: str | None = Field(default=None, json_schema_extra=_overwrite())
     kind: str = Field(default="function", json_schema_extra=_overwrite())
@@ -231,7 +238,8 @@ class ImageBlock(ContentBlock):
     - ``file_id``: 응답에서 관찰한 원격 참조를 진단용으로 보존한다. 공통 요청에는 사용할 수 없다
     """
 
-    type: Literal["image"] = "image"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["image"] = "image"  # pyright: ignore[reportIncompatibleVariableOverride]
     media_type: str | None = Field(default=None, json_schema_extra=_overwrite())
     data: str | None = Field(default=None, json_schema_extra=_overwrite())
     url: str | None = Field(default=None, json_schema_extra=_overwrite())
@@ -239,8 +247,6 @@ class ImageBlock(ContentBlock):
     """응답 보존 전용. 요청은 URL 또는 inline ``data``만 지원한다."""
     detail: str | None = Field(default=None, json_schema_extra=_overwrite())
     """Chat Completions ``image_url.detail``. ``auto``/``low``/``high``."""
-    serialize: bool = Field(default=False, json_schema_extra=_overwrite())
-    """참이면 네이티브 채널이 있어도 텍스트로 직렬화한다."""
 
 
 class AudioBlock(ContentBlock):
@@ -254,9 +260,8 @@ class AudioBlock(ContentBlock):
     요구하고 Gemini는 ``audio/wav`` 형태의 MIME을 요구하기 때문이다.
     """
 
-    type: Literal["audio"] = "audio"
-    serialize: bool = Field(default=False, json_schema_extra=_overwrite())
-    """참이면 네이티브 채널이 있어도 텍스트로 직렬화한다."""
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["audio"] = "audio"  # pyright: ignore[reportIncompatibleVariableOverride]
     data: str | None = None
     uri: str | None = Field(default=None, json_schema_extra=_overwrite())
     format: str | None = Field(default=None, json_schema_extra=_overwrite())
@@ -275,7 +280,8 @@ class CitationBlock(ContentBlock):
     릴리스에서 깨뜨리지 않기 위해 읽기와 요청 내림만 유지한다.
     """
 
-    type: Literal["citation"] = "citation"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["citation"] = "citation"  # pyright: ignore[reportIncompatibleVariableOverride]
     id: str = Field(default="", json_schema_extra=_overwrite())
     text: str = ""
     start_index: int = Field(default=0, json_schema_extra=_overwrite())
@@ -295,7 +301,8 @@ class AnnotationBlock(ContentBlock):
     text보다 늦게 도착할 수 있으므로 text block을 소급 분할하지 않고 독립 블록으로 둔다.
     """
 
-    type: Literal["annotation"] = "annotation"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["annotation"] = "annotation"  # pyright: ignore[reportIncompatibleVariableOverride]
     target_index: int | None = Field(default=None, json_schema_extra=_overwrite())
     """최종 결과에서 이 annotation이 가리키는 text block의 ``index``. 정할 수 없으면 ``None``."""
     target_seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=_overwrite())
@@ -343,7 +350,8 @@ class GroundingBlock(ContentBlock):
     목록으로 평탄화하지 않는다. 검색 UI와 질의도 같은 응답 메타데이터로 보존한다.
     """
 
-    type: Literal["grounding"] = "grounding"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["grounding"] = "grounding"  # pyright: ignore[reportIncompatibleVariableOverride]
     sources: list[GroundingSource] = Field(default_factory=list)
     supports: list[GroundingSupport] = Field(default_factory=list)
     search_queries: list[str] = Field(default_factory=list, json_schema_extra=_overwrite())
@@ -366,9 +374,8 @@ class DocumentBlock(ContentBlock):
     다만 평문 문서 source를 직접 받지 않는 대상에서는 본문 태그로 내린다.
     """
 
-    type: Literal["document"] = "document"
-    serialize: bool = Field(default=False, json_schema_extra=_overwrite())
-    """참이면 네이티브 채널이 있어도 텍스트로 직렬화한다."""
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["document"] = "document"  # pyright: ignore[reportIncompatibleVariableOverride]
     id: str = Field(default="", json_schema_extra=_overwrite())
     title: str | None = Field(default=None, json_schema_extra=_overwrite())
     text: str = ""
@@ -384,19 +391,17 @@ class DocumentBlock(ContentBlock):
         """평문 본문만 있는지. 참이면 본문 태그로 내려도 무손실이다."""
         return not self.data and not self.uri and not self.file_id
 
-    def to_prompt(self, *, extracted: str | None = None) -> str:
-        """네이티브 문서 채널이 없는 벤더에서 본문에 실을 형태.
+    def to_prompt(self) -> str:
+        """문서를 식별자·유형·본문을 포함하는 document 태그 문자열로 변환한다.
 
-        Java ``IDocument.toSerializedPrompt()``와 같은 모양이다. 평문이 아닌 문서는 여기로
-        내릴 수 없으므로 ``media_type``과 참조만 남긴다.
+        평문 문서는 본문을 사용한다. 그 외에는 URI·파일 ID를 사용하고,
+        참조가 없으면 전달 불가 표시를 남긴다.
         """
         parts = [f'<document id="{self.id}">']
         if self.title:
             parts.append(f"<title>{self.title}</title>")
         if self.is_inline_text:
             parts.append(f"<content>{self.text}</content>")
-        elif extracted is not None:
-            parts.append(f'<content media-type="{self.media_type}">{extracted}</content>')
         else:
             reference = self.uri or self.file_id or ""
             if reference:
@@ -421,7 +426,8 @@ class SearchResultBlock(ContentBlock):
     텍스트로 보낸다.
     """
 
-    type: Literal["search_result"] = "search_result"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["search_result"] = "search_result"  # pyright: ignore[reportIncompatibleVariableOverride]
     source: str = Field(min_length=1, json_schema_extra=_overwrite())
     """검색 결과의 출처 URL 또는 식별자."""
     title: str = Field(min_length=1, json_schema_extra=_overwrite())
@@ -440,7 +446,8 @@ class SearchResultBlock(ContentBlock):
         """
         parts = [f'<document id="{html.escape(self.source, quote=True)}">']
         parts.append(f"<title>{self.title}</title>")
-        parts.extend(f"<content>{chunk}</content>" for chunk in self.content)
+        for chunk in self.content:
+            parts.append(f"<content>{chunk}</content>")
         parts.append("</document>")
         return "\n".join(parts)
 
@@ -469,7 +476,8 @@ class ServerToolBlock(ContentBlock):
     - chat completions: 없음
     """
 
-    type: Literal["server_tool"] = "server_tool"
+    # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
+    type: Literal["server_tool"] = "server_tool"  # pyright: ignore[reportIncompatibleVariableOverride]
     id: str = Field(default="", json_schema_extra=_overwrite())
     name: str = Field(default="", json_schema_extra=_overwrite())
     status: str | None = Field(default=None, json_schema_extra=_overwrite())
@@ -534,7 +542,11 @@ def resolve_block(value: Any) -> Any:
         known = {"type", "index", "seq", "vendor", "native", "raw"}
         raw = value.get("raw")
         if not isinstance(raw, dict):
-            raw = {k: v for k, v in value.items() if k not in known}
+            raw = {}
+            for field_name in value:
+                field_value = value[field_name]
+                if field_name not in known:
+                    raw[field_name] = field_value
         native = value.get("native")
         if not isinstance(native, dict):
             native = {}
