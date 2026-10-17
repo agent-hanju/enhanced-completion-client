@@ -20,10 +20,10 @@ from typing import Any
 import httpx
 import pytest
 from _dense import DENSE_TOOL, dense_history
+from cite_vocabulary import CiteVocabulary
 
 from completion_bridge import (
     Bridge,
-    CiteVocabulary,
     DocumentBlock,
     HubMessage,
     HubResponse,

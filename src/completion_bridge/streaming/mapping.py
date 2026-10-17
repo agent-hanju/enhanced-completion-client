@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
@@ -96,22 +97,25 @@ def compose(*mappers: StreamMapper[Any, Any]) -> StreamMapper[Any, Any]:
     return result
 
 
-class Vocabulary:
+class Vocabulary(ABC):
     """한 종류의 custom content type을 다루는 규칙 묶음.
 
-    하위 클래스는 :attr:`blocks`를 선언하고 :meth:`lower`를 구현한다. :meth:`lift_mapper`는
-    응답 쪽 올림이 필요할 때만 재정의한다.
+    하위 클래스는 :meth:`blocks`를 반드시 구현한다. 요청 변환은 :meth:`lower`,
+    응답 변환은 :meth:`lift_mapper`를 필요한 경우에만 재정의한다.
+    기반 클래스와 blocks를 구현하지 않은 하위 클래스는 직접 생성할 수 없다.
     """
 
-    blocks: Sequence[type[ContentBlock]] = ()
-    """이 어휘가 도입하는 블록 타입. :class:`Bridge`에 등록되면 자동으로 유니온에 들어간다."""
+    @abstractmethod
+    def blocks(self) -> tuple[type[ContentBlock], ...]:
+        """등록할 블록 타입의 고정 튜플을 반환한다. 하위 클래스에서 반드시 구현한다."""
+        ...
 
     name: str = ""
     """진단용 이름. 비어 있으면 클래스 이름을 쓴다."""
 
     def register(self) -> None:
         """블록 타입을 전역 유니온에 등록한다. :class:`Bridge`가 부른다."""
-        for cls in self.blocks:
+        for cls in self.blocks():
             register_block(cls)
 
     def lower(self, blocks: Sequence[ContentBlock]) -> list[ContentBlock] | None:

@@ -60,7 +60,7 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 | `AudioBlock` | inline `input_audio` | native 입력 없음, 추출 텍스트/전달 불가 표시 | 전역 output audio stream 수집; native 입력 없음, 텍스트 fallback | audio MIME의 inline/URL data |
 | `DocumentBlock` | `file` 입력, 평문은 XML-like text fallback | native `document`, citations 설정 | `input_file`, 평문 fallback | document MIME의 inline/file data, 평문 fallback |
 | `SearchResultBlock` | 문서 텍스트 | native `search_result`, 요청 단위 인용 설정 | 문서 텍스트 | 문서 텍스트 |
-| `TextBlock.citations` | `CiteVocabulary`의 XML-like cite 왕복 | native citation과 XML cite를 `source`로 구분, native는 동일 벤더 재생 | XML-like cite 왕복 | XML-like cite 왕복 |
+| `TextBlock.citations` | 인용 Vocabulary 예제의 XML-like cite 왕복 | native citation과 XML cite를 `source`로 구분, native는 동일 벤더 재생 | XML-like cite 왕복 | XML-like cite 왕복 |
 | `AnnotationBlock` | URL citation annotation 수집 | 해당 없음 | output annotation 수집·동일 벤더 재생 | `citationMetadata` 범위 수집 |
 | `GroundingBlock` | 해당 없음 | 해당 없음 | 해당 없음 | source/support graph, 검색 질의와 UI metadata 수집 |
 | `ServerToolBlock` | 해당 계층 없음 | server/MCP/web/code block 수집 및 raw 보존 | web/file/code/image/MCP Item 수집 및 raw 보존 | executable code/result/tool Part 수집 및 raw 보존 |
@@ -75,7 +75,7 @@ ReAct 흐름의 실제 pretty JSON은 [변환 규칙 및 실행 예시](Conversi
 2. `ContentSchema.bind()`로 의미 경로, canonical tag, alias, 허용 attribute를 정의한다.
 3. 상태를 갖는 `StreamMapper.map()/flush()`에서 `TagParser.feed()/flush()` 이벤트를 사용자 block
    delta로 변환한다.
-4. `Vocabulary.blocks`, `lower()`, `lift_mapper()`를 구현한다. `lower()`는 사용자 block을 안전하게
+4. `Vocabulary.blocks()`, `lower()`, `lift_mapper()`를 구현한다. `lower()`는 사용자 block을 안전하게
    escape한 XML-like text로 되쓰고, `lift_mapper()`는 스트림마다 새 mapper를 반환한다.
 5. `Bridge(..., vocabularies=[MyVocabulary()])`에 등록한다. Bridge가 block 레지스트리와
    `vendor → hub → vocabulary` stream pipeline, 요청 방향 lowering을 함께 구성한다.
@@ -444,7 +444,7 @@ assistant(thinking, tool_use A)
 | Chat의 반복 reasoning delta + 병렬 tool call | 연속 reasoning은 누적하고 도구 호출 뒤의 reasoning은 새 블록; 각 tool index별 인수와 ID는 독립 병합 |
 | Anthropic의 thinking → server tool/result → thinking → client tool | content block index와 도착 순서 보존, signature 포함 동일 벤더 재생 |
 | Anthropic server loop 제한 도달 | `pause_turn`을 그대로 노출하므로 소비 앱이 반환 content로 다음 요청을 결정 가능 |
-| Responses의 reasoning → server tool → reasoning → client tool | `(output_index, part_kind, part_index)` seq 좌표로 구분하고 최종 결과를 좌표 순서로 확정 |
+| Responses의 reasoning → server tool → reasoning → client tool | item 종류에 따른 그룹·output·하위 위치의 seq 좌표로 구분하고 최종 결과를 좌표 순서로 확정 |
 | Gemini의 thought → code/result → thought → functionCall | 여러 Part의 도착 순서와 `thoughtSignature` 보존 |
 | Chat의 reasoning/text/tool 간 세밀한 interleave | 관찰한 채널 전환 순서로 블록 분리; 요청 재생은 블록 순서대로 content와 설정된 reasoning 필드에 각각 concat |
 | 환경 의존 server tool block | 한 응답 안의 순서는 보존하지만 실행·후속 세션 연결은 Bridge 지원 범위가 아님 |
@@ -514,3 +514,7 @@ payload를 견본과 회귀 테스트에서 실행한다.
 Chat Completions·Messages·Responses는 기존 변환을 유지한다. 이 선언은 벤더 요청에 전달되지
 않으며 HubResponse 스트리밍 객체에도 추가하지 않는다.
 자세한 생성·저장·복원 계약은 [외부 연동 문서](Synthetic-Assistant-Messages.md)를 참고한다.
+
+XML-like cite 왕복은 `examples/cite_vocabulary.py`를 등록한 경우의 동작이다.
+설치 패키지는 해당 Vocabulary를 기본 제공하지 않는다. 벤더 네이티브 인용 수집은
+이 예제 등록 없이도 제공한다. 구현 계약은 [Vocabulary 구현 안내](Vocabulary-Guide.md)를 따른다.

@@ -24,7 +24,8 @@ from completion_bridge import (
     compose,
 )
 from completion_bridge.errors import MappingError
-from completion_bridge.streaming.sequence import Seq, finalize
+from completion_bridge.models.hub import finalize_response
+from completion_bridge.streaming.sequence import Seq
 from completion_bridge.vendors import chat_completions, generate_content, messages, responses
 from completion_bridge.vendors.base import VendorAdapter
 
@@ -143,7 +144,10 @@ class _BadgeMapper:
 class BadgeVocabulary(Vocabulary):
     """BadgeBlock과 XML 형태 텍스트 사이의 요청·응답 변환을 제공한다."""
 
-    blocks = (BadgeBlock,)
+    def blocks(self) -> tuple[type[ContentBlock], ...]:
+        """이 어휘가 등록하는 블록 타입을 반환한다."""
+        return (BadgeBlock,)
+
     name = "badge"
 
     def __init__(self) -> None:
@@ -204,13 +208,13 @@ def _conversation(body: dict[str, Any]) -> dict[str, Any]:
 
 def _lift(vocabulary: BadgeVocabulary) -> HubResponse:
     mapper = compose(chat_completions.to_hub(), vocabulary.lift_mapper())
-    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    merger: StreamMerger = StreamMerger(HubResponse)
     for chunk in RAW_CHUNKS:
         for delta in mapper.map(chunk):
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return finalize(merger.build())
+    return finalize_response(merger.build())
 
 
 def _pretty(value: Any) -> str:

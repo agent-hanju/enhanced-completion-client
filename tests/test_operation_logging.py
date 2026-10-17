@@ -301,7 +301,7 @@ async def test_async_second_consumer_does_not_interrupt_first():
 def test_json_transport_exception_excludes_url_credentials(status):
     """HTTP 실패와 JSON 해석 실패 모두 URL 인증·쿼리 값을 제외한다."""
     from completion_bridge import MappingError
-    from completion_bridge.transport.http import post_json
+    from completion_bridge.http.client import HttpClient
 
     with httpx.Client(
         transport=httpx.MockTransport(
@@ -309,8 +309,7 @@ def test_json_transport_exception_excludes_url_credentials(status):
         )
     ) as client:
         with pytest.raises((MappingError, TransportError)) as caught:
-            post_json(
-                client,
+            HttpClient(client).post_json(
                 "https://user:private-password@test/path?key=private-key#private-fragment",
                 json={},
                 headers={},
@@ -408,7 +407,7 @@ def test_sync_cleanup_failure_preserves_primary_error(caplog, primary_failure):
     """연결 정리 오류가 기존 해석 오류를 교체하지 않고 복구 결과를 기록한다."""
     from completion_bridge import MappingError
     from completion_bridge.bridge import SyncStream
-    from completion_bridge.transport.sse import SseEvent
+    from completion_bridge.http.sse import SseEvent
 
     caplog.set_level(logging.DEBUG, logger=LOGGER_NAME)
 

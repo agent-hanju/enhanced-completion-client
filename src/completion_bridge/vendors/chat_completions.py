@@ -10,12 +10,13 @@ vLLM이 이 규약을 쓴다. 첫 번째로 구현하는 스포크다.
 from __future__ import annotations
 
 import json
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from typing import Any
 
 from pydantic import BaseModel
 
 from completion_bridge.errors import MappingError
+from completion_bridge.http.sse import SseEvent
 from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
@@ -45,12 +46,11 @@ from completion_bridge.models.native import (
     ChatCompletionsToolCall,
 )
 from completion_bridge.streaming.mapping import StreamMapper
-from completion_bridge.streaming.sequence import Seq, SeqAllocator
-from completion_bridge.transport.sse import SseEvent
+from completion_bridge.streaming.sequence import Seq, normalize_seq
 from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
 from completion_bridge.vendors.normalize import REFUSAL_PREFIX, stop_reason_from_chat
 from completion_bridge.vendors.parts import as_chat_completions_part, has_opaque_media_reference
-from completion_bridge.vendors.tool_policy import can_replay_client_tool
+from completion_bridge.vendors.tool_adaptation import ToolAdaptation
 
 __all__ = ["ChatCompletionsAdapter", "chat_completions"]
 
@@ -62,22 +62,25 @@ _RESERVED = frozenset({"model", "messages", "tools", "stream"})
 _REPLACED_FIELDS = frozenset({"index", "type", "role", "finish_reason", "stop_reason"})
 
 
+_SEQ_WIDTH = 2
+
+
 class _ToHub:
     """Chat Completions chunk를 허브 델타로 바꾼다.
 
-    블록 최초 등장 순서로 0부터 번호 n을 부여하고 ``seq=(n, 0)``을 쓴다. 연속 채널은 같은
-    블록에 누적하고 채널이 바뀌면 새 블록을 만든다. 도구 호출은 원본 index별로 같은 블록을
-    유지한다. annotation은 대상 text 블록 바로 뒤의 seq를 받는다.
+    블록 그룹 최초 등장 순서로 0부터 번호 n을 부여하고 ``seq=(n, -1)``을 쓴다. 연속 채널은 같은
+    블록에 누적하고 채널이 바뀌면 새 블록을 만든다. 도구 호출은 한 그룹에서 원본 index를
+    두 번째 좌표로 사용한다. annotation은 대상 text 블록 바로 뒤의 seq를 받는다.
     """
 
     def __init__(self, vendor: str) -> None:
         """벤더 이름과 스트림별 채널·호출 좌표·인용 구간 상태를 초기화한다."""
         self._vendor = vendor
-        self._seqs = SeqAllocator(1)
         self._next_index = 0
         self._channel: str | None = None
         self._channel_seq: Seq = ()
-        self._tool_seqs: dict[int, Seq] = {}
+        self._tool_group: int | None = None
+        self._annotation_counts: dict[int, int] = {}
         self._text_ranges: dict[Seq, tuple[int, int]] = {}
         self._text_length = 0
 
@@ -85,7 +88,7 @@ class _ToHub:
         """다음 블록 번호로 seq를 발급한다."""
         index = self._next_index
         self._next_index += 1
-        return self._seqs.coord((index,))
+        return normalize_seq((index,), _SEQ_WIDTH)
 
     def _segment(self, channel: str) -> Seq:
         """채널이 바뀌었으면 새 seq를, 같은 채널이면 이어 쓰는 블록의 seq를 돌려준다."""
@@ -184,11 +187,11 @@ class _ToHub:
         fn = call.get("function") or call.get("custom") or {}
         raw_index = call.get("index")
         key = raw_index if isinstance(raw_index, int) else position
-        if key not in self._tool_seqs:
-            self._tool_seqs[key] = self._allocate()
+        if self._tool_group is None:
+            self._tool_group = self._allocate()[0]
         self._channel = None
         fields: dict[str, Any] = {
-            "seq": self._tool_seqs[key],
+            "seq": normalize_seq((self._tool_group, key), _SEQ_WIDTH),
             "vendor": self._vendor,
             "native": dict(call),
         }
@@ -208,7 +211,7 @@ class _ToHub:
 
         wire의 문자 범위가 이미 받은 text 블록 하나 안에 있으면 그 블록을 대상으로 삼고 범위를
         블록 기준 오프셋으로 바꾼다. 받은 text 블록이 하나뿐이고 범위가 없으면 그 블록을
-        대상으로 삼는다. 대상이 없으면 지금까지 받은 블록 중 맨 끝 블록 뒤에 둔다.
+        대상으로 삼는다. 대상이 없으면 새로운 출현 그룹을 배정한다.
         """
         detail = annotation.get("url_citation")
         if not isinstance(detail, dict):
@@ -243,7 +246,14 @@ class _ToHub:
                     break
         elif len(self._text_ranges) == 1:
             fields["target_seq"] = next(iter(self._text_ranges))
-        fields["seq"] = self._seqs.after(fields.get("target_seq"))
+        target = fields.get("target_seq")
+        if target is None:
+            fields["seq"] = self._allocate()
+        else:
+            group = target[0]
+            number = self._annotation_counts.get(group, -1) + 1
+            self._annotation_counts[group] = number
+            fields["seq"] = normalize_seq((group, number), _SEQ_WIDTH)
         return AnnotationBlock(**fields)
 
     @staticmethod
@@ -258,64 +268,111 @@ class _ToHub:
         )
 
 
-def _merge_value(target: BaseModel | dict[str, Any], key: str, value: Any) -> None:
-    """chunk 필드 하나를 누적 중인 객체의 같은 ``key``에 반영한다.
+class _NativeItems:
+    """네이티브 목록의 수신 순서와 정수 index 검색 사전을 함께 보관한다.
 
-    객체와 리스트는 첫 값부터 재귀 병합해 같은 index의 조각을 누적한다. ``None``은 기존 값을
-    유지하고 :data:`_REPLACED_FIELDS`는 나중 값을 쓴다. 문자열 조각은 연결하고 숫자는 합산한다.
-    객체는 key별로 재귀 반영하고 리스트는 :func:`_merge_items`로 반영한다. 그 밖의 값은 나중
-    값으로 바꾼다.
+    사전은 목록과 같은 원소 객체를 참조한다. 기존 목록에서 전환할 때만
+    전체 원소를 한 번 확인하고, 이후 검색과 등록은 평균 O(1)에 수행한다.
     """
-    if isinstance(target, BaseModel):
-        present = key in target.model_fields_set or key in (target.model_extra or {})
-        current = getattr(target, key, None)
-    else:
-        present = key in target
-        current = target.get(key)
-    if not present or current is None:
-        # 첫 chunk 안에도 같은 tool index의 조각이 여러 개 있을 수 있다.
-        if isinstance(value, dict):
-            initial: Any = {}
-        elif isinstance(value, list):
-            initial = []
-        else:
-            initial = value
+
+    def __init__(self, values: list[Any]) -> None:
+        self.values = values
+        self.by_index: dict[int, BaseModel | dict[str, Any]] = {}
+        for item in values:
+            if isinstance(item, BaseModel):
+                index = getattr(item, "index", None)
+            elif isinstance(item, dict):
+                index = item.get("index")
+            else:
+                continue
+            if isinstance(index, int):
+                self.by_index.setdefault(index, item)
+
+
+def _merge_value(
+    target: BaseModel | dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    indexes: dict[int, _NativeItems] | None = None,
+) -> None:
+    """chunk 필드와 하위 객체·목록을 명시적인 DFS 스택으로 누적한다.
+
+    스택의 작업은 대상 객체, 필드 이름, 수신 값이다. 하위 작업을 먼저 완료한
+    뒤 부모 반복자를 재개하여 수신 순서와 같은 index의 누적 순서를 유지한다.
+    None은 기존 값을 유지하고 교체 필드는 나중 값을 사용한다. 문자열은 연결,
+    숫자는 합산한다. 호출 깊이는 입력 깊이와 무관하며 스택 공간은 대기 작업
+    수에 비례한다. 목록은 정수 index 검색 사전을 사용하고, 문자열 연결은
+    기존 방식대로 수행한다.
+    """
+    if indexes is None:
+        indexes = {}
+    stack: list[Iterator[tuple[Any, str, Any]]] = [iter(((target, key, value),))]
+    while stack:
+        try:
+            target, key, value = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
         if isinstance(target, BaseModel):
-            setattr(target, key, initial)
-            current = getattr(target, key)
+            present = key in target.model_fields_set or key in (target.model_extra or {})
+            current = getattr(target, key, None)
         else:
-            target[key] = initial
-            current = initial
-        if not isinstance(value, (dict, list)):
-            return
-    if value is None:
-        return
-    if current is None or key in _REPLACED_FIELDS:
-        merged = value
-    elif isinstance(current, str) and isinstance(value, str):
-        merged = current + value
-    elif isinstance(current, (int, float)) and isinstance(value, (int, float)):
-        merged = current + value
-    elif isinstance(current, (BaseModel, dict)) and isinstance(value, dict):
-        for field in value:
-            _merge_value(current, field, value[field])
-        return
-    elif isinstance(current, list) and isinstance(value, list):
-        typed_tools = isinstance(target, ChatCompletionsMessage) and key == "tool_calls"
-        _merge_items(current, value, typed_tools=typed_tools)
-        return
-    else:
-        merged = value
-    if isinstance(target, BaseModel):
-        setattr(target, key, merged)
-    else:
-        target[key] = merged
+            present = key in target
+            current = target.get(key)
+        if not present or current is None:
+            # 첫 chunk 안에도 같은 tool index의 조각이 여러 개 있을 수 있다.
+            if isinstance(value, dict):
+                initial: Any = {}
+            elif isinstance(value, list):
+                initial = []
+            else:
+                initial = value
+            if isinstance(target, BaseModel):
+                setattr(target, key, initial)
+                current = getattr(target, key)
+            else:
+                target[key] = initial
+                current = initial
+            if not isinstance(value, (dict, list)):
+                continue
+        if value is None:
+            continue
+        if current is None or key in _REPLACED_FIELDS:
+            merged = value
+        elif isinstance(current, str) and isinstance(value, str):
+            merged = current + value
+        elif isinstance(current, (int, float)) and isinstance(value, (int, float)):
+            merged = current + value
+        elif isinstance(current, (BaseModel, dict)) and isinstance(value, dict):
+            tasks = []
+            for field in value:
+                tasks.append((current, field, value[field]))
+            stack.append(iter(tasks))
+            continue
+        elif isinstance(current, list) and isinstance(value, list):
+            # 모델의 목록은 그대로 유지하고 검색 상태만 누적기에서 별도로 보관한다.
+            lookup = indexes.get(id(current))
+            if lookup is None:
+                lookup = _NativeItems(current)
+                indexes[id(current)] = lookup
+            typed_tools = isinstance(target, ChatCompletionsMessage) and key == "tool_calls"
+            stack.append(_merge_items(lookup, value, typed_tools=typed_tools))
+            continue
+        else:
+            merged = value
+        if isinstance(target, BaseModel):
+            setattr(target, key, merged)
+        else:
+            target[key] = merged
 
 
-def _merge_items(current: list[Any], items: list[Any], *, typed_tools: bool = False) -> None:
+def _merge_items(
+    current: _NativeItems, items: list[Any], *, typed_tools: bool = False
+) -> Iterator[tuple[Any, str, Any]]:
     """리스트 조각의 원소를 누적 중인 리스트에 반영한다.
 
-    정수 ``index``를 가진 객체는 같은 ``index``의 기존 객체에 :func:`_merge_value`로 반영한다.
+    정수 ``index`` 검색 사전에서 기존 객체를 찾고 각 필드를 DFS 하위 작업으로 반환한다.
     같은 ``index``의 객체가 없거나 ``index``가 없는 원소는 끝에 추가한다. ``tool_calls``가 앞의
     경우이고 ``logprobs.content``가 뒤의 경우다. ``typed_tools``이면 새 항목을
     :class:`ChatCompletionsToolCall` 객체로 만든다.
@@ -324,27 +381,22 @@ def _merge_items(current: list[Any], items: list[Any], *, typed_tools: bool = Fa
         if typed_tools and not isinstance(item, dict):
             raise MappingError("chat completions tool call must be a JSON object")
         existing: BaseModel | dict[str, Any] | None = None
-        if isinstance(item, dict) and isinstance(item.get("index"), int):
-            for candidate in current:
-                candidate_index = None
-                if isinstance(candidate, BaseModel):
-                    candidate_index = getattr(candidate, "index", None)
-                elif isinstance(candidate, dict):
-                    candidate_index = candidate.get("index")
-                if candidate_index == item["index"]:
-                    existing = candidate
-                    break
+        index = item.get("index") if isinstance(item, dict) else None
+        if isinstance(index, int):
+            existing = current.by_index.get(index)
         if existing is None:
             if not isinstance(item, dict):
-                current.append(item)
+                current.values.append(item)
                 continue
             if typed_tools:
                 existing = ChatCompletionsToolCall()
             else:
                 existing = {}
-            current.append(existing)
+            current.values.append(existing)
+            if isinstance(index, int):
+                current.by_index[index] = existing
         for field in item:
-            _merge_value(existing, field, item[field])
+            yield existing, field, item[field]
 
 
 class _ToNative:
@@ -358,6 +410,7 @@ class _ToNative:
     def __init__(self) -> None:
         self._completion = ChatCompletionsResponse(object="chat.completion", choices=[])
         self._choices: dict[int, ChatCompletionsChoice] = {}
+        self._list_indexes: dict[int, _NativeItems] = {}
 
     def apply(self, chunk: dict[str, Any]) -> None:
         """chunk 하나를 누적한다.
@@ -397,9 +450,9 @@ class _ToNative:
                 if key == "delta":
                     if value is not None and not isinstance(value, dict):
                         raise MappingError(f"chat completions choice {index} delta is not object")
-                    _merge_value(merged, "message", value)
+                    _merge_value(merged, "message", value, indexes=self._list_indexes)
                 else:
-                    _merge_value(merged, key, value)
+                    _merge_value(merged, key, value, indexes=self._list_indexes)
 
     def build(self) -> ChatCompletionsResponse:
         """누적한 ``ChatCompletion`` 객체를 돌려준다. ``choices``는 ``index`` 오름차순이다."""
@@ -523,7 +576,7 @@ class ChatCompletionsAdapter:
                 if not isinstance(block, ToolResultBlock):
                     pending.append(block)
                     continue
-                if not can_replay_client_tool(block, self.name):
+                if not ToolAdaptation.can_replay_client_tool(block, self.name):
                     continue
                 wire = self._message(message.role, pending, lowerer)
                 if wire is not None:
@@ -547,7 +600,7 @@ class ChatCompletionsAdapter:
         """동일 역할의 블록을 도구 호출·추론·멀티모달 본문을 보존하는 메시지로 변환한다."""
         tool_calls = []
         for candidate_block in blocks:
-            if isinstance(candidate_block, ToolUseBlock) and can_replay_client_tool(
+            if isinstance(candidate_block, ToolUseBlock) and ToolAdaptation.can_replay_client_tool(
                 candidate_block, self.name
             ):
                 tool_calls.append(candidate_block)

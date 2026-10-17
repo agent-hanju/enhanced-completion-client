@@ -1,4 +1,8 @@
-"""인용 어휘. ``<cite id="d1">본문</cite>``을 인용이 붙은 text block으로 올린다."""
+"""인용 Vocabulary 구현 예제. 설치 패키지의 기본 기능이 아닌 소비자 구현 견본이다.
+
+ContentSchema·TagParser, blocks()·lift_mapper()·lower()와 seq 확장을 함께 보여준다.
+실행: uv run python examples/cite_vocabulary.py
+"""
 
 from __future__ import annotations
 
@@ -244,7 +248,10 @@ class CiteVocabulary(Vocabulary):
 
     # CitationBlock은 구 버전 저장 JSON을 읽고 내리기 위해서만 등록한다. 새 citation은
     # TextBlock의 중첩 모델이라 content-block 레지스트리에 넣지 않는다.
-    blocks = (CitationBlock,)
+    def blocks(self) -> tuple[type[ContentBlock], ...]:
+        """이 어휘가 등록하는 블록 타입을 반환한다."""
+        return (CitationBlock,)
+
     name = "cite"
 
     def __init__(self, *, tag: str = "cite", alias: Iterable[str] = ("rag",)) -> None:
@@ -354,3 +361,17 @@ class CiteVocabulary(Vocabulary):
     def lift_mapper(self) -> StreamMapper[Any, Any]:
         """스트림마다 독립적인 인용 태그→허브 인용 변환기를 생성한다."""
         return _CiteMapper(self._schema)
+
+
+if __name__ == "__main__":
+    from completion_bridge import StreamMerger
+
+    vocabulary = CiteVocabulary()
+    mapper = vocabulary.lift_mapper()
+    merger = StreamMerger(HubResponse)
+    for text in ('답변 <cite id="d1">근거', '를 사용한 답변</cite>입니다.'):
+        for delta in mapper.map(HubResponse(content=[TextBlock(seq=(0,), text=text)])):
+            merger.apply(delta)
+    for delta in mapper.flush():
+        merger.apply(delta)
+    print(merger.build().model_dump_json(indent=2))

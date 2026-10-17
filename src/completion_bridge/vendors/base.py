@@ -8,9 +8,9 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
+from completion_bridge.http.sse import SseEvent
 from completion_bridge.models.hub import HubRequest, TokenCount
 from completion_bridge.streaming.mapping import StreamMapper
-from completion_bridge.transport.sse import SseEvent
 
 __all__ = ["JsonCall", "Lowerer", "NativeAccumulator", "VendorAdapter"]
 

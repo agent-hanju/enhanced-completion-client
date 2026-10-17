@@ -65,14 +65,14 @@ class ContentBlock(BaseModel):
     index: int | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     """최종 결과에서 이 블록의 위치. 0부터 1씩 증가한다.
 
-    :func:`~completion_bridge.streaming.sequence.finalize`가 ``seq`` 순서로 채운다.
+    :func:`~completion_bridge.models.hub.finalize_response`가 ``seq`` 순서로 채운다.
     delta에는 값이 없다.
     """
 
     seq: tuple[int, ...] | None = Field(default=None, json_schema_extra=STREAM_INDEX)
     """delta에서 같은 블록의 조각을 짝짓고 블록 순서를 정하는 키.
 
-    ``(API 좌표..., after)`` 뒤에 블록을 나누는 vocabulary의 성분이 이어진다. 순서는 튜플
+    변환기별 최대 길이로 -1 정규화한 논리 좌표 뒤에 vocabulary의 조각 성분이 이어진다. 순서는 튜플
     사전식 비교다. 최종 결과에서는 ``None``이다. 규칙은 ``docs/block_index_and_key_tuple.md``에
     있다.
     """
@@ -171,8 +171,8 @@ class ToolUseBlock(ContentBlock):
 
         상태 변경:
             ``input``에 대입할 때 그 이름을 ``model_fields_set``에서 제거한다. 이 블록을
-            :class:`~completion_bridge.streaming.merge.StreamMerger`에 델타로 넣으면 ``input``은
-            명시된 필드로 취급되지 않는다.
+            :class:`~completion_bridge.streaming.merge.StreamMerger`에 델타로 넣으면
+            ``input``은 명시된 필드로 취급되지 않는다.
 
         호출 조건:
             Pydantic이 호출한다. 직접 부르지 않는다.

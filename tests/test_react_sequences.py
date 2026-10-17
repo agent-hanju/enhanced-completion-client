@@ -24,7 +24,7 @@ from completion_bridge import (
     ToolUseBlock,
     VendorBlock,
 )
-from completion_bridge.streaming.sequence import finalize
+from completion_bridge.models.hub import finalize_response
 from completion_bridge.vendors import (
     GenerateContentAdapter,
     MessagesAdapter,
@@ -39,13 +39,13 @@ GEMINI = GenerateContentAdapter(model="gemini-test")
 
 def merge(adapter: VendorAdapter, events: list[dict[str, Any]]) -> HubResponse:
     mapper = adapter.to_hub()
-    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    merger: StreamMerger = StreamMerger(HubResponse)
     for event in events:
         for delta in mapper.map(event):
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return finalize(merger.build())
+    return finalize_response(merger.build())
 
 
 def build(adapter: VendorAdapter, messages: list[HubMessage]) -> dict[str, Any]:
@@ -82,7 +82,7 @@ def test_same_type_blocks_with_distinct_seqs_never_merge() -> None:
         ),
     ]
     for first, second in pairs:
-        merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+        merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(HubResponse(content=[first]))
         merger.apply(HubResponse(content=[second]))
         result = merger.build()
@@ -91,7 +91,7 @@ def test_same_type_blocks_with_distinct_seqs_never_merge() -> None:
 
 
 def test_same_type_complete_blocks_without_indexes_are_appended() -> None:
-    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    merger: StreamMerger = StreamMerger(HubResponse)
     merger.apply(HubResponse(content=[TextBlock(text="first")]))
     merger.apply(HubResponse(content=[TextBlock(text="second")]))
 
@@ -484,11 +484,11 @@ def test_chat_repeated_reasoning_and_parallel_tool_deltas_do_not_collide() -> No
     assert [block.type for block in result.content] == [
         "thinking",
         "tool_use",
-        "thinking",
         "tool_use",
+        "thinking",
     ]
     assert [block.index for block in result.content] == [0, 1, 2, 3]
-    thinking, first, later_thinking, second = result.content
+    thinking, first, second, later_thinking = result.content
     assert isinstance(thinking, ThinkingBlock)
     assert thinking.thinking == "first; "
     assert isinstance(later_thinking, ThinkingBlock)
@@ -780,7 +780,7 @@ def test_chat_sparse_tool_indices_and_unindexed_complete_calls() -> None:
         for block in result.content:
             assert isinstance(block, ToolUseBlock)
             call_ids.append(block.id)
-        assert call_ids == ["a", "b"]
+        assert call_ids == (["b", "a"] if "index" in calls[0] else ["a", "b"])
 
 
 def test_chat_refusal_audio_and_metadata_keep_dense_indices() -> None:

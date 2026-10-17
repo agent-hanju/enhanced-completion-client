@@ -16,6 +16,7 @@ from collections.abc import Generator, Mapping, Sequence
 from typing import Any
 
 from completion_bridge.errors import MappingError, VendorStreamError
+from completion_bridge.http.sse import SseEvent
 from completion_bridge.models.blocks import (
     Citation,
     CitationBlock,
@@ -40,12 +41,11 @@ from completion_bridge.models.hub import (
 )
 from completion_bridge.models.native import MessagesContentBlock, MessagesResponse, MessagesUsage
 from completion_bridge.streaming.mapping import StreamMapper
-from completion_bridge.streaming.sequence import Seq, SeqAllocator
-from completion_bridge.transport.sse import SseEvent
+from completion_bridge.streaming.sequence import Seq, normalize_seq
 from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
 from completion_bridge.vendors.normalize import INSTRUCTION_ROLES
 from completion_bridge.vendors.parts import as_anthropic_part, has_opaque_media_reference
-from completion_bridge.vendors.tool_policy import can_replay_client_tool
+from completion_bridge.vendors.tool_adaptation import ToolAdaptation
 
 __all__ = ["MessagesAdapter", "messages"]
 
@@ -78,15 +78,17 @@ IGNORED_EVENTS = frozenset({"ping"})
 DEFAULT_VERSION = "2023-06-01"
 
 
+_SEQ_WIDTH = 1
+
+
 class _ToHub:
     """Anthropic 이벤트를 허브 델타로 바꾼다.
 
-    서버가 준 ``index``를 좌표로 ``seq=(index, 0)``을 만든다. 병합기가 그 키로 조각을 짝짓는다.
+    서버가 준 ``index``를 좌표로 ``seq=(index,)``을 만든다. 병합기가 그 키로 조각을 짝짓는다.
     """
 
     def __init__(self) -> None:
         self._kinds: dict[int, str] = {}
-        self._seqs = SeqAllocator(1)
 
     def map(self, delta: dict[str, Any]) -> list[HubResponse]:
         """벤더 스트림 이벤트 하나를 허브 델타 목록으로 변환한다."""
@@ -133,7 +135,7 @@ class _ToHub:
         index = event.get("index")
         if not isinstance(index, int):
             raise MappingError(f"messages {event.get('type')} event has no integer index")
-        return self._seqs.coord((index,))
+        return normalize_seq((index,), _SEQ_WIDTH)
 
     def _block_start(self, event: dict[str, Any]) -> list[HubResponse]:
         """content block의 좌표와 종류를 기억하고 시작 내용을 허브 블록으로 변환한다."""
@@ -673,9 +675,9 @@ class MessagesAdapter:
                 turns.append({"role": pending_role, "content": content})
 
         for block in message.content:
-            if isinstance(block, ToolUseBlock | ToolResultBlock) and not can_replay_client_tool(
-                block, self.name
-            ):
+            if isinstance(
+                block, ToolUseBlock | ToolResultBlock
+            ) and not ToolAdaptation.can_replay_client_tool(block, self.name):
                 continue
             block_role = "user" if isinstance(block, ToolResultBlock) else role
             if pending_role is not None and block_role != pending_role:

@@ -16,7 +16,7 @@ from completion_bridge import (
     ToolDefinition,
     ToolResultBlock,
 )
-from completion_bridge.streaming.sequence import finalize
+from completion_bridge.models.hub import finalize_response
 from completion_bridge.vendors import (
     ChatCompletionsAdapter,
     GenerateContentAdapter,
@@ -245,13 +245,13 @@ SCENARIOS = (
 
 def merge_response(scenario: Scenario) -> HubResponse:
     mapper = scenario.adapter.to_hub()
-    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    merger: StreamMerger = StreamMerger(HubResponse)
     for event in scenario.events:
         for delta in mapper.map(event):
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return finalize(merger.build())
+    return finalize_response(merger.build())
 
 
 def bridge(adapter: VendorAdapter) -> SyncBridge:

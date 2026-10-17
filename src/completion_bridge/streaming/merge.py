@@ -1,12 +1,9 @@
-"""Pydantic 필드의 타입과 메타데이터에 따라 스트림 델타를 누적한다.
-
-문자열은 연결하고 수치는 합산한다. 모델과 목록은 재귀 병합하며 Literal 필드와
-명시적인 overwrite 필드는 값을 교체한다. 리스트 모델 원소는 지정한 식별 필드로
-같은 원소를 찾는다. 누적 상태는 매핑으로 관리하고 build에서 모델로 검증한다.
-"""
+"""필드 메타데이터에 따라 모델 델타를 누적하고 최종 모델로 검증한다."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
 
@@ -17,13 +14,12 @@ from completion_bridge.streaming.metadata import INDEX, MERGE_META_KEY, OVERWRIT
 
 __all__ = ["StreamMerger"]
 
-# 리스트 원소를 짝지을 때 어노테이션 없이도 인정하는 필드 이름.
 DEFAULT_INDEX_FIELD = "index"
 
 
-def _meta(field: FieldInfo) -> str | None:
-    """Pydantic 필드에 선언된 스트림 병합 전략 문자열을 조회한다."""
-    extra = field.json_schema_extra
+def _meta(definition: FieldInfo) -> str | None:
+    """선언된 필드 병합 전략 문자열을 반환한다."""
+    extra = definition.json_schema_extra
     if isinstance(extra, dict):
         value = extra.get(MERGE_META_KEY)
         if isinstance(value, str):
@@ -31,68 +27,67 @@ def _meta(field: FieldInfo) -> str | None:
     return None
 
 
-def _unwrap_optional(annotation: Any) -> Any:
-    """``X | None``에서 ``X``를 꺼낸다. 유니온이 아니면 그대로 돌려준다.
+@dataclass(slots=True)
+class _IndexedList:
+    """고정 식별 필드의 검색 사전과 수신 순서 목록을 관리한다."""
 
-    ``Literal["text"]``에도 ``get_args``가 값을 돌려주므로 유니온인지 먼저 확인해야 한다.
-    확인 없이 벗기면 ``Literal["text"]``이 문자열 ``"text"``로 줄어들어 판정이 깨진다.
-    """
-    if get_origin(annotation) not in (Union, UnionType):
-        return annotation
-    args = []
-    for a in get_args(annotation):
-        if a is not type(None):
-            args.append(a)
-    if len(args) == 1:
-        return args[0]
-    return annotation
+    items: list[Any] = field(default_factory=list)
+    _key_name: str | None = None
+    _lookup: dict[Any, dict[str, Any]] = field(default_factory=dict)
+
+    def append(self, value: Any) -> None:
+        """원소를 추가하고 고정 식별값이 있는 사전은 평균 O(1)로 등록한다."""
+        self.items.append(value)
+        if isinstance(value, dict) and self._key_name is not None:
+            key = value.get(self._key_name)
+            if key is not None:
+                self._lookup.setdefault(key, value)
+
+    def get_or_create(self, key_name: str | None, key: Any) -> dict[str, Any]:
+        """식별값으로 찾거나 새 사전을 추가한다. 식별 필드 변경은 허용하지 않는다.
+        필드나 값이 None이면 검색 없이 추가한다.
+        """
+        slot = None
+        if key_name is not None and key is not None:
+            if self._key_name is None:
+                self._key_name = key_name
+                for candidate in self.items:
+                    if isinstance(candidate, dict):
+                        candidate_key = candidate.get(key_name)
+                        if candidate_key is not None:
+                            self._lookup.setdefault(candidate_key, candidate)
+            elif self._key_name != key_name:
+                raise ValueError("같은 목록의 식별 필드는 변경할 수 없습니다")
+            slot = self._lookup.get(key)
+        if slot is None:
+            slot = {}
+            self.items.append(slot)
+        if key_name is not None and key is not None:
+            self._lookup[key] = slot
+        return slot
 
 
-def _is_overwrite(name: str, field: FieldInfo) -> bool:
-    """덮어쓰기 판정.
+@dataclass(slots=True)
+class _StringParts:
+    """일반 목록과 구분하여 문자열 조각을 보관한다."""
 
-    세 경로가 있다. 명시 표시, 리스트 짝짓기 키, ``Literal`` 필드다.
+    parts: list[str] = field(default_factory=list)
 
-    짝짓기 키를 누적하면 인덱스 1이 두 번 오면 2가 되어 슬롯을 잃는다. ``Literal``은 합법적인
-    값이 하나뿐이라 이어붙이기가 맞을 수 없다. 하위 클래스가 ``type``을 재선언하면 부모의 필드
-    메타가 교체되어 표시가 사라지는데, 마지막 규칙이 그 구멍을 막는다.
-    """
-    if _meta(field) in (OVERWRITE, INDEX):
-        return True
-    if name == DEFAULT_INDEX_FIELD:
-        return True
-    return get_origin(_unwrap_optional(field.annotation)) is Literal
+    def append(self, value: str) -> None:
+        """기존 문자열을 복사하지 않고 새 조각을 추가한다. 평균 O(1)이다."""
+        self.parts.append(value)
 
-
-def _index_field_name(value: Any) -> str | None:
-    """모델 리스트 원소를 식별할 필드를 선택한다.
-
-    INDEX 병합 정책을 선언한 필드를 우선하고, 없으면 index라는 필드 이름을 사용한다.
-    """
-    if not isinstance(value, BaseModel):
-        return None
-    fields = type(value).model_fields
-    for name in fields:
-        field = fields[name]
-        if _meta(field) == INDEX:
-            return name
-    if DEFAULT_INDEX_FIELD in fields:
-        return DEFAULT_INDEX_FIELD
-    return None
+    def build(self) -> str:
+        """원본을 변경하지 않고 전체 문자 수에 비례하는 비용으로 결합한다."""
+        return "".join(self.parts)
 
 
 class StreamMerger[M: BaseModel]:
-    """같은 타입의 델타들을 누적해 하나로 만든다.
+    """요청별 모델 델타를 딕셔너리에 누적하고 build에서 최종 검증한다.
 
-    같은 인스턴스의 apply·build 호출은 순차적으로 수행해야 한다.
-    누적은 모델 인스턴스가 아니라 딕셔너리에 한다. 조각만 채워진 델타는 필수 필드를 만족하지
-    못해 중간 상태를 모델로 들 수 없기 때문이다. :meth:`build`에서 한 번에 검증한다.
-
-    입력은 선언한 모델 타입의 델타여야 한다. apply는 해당 필드만 순차적으로 갱신하며
-    트랜잭션이나 스레드 간 동시 접근을 제공하지 않는다. build 검증 실패는 누적 상태를
-    변경하지 않는다. 식별 목록의 원소 탐색은 선형이므로 n개 원소를 각각 적용하면
-    최악 O(n²) 탐색이 필요하다. 문자열 연결은 누적 문자열 길이에 비례하며,
-    저장 공간은 누적 응답 크기에 비례한다.
+    - 문자열은 조각으로 보관하고 수치는 합산한다.
+    - overwrite·index·Literal 필드는 교체한다.
+    - 모델과 목록의 하위 작업은 명시적인 DFS 스택으로 처리한다.
     """
 
     def __init__(self, model: type[M]) -> None:
@@ -100,124 +95,185 @@ class StreamMerger[M: BaseModel]:
         self._acc: dict[str, Any] = {}
 
     def apply(self, delta: M | None) -> None:
-        """델타 하나를 누적 상태에 적용한다. ``None``은 무시한다."""
+        """수신 델타를 변경하지 않고 누적한다. None은 무시한다."""
         if delta is None:
             return
-        self._merge_model(self._acc, delta)
+        # 부모 반복자를 보존하고 하위 작업을 먼저 완료하는 DFS이다.
+        stack = [self._merge_model(self._acc, delta)]
+        while stack:
+            try:
+                # --- 현재 반복자를 시작하거나, 이전 yield 다음 줄부터 재개한다. ---
+                target, source = next(stack[-1])
+            except StopIteration:
+                # --- 하위 반복자가 끝나면 제거하고 다음 반복에서 부모를 재개한다. ---
+                stack.pop()
+                continue
+            # --- 부모는 정지한 채 보존하고, 전달받은 하위 작업부터 처리한다. ---
+            if isinstance(source, BaseModel):
+                stack.append(self._merge_model(target, source))
+            else:
+                stack.append(self._extend_list(target, source))
 
     def build(self) -> M:
-        """누적 상태를 최종 객체로 만든다. 여러 번 불러도 된다."""
-        return self._model.model_validate(self._acc)
+        """조각을 결합한 별도 결과를 검증한다. 이후에도 델타를 추가할 수 있다."""
+        return self._model.model_validate(self._materialize(self._acc))
 
-    # ---- 내부 ----
+    def _merge_model(self, acc: dict[str, Any], delta: BaseModel) -> Iterator[tuple[Any, Any]]:
+        """필드 정책으로 누적하고 모델·목록은 DFS 하위 작업으로 반환한다.
 
-    def _merge_model(self, acc: dict[str, Any], delta: BaseModel) -> None:
-        """모델의 필드와 확장 필드를 누적 상태에 반영한다.
-
-        model_fields_set에 있는 필드는 선언된 전략으로 병합한다. 생략된 기본값은
-        최초 등장 시에만 보존한다. None은 변경 없음으로 처리한다.
+        생략된 기본값은 최초에만 보존하고 None은 변경하지 않는다. 명시된
+        교체 필드 이외에는 문자열 연결·수치 합산·사전 갱신·목록 병합을 적용한다.
+        부모 반복자는 하위 작업 완료 후 재개하므로 중복 원소의 수신 순서가 유지된다.
         """
         provided = delta.model_fields_set
         for name in type(delta).model_fields:
-            field = type(delta).model_fields[name]
+            definition = type(delta).model_fields[name]
             value = getattr(delta, name, None)
             if value is None:
                 continue
-            if name in provided:
-                self._merge_field(acc, name, field, value)
-            elif name not in acc:
-                acc[name] = self._seed(field, value)
+            if name not in acc:
+                # --- 사전 작업: 최초 값을 저장할 누적 객체를 준비한다. ---
+                acc[name] = self._seed(value)
+                if isinstance(value, (BaseModel, list)):
+                    # --- 하위 작업: 모델의 필드 또는 목록의 원소를 처리한다. ---
+                    yield acc[name], value
+                # --- 재개 지점: 하위 작업이 끝났으므로 다음 필드로 진행한다. ---
+                continue
+            if name not in provided:
+                continue
 
-        # extra="allow"로 들어온 선언 밖 필드도 잃지 않는다.
-        mapped_fields = delta.__pydantic_extra__ or {}
-        for name in mapped_fields:
-            value = mapped_fields[name]
+            # Optional의 단일 실제 타입만 확인한다. Literal의 인수는 분해하지 않는다.
+            annotation = definition.annotation
+            if get_origin(annotation) in (Union, UnionType):
+                args = []
+                for arg in get_args(annotation):
+                    if arg is not type(None):
+                        args.append(arg)
+                if len(args) == 1:
+                    annotation = args[0]
+            if (
+                _meta(definition) in (OVERWRITE, INDEX)
+                or name == DEFAULT_INDEX_FIELD
+                or get_origin(annotation) is Literal
+            ):
+                # --- 사전 작업: 교체할 새 누적 객체를 준비한다. ---
+                acc[name] = self._seed(value)
+                if isinstance(value, (BaseModel, list)):
+                    # --- 하위 작업: 교체한 모델 또는 목록의 내용을 처리한다. ---
+                    yield acc[name], value
+                # --- 재개 지점: 하위 작업이 끝났으므로 다음 필드로 진행한다. ---
+                continue
+
+            # bool은 int의 하위 타입이므로 수치 합산보다 먼저 교체한다.
+            current = acc[name]
+            if isinstance(current, _StringParts) and isinstance(value, str):
+                current.append(value)
+            elif isinstance(current, str) and isinstance(value, str):
+                acc[name] = _StringParts(parts=[current, value])
+            elif isinstance(current, bool) or isinstance(value, bool):
+                acc[name] = value
+            elif isinstance(current, (int, float)) and isinstance(value, (int, float)):
+                acc[name] = current + value
+            elif isinstance(current, dict) and isinstance(value, BaseModel):
+                # --- 하위 작업: 기존 사전에 모델 필드를 병합한다. ---
+                yield current, value
+                # --- 재개 지점: 이 분기의 추가 처리 없이 다음 필드로 진행한다. ---
+            elif isinstance(current, dict) and isinstance(value, dict):
+                current.update(value)
+            elif isinstance(current, (_IndexedList, list)) and isinstance(value, list):
+                # --- 사전 작업: 기존 목록을 식별값으로 병합할 형태로 준비한다. ---
+                if isinstance(current, list):
+                    current = _IndexedList(items=current)
+                    acc[name] = current
+                # --- 하위 작업: 목록 원소를 수신 순서대로 처리한다. ---
+                yield current, value
+                # --- 재개 지점: 이 분기의 추가 처리 없이 다음 필드로 진행한다. ---
+            else:
+                acc[name] = value
+
+        # extra 필드는 새 값으로 교체한다. BaseModel 값은 필드 처리 후 사전으로 저장한다.
+        for name, value in (delta.model_extra or {}).items():
             if value is None:
                 continue
-            acc[name] = self._replace(acc.get(name), value)
+            if isinstance(value, BaseModel):
+                # --- 사전 작업: 기존 extra 값과 별개인 새 사전을 준비한다. ---
+                nested: dict[str, Any] = {}
+                # --- 하위 작업: 새 사전에 모델 필드를 처리한다. ---
+                yield nested, value
+                # --- 후작업: 하위 작업이 완료된 사전으로 기존 extra 값을 교체한다. ---
+                acc[name] = nested
+            else:
+                acc[name] = value
 
-    def _merge_field(self, acc: dict[str, Any], name: str, field: FieldInfo, value: Any) -> None:
-        """새 필드·값 교체·누적 전략에 따라 필드 하나를 누적 상태에 반영한다."""
-        if name not in acc:
-            acc[name] = self._seed(field, value)
-            return
-        if _is_overwrite(name, field):
-            acc[name] = self._seed(field, value)
-            return
-        acc[name] = self._combine(acc[name], value, field)
+    def _materialize(self, value: Any) -> Any:
+        """반복형 DFS로 컨테이너를 복사하고 문자열 조각을 결합한다.
 
-    def _seed(self, field: FieldInfo, value: Any) -> Any:
-        """처음 등장한 값을 누적 형태로 바꾼다.
+        스택 프레임 수는 중첩 깊이에 비례한다. 일반 문자열 목록은 결합하지
+        않으며 튜플 식별값은 그대로 반환한다. 호출 스택을 사용하지 않는다.
+        """
+        holder: dict[Any, Any] = {}
+        stack: list[tuple[Iterator[Any], Any]] = [(iter((("result", value),)), holder)]
+        while stack:
+            iterator, target = stack[-1]
+            try:
+                key, item = next(iterator)
+            except StopIteration:
+                stack.pop()
+                continue
+            if isinstance(item, _StringParts):
+                converted: Any = item.build()
+            elif isinstance(item, _IndexedList):
+                converted = []
+                stack.append((enumerate(item.items), converted))
+            elif isinstance(item, dict):
+                converted = {}
+                stack.append((iter(item.items()), converted))
+            elif isinstance(item, list):
+                converted = []
+                stack.append((enumerate(item), converted))
+            else:
+                converted = item
+            if isinstance(target, list):
+                target.append(converted)
+            else:
+                target[key] = converted
+        return holder["result"]
 
-        dict는 얕게 복사한다. 뒤 조각을 합칠 때 누적 상태를 고치므로, 복사하지 않으면 이미
-        소비자에게 넘어간 델타의 값이 바뀐다.
+    def _seed(self, value: Any) -> Any:
+        """모델·목록은 빈 누적 객체를, 사전은 얕은 사본을 생성한다.
+
+        빈 컨테이너의 내용은 호출 측에서 DFS 작업으로 등록하여 처리한다.
+        나머지 값은 그대로 반환한다.
         """
         if isinstance(value, BaseModel):
-            nested: dict[str, Any] = {}
-            self._merge_model(nested, value)
-            return nested
+            return {}
         if isinstance(value, list):
-            seeded: list[Any] = []
-            self._extend_list(seeded, value)
-            return seeded
+            return _IndexedList()
         if isinstance(value, dict):
             return dict(value)
         return value
 
-    def _replace(self, _current: Any, value: Any) -> Any:
-        """모델 값은 누적용 매핑으로 변환하고 그 밖의 값은 그대로 반환한다."""
-        if isinstance(value, BaseModel):
-            nested: dict[str, Any] = {}
-            self._merge_model(nested, value)
-            return nested
-        return value
+    def _extend_list(self, acc: _IndexedList, deltas: list[Any]) -> Iterator[tuple[Any, Any]]:
+        """식별 필드로 모델 원소를 찾고 하위 모델 병합을 DFS 작업으로 반환한다.
 
-    def _combine(self, current: Any, value: Any, field: FieldInfo) -> Any:
-        """문자열·수치·모델·매핑·목록의 타입에 맞는 병합 연산을 수행한다."""
-        if isinstance(current, str) and isinstance(value, str):
-            return current + value
-        if isinstance(current, bool) or isinstance(value, bool):
-            return value
-        if isinstance(current, (int, float)) and isinstance(value, (int, float)):
-            return current + value
-        if isinstance(current, dict) and isinstance(value, BaseModel):
-            self._merge_model(current, value)
-            return current
-        if isinstance(current, dict) and isinstance(value, dict):
-            current.update(value)
-            return current
-        if isinstance(current, list) and isinstance(value, list):
-            self._extend_list(current, value)
-            return current
-        _ = field
-        return value
-
-    def _extend_list(self, acc: list[Any], deltas: list[Any]) -> None:
-        """원시 원소는 추가하고 모델 원소는 식별 필드가 같으면 같은 누적 원소에 반영한다."""
+        index 정책을 선언한 첫 필드를 우선하고 없으면 이름이 index인 필드를
+        사용한다. 일반 원소와 식별값이 없는 모델은 수신 순서대로 추가한다.
+        """
         for item in deltas:
             if not isinstance(item, BaseModel):
                 acc.append(item)
                 continue
-
-            key_name = _index_field_name(item)
+            definitions = type(item).model_fields
+            key_name = None
+            for name in definitions:
+                if _meta(definitions[name]) == INDEX:
+                    key_name = name
+                    break
+            if key_name is None and DEFAULT_INDEX_FIELD in definitions:
+                key_name = DEFAULT_INDEX_FIELD
             key = getattr(item, key_name, None) if key_name else None
-            if key is None:
-                seeded: dict[str, Any] = {}
-                self._merge_model(seeded, item)
-                acc.append(seeded)
-                continue
-
-            slot = self._slot_for(acc, key_name, key)
-            self._merge_model(slot, item)
-
-    def _slot_for(self, acc: list[Any], key_name: str | None, key: Any) -> dict[str, Any]:
-        """식별값이 같은 누적 원소를 찾거나 새 매핑을 추가한다.
-
-        기존 원소의 도착 순서를 유지하며 원소 수에 비례해 순회한다.
-        """
-        for slot in acc:
-            if isinstance(slot, dict) and key_name and slot.get(key_name) == key:
-                return slot
-        fresh: dict[str, Any] = {}
-        acc.append(fresh)
-        return fresh
+            # --- 사전 작업: 현재 원소를 병합할 사전을 찾거나 만든다. ---
+            slot = acc.get_or_create(key_name, key)
+            # --- 하위 작업: 현재 원소의 모델 필드를 병합한다. ---
+            yield slot, item
+            # --- 재개 지점: 현재 원소의 병합이 끝난 뒤 다음 원소로 진행한다. ---

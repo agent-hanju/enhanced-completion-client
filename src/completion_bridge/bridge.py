@@ -19,6 +19,8 @@ from completion_bridge.errors import (
     MappingError,
     StreamNotFinished,
 )
+from completion_bridge.http.client import AsyncHttpClient, HttpClient
+from completion_bridge.http.sse import SseEvent
 from completion_bridge.logging import OperationLog, WireLog
 from completion_bridge.models.blocks import (
     UNAVAILABLE,
@@ -40,17 +42,15 @@ from completion_bridge.models.hub import (
     HubResponse,
     TokenCount,
     ToolDefinition,
+    finalize_response,
 )
 from completion_bridge.models.parameters import Hyperparameters
 from completion_bridge.models.tools import ToolCallback
 from completion_bridge.runtime.execution import RuntimeExecution
 from completion_bridge.streaming.mapping import StreamMapper, Vocabulary, compose
 from completion_bridge.streaming.merge import StreamMerger
-from completion_bridge.streaming.sequence import finalize
-from completion_bridge.transport.http import apost_json, astream_sse, post_json, stream_sse
-from completion_bridge.transport.sse import SseEvent
 from completion_bridge.vendors.base import NativeAccumulator, VendorAdapter
-from completion_bridge.vendors.tool_policy import to_portable
+from completion_bridge.vendors.tool_adaptation import ToolAdaptation
 
 __all__ = ["AsyncStream", "Bridge", "SyncBridge", "SyncStream"]
 
@@ -278,7 +278,7 @@ class _StreamBase:
         """
         if not self._finished:
             raise StreamNotFinished("stream is still running; iterate it to completion first")
-        return finalize(self._merger.build())
+        return finalize_response(self._merger.build())
 
     @property
     def partial(self) -> HubResponse:
@@ -286,7 +286,7 @@ class _StreamBase:
 
         :attr:`result`와 같은 방식으로 블록 순서와 ``index``를 확정한다.
         """
-        return finalize(self._merger.build())
+        return finalize_response(self._merger.build())
 
     def _process(self, frame: SseEvent) -> tuple[list[HubResponse], bool]:
         """프레임 하나를 델타 리스트와 종료 여부로 바꾼다.
@@ -611,7 +611,7 @@ class _BridgeBase:
         for message in normalized_messages:
             converted_normalized_messages.append(
                 message.model_copy(
-                    update={"content": to_portable(message.content, self._vendor.name)}
+                    update={"content": ToolAdaptation.lower(message.content, self._vendor.name)}
                 )
             )
         normalized_messages = converted_normalized_messages
@@ -688,14 +688,7 @@ class Bridge(_BridgeBase):
             headers=headers,
             timeout=timeout,
         )
-        self._client = http_client
-        self._owns_client = http_client is None
-
-    def _get_client(self) -> httpx.AsyncClient:
-        """주입한 비동기 클라이언트를 반환하거나 필요한 시점에 내부 클라이언트를 생성한다."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
-        return self._client
+        self._client = AsyncHttpClient(http_client, timeout=timeout)
 
     def stream(
         self,
@@ -715,8 +708,8 @@ class Bridge(_BridgeBase):
             hyperparameters=hyperparameters,
             **params,
         )
-        frames = astream_sse(
-            self._get_client(), self._request_url(model), json=body, headers=self._request_headers()
+        frames = self._client.stream_sse(
+            self._request_url(model), json=body, headers=self._request_headers()
         )
         stream = AsyncStream(self._vendor, self._vocabularies, frames)
         stream._wire = WireLog(
@@ -799,14 +792,13 @@ class Bridge(_BridgeBase):
                 hyperparameters=hyperparameters,
                 **params,
             )
-            client = self._get_client()
             headers = self._request_headers(accept="application/json")
             calls = self._request_vendor(model).token_count_calls(body)
             try:
                 call = next(calls)
                 while True:
-                    payload = await apost_json(
-                        client, f"{self._base_url}{call.path}", json=call.body, headers=headers
+                    payload = await self._client.post_json(
+                        f"{self._base_url}{call.path}", json=call.body, headers=headers
                     )
                     call = calls.send(payload)
             except StopIteration as finished:
@@ -822,9 +814,7 @@ class Bridge(_BridgeBase):
 
     async def aclose(self) -> None:
         """직접 만든 클라이언트만 닫는다. 주입받은 것은 호출자 소관이다."""
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        await self._client.aclose()
 
     async def __aenter__(self) -> Bridge:
         return self
@@ -863,14 +853,7 @@ class SyncBridge(_BridgeBase):
             headers=headers,
             timeout=timeout,
         )
-        self._client = http_client
-        self._owns_client = http_client is None
-
-    def _get_client(self) -> httpx.Client:
-        """주입한 동기 클라이언트를 반환하거나 필요한 시점에 내부 클라이언트를 생성한다."""
-        if self._client is None:
-            self._client = httpx.Client(timeout=self._timeout)
-        return self._client
+        self._client = HttpClient(http_client, timeout=timeout)
 
     def stream(
         self,
@@ -890,8 +873,8 @@ class SyncBridge(_BridgeBase):
             hyperparameters=hyperparameters,
             **params,
         )
-        frames = stream_sse(
-            self._get_client(), self._request_url(model), json=body, headers=self._request_headers()
+        frames = self._client.stream_sse(
+            self._request_url(model), json=body, headers=self._request_headers()
         )
         stream = SyncStream(self._vendor, self._vocabularies, frames)
         stream._wire = WireLog(
@@ -950,14 +933,13 @@ class SyncBridge(_BridgeBase):
                 hyperparameters=hyperparameters,
                 **params,
             )
-            client = self._get_client()
             headers = self._request_headers(accept="application/json")
             calls = self._request_vendor(model).token_count_calls(body)
             try:
                 call = next(calls)
                 while True:
-                    payload = post_json(
-                        client, f"{self._base_url}{call.path}", json=call.body, headers=headers
+                    payload = self._client.post_json(
+                        f"{self._base_url}{call.path}", json=call.body, headers=headers
                     )
                     call = calls.send(payload)
             except StopIteration as finished:
@@ -973,9 +955,7 @@ class SyncBridge(_BridgeBase):
 
     def close(self) -> None:
         """브리지가 직접 생성한 동기 HTTP 클라이언트만 종료한다."""
-        if self._owns_client and self._client is not None:
-            self._client.close()
-            self._client = None
+        self._client.close()
 
     def __enter__(self) -> SyncBridge:
         return self

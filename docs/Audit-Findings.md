@@ -249,14 +249,14 @@ JavaScript로 읽으면 2^60 근처의 정수는 256 간격으로만 표현되�
 
 ### A-16. 저장용 직렬화에 `"seq": null`이 남는다
 
-`해결` · `seq.py` `finalize()`
+`해결` · `models/hub.py` `finalize_response()`
 
 A-15 수정 직후 외부 보고로 드러났다. 소비 앱은 최종 결과를 `exclude_unset=True`로 저장한다.
 병합 결과 블록은 delta에서 온 `seq`가 이미 "값을 준 필드"이고 `model_copy(update=...)`도 갱신한
-필드를 그렇게 표시하므로, `finalize()`가 값을 `None`으로 비워도 저장 JSON에 `"seq": null`과
+필드를 그렇게 표시하므로, `finalize_response()`가 값을 `None`으로 비워도 저장 JSON에 `"seq": null`과
 `"target_seq": null`이 남았다. 대상이 없는 annotation에는 `"target_index": null`도 남았다.
 
-`finalize()`가 두 필드를 `model_fields_set`에서 제거하고, `target_index`는 대상을 찾았을 때만
+`finalize_response()`가 두 필드를 `model_fields_set`에서 제거하고, `target_index`는 대상을 찾았을 때만
 채운다. `exclude_unset=True` 직렬화에 두 키가 없는지 `test_seq.py`가 확인한다.
 
 ## B. 새 설계가 요구하는 미구현 항목
@@ -286,13 +286,13 @@ README 표가 기술하지만 코드에 아직 없는 것이다.
 
 ### B-2. 벤더 내장 도구의 가상 도구 변환
 
-`해결` · `vendors/tool_policy.py` `to_portable()`, `bridge.py`
+`해결` · `vendors/tool_adaptation.py` `ToolAdaptation.lower()`, `bridge.py`
 
 어댑터 4곳을 고치지 않고 **요청 조립 직전 단일 전처리**로 넣었다. `HubRequest`를 만드는 곳이
-한 군데뿐이라 거기서 `to_portable(content, target)`을 한 번 돌린다.
+한 군데뿐이라 거기서 `ToolAdaptation.lower(content, target)`을 한 번 돌린다.
 
 통하는 이유는 변환 결과가 `kind="function"`이기 때문이다. 어댑터의 기존
-`can_replay_client_tool` 검사를 그대로 통과하므로 어댑터 코드는 손대지 않았다.
+`ToolAdaptation.can_replay_client_tool` 검사를 그대로 통과하므로 어댑터 코드는 손대지 않았다.
 `source == target`이면 전처리가 건드리지 않아 native 재생 경로도 유지된다.
 
 | 입력 | 결과 |

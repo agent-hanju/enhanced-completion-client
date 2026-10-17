@@ -341,3 +341,20 @@ class TestGeminiResponseFormat:
         )
         assert config == {"responseFormat": {"text": {"mimeType": "text/plain"}}}
         assert "responseMimeType" not in config
+
+
+def test_deep_mapping_merge_without_recursive_calls() -> None:
+    from completion_bridge.models.parameters import _merge
+
+    left = {"value": "left"}
+    right = {"value": "right"}
+    for _ in range(1500):
+        left = {"child": left}
+        right = {"child": right}
+    result = _merge(left, right)
+    for _ in range(1500):
+        assert result is not left
+        result = result["child"]
+        left = left["child"]
+    assert result["value"] == "right"
+    assert left["value"] == "left"

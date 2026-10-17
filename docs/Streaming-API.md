@@ -284,9 +284,9 @@ content block은 같은 `seq`를 가진 조각을 합치며 배열 위치나 `ty
 1씩 매긴 뒤 `seq`를 비운다. 따라서 최종 결과에서는 `content[i].index == i`이고, 도착 순서가
 아니라 벤더 좌표 순서를 따른다. `seq`가 없는 블록이 최종 결과에 있으면 `MappingError`다.
 
-`seq`는 `(API 좌표..., after)` 뒤에 블록을 나누는 vocabulary의 성분이 이어지는 정수
-튜플이다. 좌표가 없는 블록(annotation, 메타데이터 등)은 대상 블록이나 그 시점의 맨 끝 블록
-바로 뒤의 seq를 받는다. API별 좌표와 after 규칙은
+`seq`는 변환기별 최대 길이로 -1 정규화한 논리 좌표 뒤에 vocabulary 성분이 이어지는 정수
+튜플이다. annotation은 대상 블록의 하위 좌표를, 응답 수준 메타데이터는 변환기가 정한
+고정 그룹 좌표를 사용한다. API별 좌표와 정규화 규칙은
 [블록 index와 seq 튜플](block_index_and_key_tuple.md)에 있다.
 
 #### delta를 직접 병합하는 소비자
@@ -299,7 +299,7 @@ content block은 같은 `seq`를 가진 조각을 합치며 배열 위치나 `ty
 #### Chat Completions의 블록 순서
 
 Chat Completions 어댑터는 블록 최초 등장 순서대로 번호 `n=0, 1, 2, …`를 부여하고
-`seq=(n, 0)`을 쓴다. 타입별 음수나 `tool index + 1` 규칙은 사용하지 않는다.
+일반 채널은 `seq=(n, -1)`, 도구는 같은 그룹에서 `seq=(n, tool_index)`를 쓴다.
 
 - 같은 채널의 연속 조각은 같은 블록에 누적한다. role/usage/빈 delta는 구간을 끊지 않는다.
 - content/reasoning/refusal/audio 채널이 바뀌거나 도구 호출이 끼면 다음 채널 조각은 새 블록이다.
@@ -310,7 +310,7 @@ Chat Completions 어댑터는 블록 최초 등장 순서대로 번호 `n=0, 1, 
 - annotation은 텍스트 채널을 끊지 않는다. 전체 content 문자열의 인용 범위가 이미 수신한 한
   텍스트 블록 안에 있으면 그 블록을 `target_seq`로 두고 범위를 블록 상대 오프셋으로 변환하며,
   annotation 자체는 그 블록 바로 뒤의 seq를 받는다. 여러 블록에 걸치거나 아직 대상을 결정할 수
-  없으면 `target_seq`는 None이고 원본 범위를 유지하며, 그 시점의 맨 끝 블록 바로 뒤에 온다.
+  없으면 `target_seq`는 None이고 원본 범위를 유지하며, 새 출현 그룹을 배정한다.
   최종 결과에서 `target_seq`는 대상 블록의 `target_index`로 바뀐다. 원본 annotation은 native에도
   보존한다.
 
@@ -492,7 +492,7 @@ partial = stream.partial
 - [hub.py](../src/completion_bridge/models/hub.py): 요청·응답 모델
 - [blocks.py](../src/completion_bridge/models/blocks.py): 블록 필드 및 도구 인수 파싱
 - [merge.py](../src/completion_bridge/streaming/merge.py): delta 병합
-- [transport/http.py](../src/completion_bridge/transport/http.py): HTTP 전송 및 오류
+- [http/client.py](../src/completion_bridge/http/client.py): HTTP 전송 및 오류
 - [test_bridge.py](../tests/test_bridge.py): EOF 완료, 부분 결과, usage, HTTP 오류
 - [test_merge.py](../tests/test_merge.py): 병합 규칙
 - [test_token_count.py](../tests/test_token_count.py): 토큰 수 요청·응답 및 오류
@@ -561,3 +561,40 @@ JSON이 필요하면 `response.model_dump(mode="json", by_alias=True, exclude_un
 `request_id: str | None = None`을 받는다. 생략하면 UUID4를 생성하며 벤더 요청에는 전달하지 않는다.
 요청 JSON, SSE, 같은 벤더 API 형식으로 병합한 완료 응답과 실패·취소를 전용 DEBUG 로거로 기록한다.
 [로그 계약과 파일 저장 설정](Wire-Logging.md)을 참고한다.
+
+
+## 델타 누적
+
+`StreamMerger(Model)`은 모델 필드의 병합 선언에 따라 델타를 누적한다. Bridge는
+`StreamMerger(HubResponse)`를 사용하며, 입력 델타를 변경하지 않고 소비자에게 전달한다.
+벤더 원본 응답은 벤더별 `NativeAccumulator`가 별도로 처리한다.
+
+문자열은 조각으로 보관하고 build에서 결합하며, 숫자는 합산한다. overwrite·index·Literal
+필드는 교체한다. 모델과 목록은 반복형 DFS로 처리한다. 식별 목록은 검색 사전을 사용하며,
+목록별 식별 필드는 최초 설정 후 고정되며 검색은 평균 O(1)이다. 다른 식별 필드로 변경을
+요청하면 ValueError가 발생한다. 커스텀 블록과 중첩 모델도 같은 선언 규칙을 사용한다.
+
+마지막에 한 번 build할 때 일반 경로의 전체 비용은 처리한 필드·원소·문자 수에 비례한다.
+해시 충돌과 최초 식별 필드 설정 시 기존 원소 검색, 최종 모델 검증 비용은 별도다. 반복 build는
+매번 전체 결과를 생성한다. seq 순서와 최종 index는 `finalize_response()`가 확정한다.
+
+### 식별 목록 단순화 기록 (2026-10-17)
+
+한때 같은 Indexed List에서 식별 필드가 다른 경우를 상정한 디자인의 Indexed List를
+만들었지만, 해당하는 케이스가 없어 구현을 단순화하였다. 후에 필요한 케이스가 생긴다면
+원복한다. 현재는 목록별 식별 필드를 고정하고, 일반 딕셔너리 추가 시 검색 사전에 즉시
+등록한다. 식별 정보가 없는 원소 추가로 기존 검색 사전을 초기화하지 않는다.
+
+
+`Vocabulary`는 추상 기반 클래스다. 하위 클래스는 `blocks()`를 구현하여 등록할
+블록 타입의 고정 튜플을 반환한다. 클래스 속성이나 프로퍼티 대신 일반 메서드를 사용한다.
+`Vocabulary()`와 blocks를 구현하지 않은 하위 클래스의 생성은 TypeError로 거부된다.
+`lower()`와 `lift_mapper()`는 선택 사항이며 기본 구현은 None을 반환한다.
+
+
+HTTP 요청은 `completion_bridge.http.client.HttpClient`와 `AsyncHttpClient`가 담당한다.
+각 객체가 httpx 클라이언트와 소유권을 관리하고 `post_json()`·`stream_sse()`를 제공한다.
+비동기 객체의 두 메서드는 각각 await·async for로 사용한다. 자체 연결 풀은 최초 요청에
+생성하며 close()/aclose()에서 종료한다. 외부에서 주입한 httpx 클라이언트는 종료하지 않는다.
+기존 transport 패키지와 클라이언트를 인자로 받던 전역 요청 함수는 제공하지 않는다.
+SSE 이벤트와 파서는 `completion_bridge.http.sse`에 있다.

@@ -8,13 +8,13 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from cite_vocabulary import CiteVocabulary
 
 from completion_bridge import (
     AnnotationBlock,
     Bridge,
     Citation,
     CitationBlock,
-    CiteVocabulary,
     HubMessage,
     HubResponse,
     MappingError,
@@ -23,7 +23,7 @@ from completion_bridge import (
     TextBlock,
     ThinkingBlock,
 )
-from completion_bridge.streaming.sequence import finalize
+from completion_bridge.models.hub import finalize_response
 from completion_bridge.vendors import chat_completions
 
 BASE = "http://llm.test"
@@ -49,7 +49,7 @@ def bridge() -> Bridge:
 
 
 def merge(*deltas: HubResponse) -> HubResponse:
-    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    merger: StreamMerger = StreamMerger(HubResponse)
     for delta in deltas:
         merger.apply(delta)
     return merger.build()
@@ -410,7 +410,7 @@ class TestSegmentSeq:
         deltas = [delta async for delta in stream]
         blocks = [block for delta in deltas for block in delta.content]
         assert all(block.index is None for block in blocks)
-        assert {block.seq for block in blocks} == {(0, 0, piece) for piece in range(6)}
+        assert {block.seq for block in blocks} == {(0, -1, piece) for piece in range(6)}
 
         result = stream.result
         assert [block.index for block in result.content] == list(range(6))
@@ -457,7 +457,7 @@ class TestSegmentSeq:
             ),
             *mapper.flush(),
         ]
-        result = finalize(merge(*deltas))
+        result = finalize_response(merge(*deltas))
         assert [block.type for block in result.content] == ["text", "text", "annotation"]
         annotation = result.content[2]
         assert isinstance(annotation, AnnotationBlock)

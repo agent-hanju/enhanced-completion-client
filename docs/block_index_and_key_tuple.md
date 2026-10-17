@@ -62,54 +62,28 @@ delta에는 `index`가 없고 최종 결과에는 `seq`가 없다. 순서는 스
 결과를 만들 때 정한다. 이때는 모든 블록이 도착해 있으므로 빈 번호, 역순, 늦게 온 블록을 같은
 규칙 하나로 처리한다.
 
-### 2.1 seq의 모양
+### 2.1 발급 정책
 
-```
-seq = (API 좌표 ..., after) + (vocabulary 성분 ...)
-```
+현재 발급 규칙의 기준 문서는 [seq 좌표 발급 정책](Sequence-Policy.md)이다.
 
-- API 좌표 개수는 API마다 고정이다. 한 스트림은 한 API에서만 오므로 한 응답 안의 seq는 길이가
-  같다. 다른 API의 seq와 비교하는 일은 없다.
-- `after`는 좌표가 있는 블록에서 0이다.
-- 블록을 나누는 vocabulary는 끝에 자기 성분을 하나 추가하고 그 성분만 쓴다.
-- 모든 성분은 정수다. 순서는 튜플 사전식 비교로 정한다.
+- 각 변환기가 논리 좌표와 최대 길이를 결정한다.
+- 수신 index·분류값·출현 순번은 0부터 사용한다.
+- 짧은 좌표는 오른쪽에 `-1`을 채워 최대 길이로 정규화한다.
+- Messages는 길이 1, Chat Completions와 GenerateContent는 길이 2, Responses는 길이 4다.
+- 커스텀 변환은 정규화된 좌표 뒤에 자신의 좌표를 추가한다. 확장 깊이는 1로 제한하지 않는다.
+- 같은 블록은 전체 좌표를 재사용한다. 이벤트 중복 제거는 별도 책임이다.
 
-### 2.2 API별 좌표
+### 2.2 표시 순서
 
-| API | seq (vocabulary 적용 전) | 좌표 |
-|---|---|---|
-| Messages | `(index, after)` | 서버 content block `index` |
-| Responses | `(output_index, part_kind, part_index, after)` | `part_kind`는 한 reasoning item 안의 `summary` 배열(0)과 원문 추론 `content` 배열(1)을 구분하며, 다른 item의 part와 item 수준 블록은 0. `part_index`는 `content_index`, reasoning summary는 `summary_index`, item 수준 블록은 0. reasoning과 message는 서로 다른 item이므로 추론과 본문의 순서는 `output_index`로 정해진다 |
-| Chat Completions | `(n, after)` | 어댑터가 블록 최초 등장 순서로 매기는 카운터 |
-| GenerateContent | `(n, after)` | 어댑터의 part 카운터. 같은 종류의 연속 text는 같은 n |
+Messages는 수신 content index, Chat은 채널 출현 그룹과 원본 tool index,
+Responses는 정보 그룹·output·item별 하위 위치, Gemini는 정보 그룹과 part 출현 번호를 쓴다.
+메타데이터 위치는 최초 수신 시점의 마지막 블록으로 추론하지 않는다.
 
-### 2.3 좌표 없는 블록: after 규칙
+### 2.3 반복 갱신
 
-좌표가 없거나 다른 블록에 딸린 블록은 기준 블록 바로 뒤에 둔다.
-
-1. 기준 블록은 대상(`target`)이 있으면 대상 블록이고, 없으면 그 시점까지 발급한 seq 중 가장 큰
-   블록이다. 사용자 화면으로는 맨 끝 블록이다.
-2. 기준 블록의 seq에서 마지막 성분을 뺀 앞 성분을 그대로 쓰고, 그 앞 성분에서 발급한 after
-   최댓값 + 1을 마지막 성분으로 쓴다.
-3. 아직 발급한 seq가 하나도 없으면 앞 성분은 `(-1, 0, …)`이다. 모든 좌표 블록보다 앞에 온다.
-4. after 값은 앞 성분별 카운터로만 발급한다. 벤더 번호를 after 값으로 직접 쓰지 않는다.
-5. 여러 delta로 이어지는 블록은 식별 키를 두고 처음 나올 때 한 번만 발급한다.
-
-규칙 4의 반례: text `(…, 0)` 뒤에 좌표 없는 audio가 와서 `(…, 1)`을 받은 뒤, 벤더
-`annotation_index` 0을 after 1로 바꿔 쓰면 두 블록이 같은 seq가 되어 병합된다.
-
-| API | after 블록 | 기준 블록 | 식별 키 |
-|---|---|---|---|
-| Responses | output text annotation, `file_path` | 대상 part | 없음. 중복 annotation은 기존처럼 제외 |
-| Responses | 좌표 없는 audio / transcript | 맨 끝 | `("audio",)` |
-| Responses | 응답 수준 `citations` | 맨 끝 | 없음 |
-| Chat Completions | annotation | 대상 text, 정할 수 없으면 맨 끝 | 없음 |
-| GenerateContent | `citationMetadata` annotation | chunk의 유일한 text, 없으면 맨 끝 | `("citation", 위치)` |
-| GenerateContent | `groundingMetadata` | 맨 끝 | `("grounding",)` |
-| GenerateContent | `urlContextMetadata`, `safetyRatings`, `promptFeedback` | 맨 끝 | 없음 |
-
-식별 키는 이전 병합 동작을 옮긴 것이다. Gemini annotation은 이전에 `annotation_index`(배열 위치)
-로, grounding은 항상 0인 `candidate_index`로 병합되었다.
+Responses 완료 스냅샷은 이미 스트리밍한 본문을 다시 누적하지 않는다. 같은 대상·index의
+annotation은 중복 생성하지 않는다. Gemini candidate 인용은 원본 배열 위치로 식별하며,
+grounding·URL 조회·안전 평가는 각각 고정 좌표를 갱신한다.
 
 ### 2.4 vocabulary 규칙
 
@@ -125,7 +99,7 @@ vocabulary가 같은 마지막 칸을 나눠 쓰지 않는 이유: cite가 `(…
 
 ### 2.5 최종 결과
 
-`finalize()`가 병합된 응답에 한 번 적용된다. `SyncStream.result`, `AsyncStream.result`,
+`finalize_response()`가 병합된 응답에 한 번 적용된다. `SyncStream.result`, `AsyncStream.result`,
 `partial`, `complete()`가 모두 이 결과를 돌려준다.
 
 1. seq가 없는 블록이 있으면 `MappingError`를 낸다.
@@ -185,6 +159,5 @@ const sameSeq = (a, b) => compareSeq(a, b) === 0;
   블록 전체를 기준으로 한다. `target_index`는 첫 조각을 가리킨다. 이전과 같다.
 - Gemini가 `citationMetadata`/`groundingMetadata`를 chunk마다 누적해서 보내는지 새 항목만
   보내는지 확인하지 못했다. 이전 병합 동작을 그대로 유지한다.
-- 좌표 없는 블록은 도착 시점의 맨 끝 블록 뒤에 온다. 그 뒤에 좌표가 더 작은 블록이 도착하면
-  그 블록이 앞에 온다.
+- 위치 없는 정보의 그룹 순서는 변환기의 명시적 정책이다. 수신 시점으로 위치를 결정하지 않는다.
 - 이미 저장된 이전 메시지의 index 값은 이 변경으로 바뀌지 않는다.

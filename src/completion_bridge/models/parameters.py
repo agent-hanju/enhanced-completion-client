@@ -473,15 +473,29 @@ def _put(target: dict[str, Any], key: str, value: Any) -> None:
 
 
 def _merge(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
-    """두 설정 매핑을 재귀 병합한 사본을 반환하며 오른쪽 값을 우선한다."""
+    """두 설정 매핑을 DFS 스택으로 병합한 사본을 반환하며 오른쪽 값을 우선한다.
+
+    중첩된 양쪽 매핑을 만나면 왼쪽 사본을 생성하고 하위 작업을 스택에 추가한다.
+    부모 반복자는 하위 병합이 끝난 뒤 재개한다. 입력은 변경하지 않으며,
+    매핑 이외의 값은 복사하지 않는다. 방문 비용은 병합 대상 매핑 크기에,
+    대기 프레임 수는 중첩 깊이에 비례한다.
+    """
     merged = dict(left)
-    for key in right:
-        value = right[key]
-        current = merged.get(key)
+    stack = [(merged, iter(right.items()))]
+    while stack:
+        target, iterator = stack[-1]
+        try:
+            key, value = next(iterator)
+        except StopIteration:
+            stack.pop()
+            continue
+        current = target.get(key)
         if isinstance(current, Mapping) and isinstance(value, Mapping):
-            merged[key] = _merge(current, value)
+            nested = dict(current)
+            target[key] = nested
+            stack.append((nested, iter(value.items())))
         else:
-            merged[key] = value
+            target[key] = value
     return merged
 
 

@@ -11,9 +11,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from completion_bridge.models.blocks import Block, ContentBlock, TextBlock
+from completion_bridge.errors import MappingError
+from completion_bridge.models.blocks import AnnotationBlock, Block, ContentBlock, TextBlock
 from completion_bridge.models.parameters import Hyperparameters
 from completion_bridge.streaming.metadata import STREAM_OVERWRITE
+from completion_bridge.streaming.sequence import Seq, rank_seq
 
 __all__ = [
     "HubMessage",
@@ -23,6 +25,7 @@ __all__ = [
     "TokenizedPrompt",
     "ToolDefinition",
     "Usage",
+    "finalize_response",
 ]
 
 
@@ -208,3 +211,44 @@ class TokenCount(BaseModel):
 
     input_tokens: int
     tokenized: TokenizedPrompt | None
+
+
+def finalize_response(response: HubResponse) -> HubResponse:
+    """병합된 응답을 복사해 index·블록 순서·주석 참조를 확정한다.
+
+    Args:
+        response: 블록마다 seq가 있는 병합된 허브 응답. 입력은 변경하지 않는다.
+
+    Returns:
+        seq 순서의 index를 지정하고 seq·target_seq를 제거한 새 응답.
+        주석 대상이 없으면 기존 target_index를 유지한다. 제거한 필드는 model_fields_set에서도
+        제외하므로 exclude_unset·exclude_none 직렬화에 나타나지 않는다.
+
+    Raises:
+        MappingError: seq가 없는 블록이 있을 때.
+    """
+    sequences: list[Seq] = []
+    for block in response.content:
+        if block.seq is None:
+            raise MappingError(f"content block {block.type!r} has no seq")
+        sequences.append(block.seq)
+    ranks = rank_seq(sequences)
+    positions: dict[Seq, int] = {}
+    for offset in range(len(sequences)):
+        positions[sequences[offset]] = ranks[offset]
+    order = sorted(range(len(response.content)), key=lambda offset: ranks[offset])
+    content: list[ContentBlock] = []
+    for offset in order:
+        block = response.content[offset]
+        update: dict[str, Any] = {"index": ranks[offset], "seq": None}
+        cleared = ["seq"]
+        if isinstance(block, AnnotationBlock):
+            target = block.target_seq
+            if target is not None and target in positions:
+                update["target_index"] = positions[target]
+            update["target_seq"] = None
+            cleared.append("target_seq")
+        final = block.model_copy(update=update)
+        final.model_fields_set.difference_update(cleared)
+        content.append(final)
+    return response.model_copy(update={"content": content})

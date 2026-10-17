@@ -24,7 +24,7 @@ from completion_bridge import (
     ToolUseBlock,
 )
 from completion_bridge.errors import MappingError
-from completion_bridge.streaming.sequence import finalize
+from completion_bridge.models.hub import finalize_response
 from completion_bridge.vendors.base import VendorAdapter
 
 
@@ -505,13 +505,13 @@ SCENARIOS = (
 
 def merge_response(scenario: Scenario) -> HubResponse:
     mapper = scenario.adapter.to_hub()
-    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    merger: StreamMerger = StreamMerger(HubResponse)
     for event in scenario.events:
         for delta in mapper.map(event):
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return finalize(merger.build())
+    return finalize_response(merger.build())
 
 
 def _request_rows(history: list[HubMessage]) -> list[tuple[str, dict[str, Any]]]:

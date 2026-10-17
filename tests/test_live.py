@@ -21,10 +21,10 @@ from typing import Any
 
 import httpx
 import pytest
+from cite_vocabulary import CiteVocabulary
 
 from completion_bridge import (
     Bridge,
-    CiteVocabulary,
     HubMessage,
     HubResponse,
     StreamMerger,
@@ -68,7 +68,7 @@ def _relift(vocabulary: CiteVocabulary, text: str) -> list[TextBlock]:
     """
     mapper = vocabulary.lift_mapper()
     deltas = [*mapper.map(HubResponse(content=[TextBlock(text=text, index=0)])), *mapper.flush()]
-    merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+    merger: StreamMerger = StreamMerger(HubResponse)
     for delta in deltas:
         merger.apply(delta)
     return [b for b in merger.build().content if isinstance(b, TextBlock) and b.citations]

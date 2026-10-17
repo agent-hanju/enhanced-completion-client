@@ -25,6 +25,7 @@ from completion_bridge.errors import (
     TransportError,
     VendorStreamError,
 )
+from completion_bridge.http.sse import SseEvent, SseParser
 from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
@@ -92,9 +93,7 @@ from completion_bridge.streaming.content import (
 )
 from completion_bridge.streaming.mapping import StreamMapper, Vocabulary, compose, identity_mapper
 from completion_bridge.streaming.merge import StreamMerger
-from completion_bridge.transport.sse import SseEvent, SseParser
 from completion_bridge.vendors.base import Lowerer, NativeAccumulator, VendorAdapter
-from completion_bridge.vocabularies import CiteVocabulary, cite_schema
 
 __version__ = "0.4.1"
 
@@ -118,7 +117,6 @@ __all__ = [
     "ChatCompletionsResponse",
     "Citation",
     "CitationBlock",
-    "CiteVocabulary",
     "ContentSchema",
     "ContentBlock",
     "DocumentBlock",
@@ -165,7 +163,6 @@ __all__ = [
     "VendorBlock",
     "Vocabulary",
     "__version__",
-    "cite_schema",
     "compose",
     "identity_mapper",
     "register_block",

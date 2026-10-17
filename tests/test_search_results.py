@@ -22,7 +22,7 @@ from completion_bridge import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from completion_bridge.streaming.sequence import finalize
+from completion_bridge.models.hub import finalize_response
 from completion_bridge.vendors import (
     GenerateContentAdapter,
     chat_completions,
@@ -204,11 +204,11 @@ class TestMessages:
             {"type": "content_block_delta", "index": 0, "delta": citation_delta},
         ]
         mapper = messages.to_hub()
-        merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+        merger: StreamMerger = StreamMerger(HubResponse)
         for event in events:
             for delta in mapper.map(event):
                 merger.apply(delta)
-        text = finalize(merger.build()).content[0]
+        text = finalize_response(merger.build()).content[0]
         assert isinstance(text, TextBlock)
         citation = text.citations[0]
         assert (citation.type, citation.source, citation.id, citation.uri) == (

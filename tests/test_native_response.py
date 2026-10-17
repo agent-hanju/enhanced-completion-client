@@ -486,3 +486,94 @@ class TestGenerateContent:
     def test_rejects_non_integer_candidate_index(self) -> None:
         with pytest.raises(MappingError, match="candidate index must be an integer"):
             accumulate(generate_content, [{"candidates": [{"index": "0"}]}])
+
+
+def test_deep_native_merge_without_recursive_calls() -> None:
+    from completion_bridge.vendors.chat_completions import _merge_value
+
+    first: Any = {"text": "a"}
+    second: Any = {"text": "b"}
+    for _ in range(1200):
+        first = {"items": [{"index": 0, "child": first}]}
+        second = {"items": [{"index": 0, "child": second}]}
+    target: dict[str, Any] = {}
+    _merge_value(target, "root", first)
+    _merge_value(target, "root", second)
+    current = target["root"]
+    for _ in range(1200):
+        assert len(current["items"]) == 1
+        assert current["items"][0]["index"] == 0
+        current = current["items"][0]["child"]
+    assert current["text"] == "ab"
+
+
+def test_native_tool_lookup_preserves_order_and_choice_isolation() -> None:
+    native = chat_completions.to_native()
+    for index in reversed(range(300)):
+        native.apply(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "type": "function",
+                                    "function": {"name": "tool", "arguments": "a"},
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "type": "function",
+                                    "function": {"name": "tool", "arguments": "x"},
+                                }
+                            ]
+                        },
+                    },
+                ]
+            }
+        )
+    for index in range(300):
+        native.apply(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "function": {"arguments": "b"},
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "function": {"arguments": "y"},
+                                }
+                            ]
+                        },
+                    },
+                ]
+            }
+        )
+    result = native.build().model_dump(exclude_unset=True)
+    for choice_index in range(2):
+        tools = result["choices"][choice_index]["message"]["tool_calls"]
+        assert len(tools) == 300
+        for position in range(300):
+            assert tools[position]["index"] == 299 - position
+            expected = "ab" if choice_index == 0 else "xy"
+            assert tools[position]["function"]["arguments"] == expected

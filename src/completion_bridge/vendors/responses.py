@@ -19,6 +19,7 @@ from collections.abc import Generator
 from typing import Any
 
 from completion_bridge.errors import MappingError, VendorStreamError
+from completion_bridge.http.sse import SseEvent
 from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
@@ -37,12 +38,11 @@ from completion_bridge.models.blocks import (
 from completion_bridge.models.hub import HubRequest, HubResponse, TokenCount, ToolDefinition, Usage
 from completion_bridge.models.native import ResponsesResponse
 from completion_bridge.streaming.mapping import StreamMapper
-from completion_bridge.streaming.sequence import Seq, SeqAllocator
-from completion_bridge.transport.sse import SseEvent
+from completion_bridge.streaming.sequence import Seq, normalize_seq
 from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
 from completion_bridge.vendors.normalize import REFUSAL_PREFIX, stop_reason_from_responses
 from completion_bridge.vendors.parts import as_responses_part, has_opaque_media_reference
-from completion_bridge.vendors.tool_policy import can_replay_client_tool
+from completion_bridge.vendors.tool_adaptation import ToolAdaptation
 
 __all__ = ["ResponsesAdapter", "responses"]
 
@@ -53,8 +53,8 @@ TERMINAL_EVENTS = frozenset(
 # 최종 Response 객체 전체를 response 필드로 보내는 종료 이벤트.
 _RESPONSE_EVENTS = frozenset({"response.completed", "response.failed", "response.incomplete"})
 
-# seq 좌표는 (output_index, part_kind, part_index)다. reasoning item의 원문 추론 part는 같은
-# item의 summary part와 구분되도록 part_kind 1을 쓰고, 나머지 part와 item 수준 블록은 0을 쓴다.
+# 그룹 0은 위치 없는 오디오, 1은 원본 output, 2는 응답 전체 인용이다.
+# 그룹 1의 후속 좌표는 item 종류에 따라 part·annotation 또는 추론 분류·part를 뜻한다.
 _PART = 0
 _REASONING_TEXT = 1
 
@@ -90,35 +90,38 @@ _TOOL_RESULT_ITEMS = frozenset(
 )
 
 
+_SEQ_WIDTH = 4
+
+
 def _slot(event: dict[str, Any]) -> Seq:
-    """``output_index``와 ``content_index``로 part 좌표를 만든다. 없는 값은 0이다."""
+    """원본 output·part 위치를 그룹 1의 길이 4 좌표로 변환한다."""
     output = event.get("output_index")
     content = event.get("content_index")
-    return (
+    coordinates = (
+        1,
         output if isinstance(output, int) else 0,
-        _PART,
         content if isinstance(content, int) else 0,
     )
+    return normalize_seq(coordinates, _SEQ_WIDTH)
 
 
 def _item_slot(event: dict[str, Any]) -> Seq:
-    """``output_index``로 item 수준 좌표를 만든다. 없는 값은 0이다."""
+    """item 수준 블록의 좌표를 반환한다. 하위 좌표는 -1로 정규화한다."""
     output = event.get("output_index")
-    return (output if isinstance(output, int) else 0, _PART, 0)
+    return normalize_seq((1, output if isinstance(output, int) else 0), _SEQ_WIDTH)
 
 
 def _summary_slot(event: dict[str, Any]) -> Seq:
-    """reasoning summary part의 좌표.
-
-    이 이벤트는 ``content_index`` 대신 ``summary_index``를 준다. 없는 값은 0이다.
-    """
+    """reasoning item 내부 요약 그룹 0의 원본 summary index를 배정한다."""
     output = event.get("output_index")
     summary = event.get("summary_index")
-    return (
+    coordinates = (
+        1,
         output if isinstance(output, int) else 0,
         _PART,
         summary if isinstance(summary, int) else 0,
     )
+    return normalize_seq(coordinates, _SEQ_WIDTH)
 
 
 class _ToHub:
@@ -126,12 +129,12 @@ class _ToHub:
 
     def __init__(self) -> None:
         """출력 Item·content part·도구 호출의 스트림별 좌표와 수신 상태를 초기화한다."""
-        self._seqs = SeqAllocator(3)
         self._refusal_started = False
         self._text_streamed: set[Seq] = set()
         self._refusal_streamed: set[Seq] = set()
         self._reasoning_streamed: set[Seq] = set()
         self._reasoning_item_slots: dict[Seq, Seq] = {}
+        self._pending_reasoning: dict[Seq, dict[str, Any]] = {}
         self._arguments_streamed: set[Seq] = set()
         self._audio_streamed: set[Seq] = set()
         self._audio_transcript_streamed: set[Seq] = set()
@@ -147,11 +150,11 @@ class _ToHub:
 
         # 본문
         if name == "response.output_text.delta":
-            seq = self._seqs.coord(_slot(event))
+            seq = _slot(event)
             self._text_streamed.add(seq)
             return self._one(TextBlock(text=event.get("delta") or "", seq=seq))
         if name == "response.refusal.delta":
-            seq = self._seqs.coord(_slot(event))
+            seq = _slot(event)
             self._refusal_streamed.add(seq)
             prefix = "" if self._refusal_started else REFUSAL_PREFIX
             self._refusal_started = True
@@ -159,16 +162,20 @@ class _ToHub:
 
         # 추론 요약. 원문 추론은 암호화되어 오므로 요약만 텍스트로 쓸 수 있다.
         if name == "response.reasoning_summary_text.delta":
-            seq = self._seqs.coord(_summary_slot(event))
+            seq = _summary_slot(event)
             self._reasoning_streamed.add(seq)
             self._reasoning_item_slots.setdefault(_item_slot(event), seq)
-            return self._one(ThinkingBlock(thinking=event.get("delta") or "", seq=seq))
+            return self._reasoning_delta(
+                ThinkingBlock(thinking=event.get("delta") or "", seq=seq), _item_slot(event)
+            )
         if name == "response.reasoning_text.delta":
-            output, _, part = _slot(event)
-            seq = self._seqs.coord((output, _REASONING_TEXT, part))
+            _, output, part, _ = _slot(event)
+            seq = normalize_seq((1, output, _REASONING_TEXT, part), _SEQ_WIDTH)
             self._reasoning_streamed.add(seq)
             self._reasoning_item_slots.setdefault(_item_slot(event), seq)
-            return self._one(ThinkingBlock(thinking=event.get("delta") or "", seq=seq))
+            return self._reasoning_delta(
+                ThinkingBlock(thinking=event.get("delta") or "", seq=seq), _item_slot(event)
+            )
 
         if name == "response.audio.delta":
             seq = self._audio_seq(event)
@@ -184,7 +191,7 @@ class _ToHub:
             "response.function_call_arguments.delta",
             "response.custom_tool_call_input.delta",
         ):
-            seq = self._seqs.coord(_slot(event))
+            seq = _item_slot(event)
             self._arguments_streamed.add(seq)
             kind = "custom" if ".custom_tool_" in name else "function"
             return self._one(
@@ -199,7 +206,7 @@ class _ToHub:
                 ServerToolBlock(
                     name="mcp_call",
                     input_json=event.get("delta") or "",
-                    seq=self._seqs.coord(_slot(event)),
+                    seq=_item_slot(event),
                 )
             )
 
@@ -232,15 +239,27 @@ class _ToHub:
                 ServerToolBlock(
                     name=family,
                     status=stage,
-                    seq=self._seqs.coord(_slot(event)),
+                    seq=_item_slot(event),
                     raw=dict(event),
                 )
             )
         return []
 
     def flush(self) -> list[HubResponse]:
-        """이 변환기는 종료 시 보관하는 잔여 델타가 없으므로 빈 목록을 반환한다."""
-        return []
+        """텍스트 조각 없이 끝난 reasoning item의 보존 정보를 반환한다."""
+        outputs: list[HubResponse] = []
+        for coords in list(self._pending_reasoning):
+            item = self._pending_reasoning.pop(coords)
+            outputs.extend(self._reasoning_item(item, coords, final=True))
+        return outputs
+
+    def _reasoning_delta(self, block: ThinkingBlock, coords: Seq) -> list[HubResponse]:
+        """첫 추론 조각의 좌표에 보류한 item 정보를 연결한다."""
+        outputs = self._one(block)
+        pending = self._pending_reasoning.pop(coords, None)
+        if pending is not None:
+            outputs.extend(self._reasoning_item(pending, coords, final=True))
+        return outputs
 
     @staticmethod
     def _one(block: ContentBlock) -> list[HubResponse]:
@@ -252,14 +271,14 @@ class _ToHub:
         """audio 이벤트의 seq.
 
         이벤트에 ``output_index``나 ``content_index``가 있으면 그 part의 seq를 쓴다. 현재 audio
-        stream 이벤트에는 두 값이 없으므로, 처음 받은 시점의 맨 끝 블록 바로 뒤에 seq를 한 번
-        발급하고 이후의 audio/transcript 조각에도 같은 seq를 쓴다.
+        stream 이벤트에 두 값이 없으면 고정 오디오 그룹 ``(0, -1, -1, -1)``을 사용한다.
+        이후의 audio/transcript 조각에도 같은 seq를 쓴다.
         """
         if isinstance(event.get("output_index"), int) or isinstance(
             event.get("content_index"), int
         ):
-            return self._seqs.coord(_slot(event))
-        return self._seqs.after(key=("audio",))
+            return _slot(event)
+        return normalize_seq((0,), _SEQ_WIDTH)
 
     def _annotation(self, event: dict[str, Any]) -> list[HubResponse]:
         """output text annotation을 독립 허브 블록으로.
@@ -279,7 +298,14 @@ class _ToHub:
         """
         annotation = event.get("annotation") or {}
         kind = annotation.get("type")
-        target_seq = self._seqs.coord(_slot(event))
+        target_seq = _slot(event)
+        raw_annotation_index = event.get("annotation_index")
+        annotation_index = raw_annotation_index if isinstance(raw_annotation_index, int) else 0
+        seen_key = (target_seq, annotation_index)
+        if seen_key in self._annotations_seen:
+            return []
+        self._annotations_seen.add(seen_key)
+        annotation_seq = (*target_seq[:3], annotation_index)
         if kind == "file_path":
             # 인용이 아니라 산출물 경로다. 원본을 보존한다.
             return self._one(
@@ -287,19 +313,13 @@ class _ToHub:
                     type="responses_file_path",
                     raw=dict(annotation),
                     native={"level": "annotation"},
-                    seq=self._seqs.after(target_seq),
+                    seq=annotation_seq,
                 )
             )
 
-        raw_annotation_index = event.get("annotation_index")
-        annotation_index = raw_annotation_index if isinstance(raw_annotation_index, int) else 0
-        seen_key = (target_seq, annotation_index)
-        if seen_key in self._annotations_seen:
-            return []
-        self._annotations_seen.add(seen_key)
         fields: dict[str, Any] = {
             "vendor": SOURCE,
-            "seq": self._seqs.after(target_seq),
+            "seq": annotation_seq,
             "target_seq": target_seq,
             "kind": kind or "annotation",
             "native": dict(annotation),
@@ -341,9 +361,9 @@ class _ToHub:
     ) -> list[HubResponse]:
         """출력 Item 종류에 따라 도구·메시지·추론·벤더 블록으로 변환한다."""
         kind = item.get("type")
-        coords = _slot(event)
+        coords = _item_slot(event)
         if kind in _CLIENT_TOOL_ITEMS:
-            seq = self._seqs.coord(coords)
+            seq = coords
             fields: dict[str, Any] = {
                 "seq": seq,
                 "vendor": SOURCE,
@@ -375,7 +395,7 @@ class _ToHub:
                     name=str(item.get("name") or "mcp_approval"),
                     kind="mcp_approval",
                     input=item,
-                    seq=self._seqs.coord(coords),
+                    seq=coords,
                     native=dict(item),
                 )
             )
@@ -393,13 +413,13 @@ class _ToHub:
                     content=content,
                     structured_content=structured,
                     native=dict(item),
-                    seq=self._seqs.coord(coords),
+                    seq=coords,
                 )
             )
         if kind == "message":
             return self._message_item(item, event, final=final)
         if kind == "reasoning":
-            return self._reasoning_item(item, coords)
+            return self._reasoning_item(item, coords, final=final)
         if kind in _SERVER_TOOL_ITEMS:
             raw = dict(item)
             return self._one(
@@ -411,7 +431,7 @@ class _ToHub:
                     if isinstance(item.get("arguments"), str)
                     else "",
                     output=str(item.get("output") or item.get("result") or ""),
-                    seq=self._seqs.coord(coords),
+                    seq=coords,
                     native=raw,
                     raw=raw,
                 )
@@ -422,7 +442,7 @@ class _ToHub:
                     type=f"responses_{kind}",
                     raw=dict(item),
                     native={"level": "item"},
-                    seq=self._seqs.coord(coords),
+                    seq=coords,
                 )
             )
         return []
@@ -449,7 +469,7 @@ class _ToHub:
                 continue
             part_event = dict(event)
             part_event["content_index"] = content_index
-            seq = self._seqs.coord(_slot(part_event))
+            seq = _slot(part_event)
             native = {"item": item_meta, "part": dict(part)}
             kind = part.get("type")
             if kind == "output_text":
@@ -506,27 +526,34 @@ class _ToHub:
                     type="responses_message",
                     raw=dict(item),
                     vendor=SOURCE,
-                    seq=self._seqs.coord(_item_slot(event)),
+                    seq=_item_slot(event),
                 )
             )
         return [HubResponse(content=blocks)] if blocks else []
 
-    def _reasoning_item(self, item: dict[str, Any], coords: Seq) -> list[HubResponse]:
+    def _reasoning_item(
+        self, item: dict[str, Any], coords: Seq, *, final: bool
+    ) -> list[HubResponse]:
         """reasoning item을 summary part와 원문 추론 part별 thinking 블록으로 바꾼다.
 
-        part마다 ``(output_index, part_kind, part_index)`` 좌표의 seq를 쓴다. 이미 스트리밍한
+        part마다 ``(1, output_index, part_kind, part_index)`` 좌표의 seq를 쓴다. 이미 스트리밍한
         part는 본문을 다시 싣지 않는다. 첫 블록에만 item 원본과 ``encrypted_content``를 둔다.
         part가 하나도 없으면 이 item에서 처음 스트리밍한 추론 블록, 없으면 item 좌표의 블록 하나에
         item 원본을 둔다.
 
         Args:
             item: ``output_item.added``/``done`` 이벤트의 reasoning item.
-            coords: item 수준 좌표 ``(output_index, 0, 0)``.
+            coords: item 수준 좌표 ``(1, output_index, -1, -1)``.
         """
+        pending = self._pending_reasoning.pop(coords, None)
+        if pending is not None:
+            combined = dict(pending)
+            combined.update(item)
+            item = combined
         blocks: list[ContentBlock] = []
         native_pending = True
         encrypted = item.get("encrypted_content")
-        output = coords[0]
+        output = coords[1]
 
         def append_parts(entries: Any, *, part_kind: int) -> None:
             """추론 배열의 각 내용을 좌표별 ThinkingBlock으로 변환해 출력 목록에 추가한다."""
@@ -537,7 +564,7 @@ class _ToHub:
                 entry = entries[part_index]
                 if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
                     continue
-                seq = self._seqs.coord((output, part_kind, part_index))
+                seq = normalize_seq((1, output, part_kind, part_index), _SEQ_WIDTH)
                 fields: dict[str, Any] = {
                     "seq": seq,
                     "vendor": SOURCE,
@@ -556,8 +583,11 @@ class _ToHub:
         append_parts(item.get("content"), part_kind=_REASONING_TEXT)
         if not blocks:
             streamed = self._reasoning_item_slots.get(coords)
+            if streamed is None and not final:
+                self._pending_reasoning[coords] = dict(item)
+                return []
             fields: dict[str, Any] = {
-                "seq": streamed if streamed is not None else self._seqs.coord(coords),
+                "seq": streamed if streamed is not None else (1, output, _PART, 0),
                 "vendor": SOURCE,
                 "native": dict(item),
             }
@@ -590,13 +620,15 @@ class _ToHub:
             if output_index in self._done_items or not isinstance(item, dict):
                 continue
             out.extend(self._item_done({"output_index": output_index, "item": item}))
-        for citation in response.get("citations") or []:
+        citations = response.get("citations") or []
+        for citation_index in range(len(citations)):
+            citation = citations[citation_index]
             if isinstance(citation, str):
                 out.append(
                     HubResponse(
                         content=[
                             AnnotationBlock(
-                                seq=self._seqs.after(),
+                                seq=normalize_seq((2, citation_index), _SEQ_WIDTH),
                                 id=citation,
                                 uri=citation,
                                 kind="response_citation",
@@ -612,7 +644,7 @@ class _ToHub:
                     HubResponse(
                         content=[
                             AnnotationBlock(
-                                seq=self._seqs.after(),
+                                seq=normalize_seq((2, citation_index), _SEQ_WIDTH),
                                 id=str(identifier),
                                 uri=citation.get("url"),
                                 title=citation.get("title"),
@@ -822,11 +854,11 @@ class ResponsesAdapter:
         for block in blocks:
             item: dict[str, Any] | None = None
             if isinstance(block, ToolResultBlock):
-                if not can_replay_client_tool(block, self.name):
+                if not ToolAdaptation.can_replay_client_tool(block, self.name):
                     continue
                 item = self._tool_result_item(block, lowerer)
             elif isinstance(block, ToolUseBlock):
-                if not can_replay_client_tool(block, self.name):
+                if not ToolAdaptation.can_replay_client_tool(block, self.name):
                     continue
                 item = self._tool_use_item(block)
             elif isinstance(block, ThinkingBlock) and block.vendor == SOURCE:

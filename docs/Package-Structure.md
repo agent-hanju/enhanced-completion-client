@@ -18,14 +18,15 @@ completion_bridge/
     tools.py           도구 호출·HITL 기록과 콜백 반환 계약
   streaming/
     mapping.py         스트림 매퍼·합성·사용자 어휘 변환 계약
-    merge.py           타입 기반 델타 병합
+    merge.py           필드 메타데이터 기반 델타 누적
     sequence.py        블록 순서 발급과 최종 index 확정
     content.py         태그 스키마와 점진적 태그 해석
   runtime/
     execution.py       Run·RuntimeExecution·모델 반복 호출
   vendors/             벤더별 요청·델타·원본 응답 변환
-  vocabularies/        구체적인 어휘 구현
-  transport/           HTTP·SSE 전송과 SSE 파서
+  http/
+    client.py          동기·비동기 HTTP 클라이언트와 SSE 응답 수신
+    sse.py             HTTP와 독립적인 SSE 이벤트·파서
 ```
 
 `models`에는 상태 표현과 검증·직렬화에 필요한 타입을 모은다.
@@ -54,9 +55,15 @@ completion_bridge/
 | seq | streaming.sequence |
 | contentstream | streaming.content |
 | wire_logging / operation_logging | logging |
+| transport.http | http.client (HttpClient / AsyncHttpClient) |
+| transport.sse | http.sse |
 
-예를 들어 `completion_bridge.seq.SeqAllocator`는
-`completion_bridge.streaming.sequence.SeqAllocator`로 변경한다.
+좌표 길이 정규화는 `completion_bridge.streaming.sequence.normalize_seq`를 사용한다.
+좌표 배정은 벤더 변환기가 담당하며 공통 `SeqAllocator`는 제공하지 않는다.
 logging 설정의 formatter 경로는 `completion_bridge.logging.JsonFormatter`를 사용한다.
 이전 모듈 경로를 저장한 pickle 등은 자동 이전하지 않는다. 배포 시 직접 하위 모듈을
 참조하는 소비 코드와 설정의 이전이 필요하다.
+
+인용·배지 Vocabulary 구현은 `examples/cite_vocabulary.py`와 `examples/custom_vocabulary.py`에
+있다. 설치 패키지에는 vocabularies 패키지와 CiteVocabulary·cite_schema 공개 API가 없다.
+소비 애플리케이션은 필요한 예제를 복사하거나 자체 Vocabulary를 구현한다.

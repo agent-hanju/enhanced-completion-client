@@ -17,10 +17,10 @@ import httpx
 import pytest
 import respx
 from _dense import CITED, dense_history
+from cite_vocabulary import CiteVocabulary
 
 from completion_bridge import (
     Bridge,
-    CiteVocabulary,
     HubMessage,
     HubResponse,
     Hyperparameters,
@@ -1175,7 +1175,7 @@ class TestHubConvergence:
     @respx.mock
     async def test_cite_vocabulary_works_on_every_vendor(self) -> None:
         """어휘 축과 벤더 축이 직교한다. 어휘 코드를 고치지 않는다."""
-        from completion_bridge import CiteVocabulary
+        from cite_vocabulary import CiteVocabulary
 
         tagged = '서울은 <cite id="d1">수도</cite>다.'
         respx.post(MSG_URL).mock(
@@ -1520,7 +1520,7 @@ class TestNativeCitations:
     @respx.mock
     async def test_native_and_xml_share_container_but_keep_source_semantics(self) -> None:
         """둘 다 TextBlock.citations이지만 원문 인용과 답변 태그를 혼동하지 않는다."""
-        from completion_bridge import CiteVocabulary
+        from cite_vocabulary import CiteVocabulary
 
         native = sse(
             (
@@ -1707,7 +1707,7 @@ class TestDenseLowering:
             *mapper.map(HubResponse(content=[TextBlock(text=answer, seq=(0, 0))])),
             *mapper.flush(),
         ]
-        merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
+        merger: StreamMerger = StreamMerger(HubResponse)
         for delta in deltas:
             merger.apply(delta)
         merged = merger.build()

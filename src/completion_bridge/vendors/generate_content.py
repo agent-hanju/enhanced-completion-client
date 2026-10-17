@@ -22,6 +22,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from completion_bridge.errors import MappingError, VendorStreamError
+from completion_bridge.http.sse import SseEvent
 from completion_bridge.models.blocks import (
     AnnotationBlock,
     AudioBlock,
@@ -47,8 +48,7 @@ from completion_bridge.models.native import (
     GenerateContentResponse,
 )
 from completion_bridge.streaming.mapping import StreamMapper
-from completion_bridge.streaming.sequence import Seq, SeqAllocator
-from completion_bridge.transport.sse import SseEvent
+from completion_bridge.streaming.sequence import Seq, normalize_seq
 from completion_bridge.vendors.base import JsonCall, Lowerer, NativeAccumulator
 from completion_bridge.vendors.normalize import (
     INSTRUCTION_ROLES,
@@ -56,7 +56,7 @@ from completion_bridge.vendors.normalize import (
     stop_reason_from_gemini,
 )
 from completion_bridge.vendors.parts import as_gemini_part, has_opaque_media_reference
-from completion_bridge.vendors.tool_policy import can_replay_client_tool
+from completion_bridge.vendors.tool_adaptation import ToolAdaptation
 
 __all__ = ["GenerateContentAdapter", "generate_content"]
 
@@ -154,17 +154,18 @@ def _gemini_media_block(part: dict[str, Any], seq: Seq) -> ContentBlock | None:
     return None
 
 
+_SEQ_WIDTH = 2
+
+
 class _ToHub:
     """GenerateContent 응답을 허브 델타로 바꾼다.
 
-    이 API는 part 인덱스를 주지 않으므로 어댑터가 part 번호 n을 만들고 ``seq=(n, 0)``을 쓴다.
-    candidate 메타데이터에서 만든 블록은 대상 text 블록이나 그 시점의 맨 끝 블록 바로 뒤의
-    seq를 받는다.
+    이 API는 part 인덱스를 주지 않으므로 어댑터가 0부터 part 번호 n을 만들고 ``seq=(1, n)``을 쓴다.
+    입력 차단·콘텐츠·인용·grounding·URL 조회·안전 평가는 각각 고정 그룹 0~5를 사용한다.
     """
 
     def __init__(self) -> None:
         """스트림별 블록 순서와 마지막 채널 좌표를 초기화한다."""
-        self._seqs = SeqAllocator(1)
         self._next_index = 0
         self._last_stream_key: str | None = None
         self._last_stream_index: int | None = None
@@ -186,14 +187,14 @@ class _ToHub:
                     type="promptFeedback",
                     raw=dict(feedback),
                     vendor=SOURCE,
-                    seq=self._seqs.after(),
+                    seq=normalize_seq((0,), _SEQ_WIDTH),
                 )
             )
         indexed_parts = content.get("parts") or []
         for position in range(len(indexed_parts)):
             part = indexed_parts[position]
             if isinstance(part, dict):
-                seq = self._seqs.coord((self._part_index(part, position=position),))
+                seq = normalize_seq((1, self._part_index(part, position=position)), _SEQ_WIDTH)
                 block = self._part(part, seq)
                 if block is not None:
                     blocks.append(block)
@@ -244,8 +245,7 @@ class _ToHub:
         인용이 part가 아니라 candidate 메타데이터에 실린다. part만 훑으면 통째로 놓친다.
 
         ``citationSources``의 배열 위치가 같은 annotation은 chunk가 달라도 같은 seq를 받아 한
-        블록으로 병합된다. seq는 그 위치가 처음 나온 chunk에서 ``target_seq`` 블록, 없으면 그
-        시점의 맨 끝 블록 바로 뒤로 정해진다.
+        블록으로 병합된다. 첫 좌표는 인용 그룹 2이고 두 번째 좌표는 원본 배열 위치다.
         """
         if not isinstance(metadata, dict):
             return []
@@ -257,7 +257,7 @@ class _ToHub:
                 continue
             fields: dict[str, Any] = {
                 "vendor": SOURCE,
-                "seq": self._seqs.after(target_seq, key=("citation", position)),
+                "seq": normalize_seq((2, position), _SEQ_WIDTH),
                 "target_seq": target_seq,
                 "kind": "citation_source",
                 "native": dict(source),
@@ -281,8 +281,8 @@ class _ToHub:
     def _grounding(self, metadata: Any) -> GroundingBlock | None:
         """검색 source와 답변 support의 관계를 평탄화하지 않고 보존한다.
 
-        스트림의 모든 grounding 조각은 같은 seq를 받아 블록 하나로 병합된다. seq는 처음 나온
-        시점의 맨 끝 블록 바로 뒤로 정해진다.
+        스트림의 모든 grounding 조각은 같은 seq를 받아 블록 하나로 병합된다.
+        seq는 수신 시점과 무관하게 grounding 그룹 ``(3, -1)``이다.
         """
         if not isinstance(metadata, dict):
             return None
@@ -355,7 +355,7 @@ class _ToHub:
         retrieval = metadata.get("retrievalMetadata")
         return GroundingBlock(
             vendor=SOURCE,
-            seq=self._seqs.after(key=("grounding",)),
+            seq=normalize_seq((3,), _SEQ_WIDTH),
             sources=sources,
             supports=supports,
             search_queries=queries,
@@ -368,8 +368,8 @@ class _ToHub:
         """허브에 대응물이 없는 candidate 메타데이터를 보존한다.
 
         grounding은 별도 공통 블록으로 처리한다. 여기에는 URL 조회 결과와 안전 등급처럼
-        정규화하지 않는 candidate 메타데이터만 남긴다. 각 블록은 만들 때마다 그 시점의 맨 끝
-        블록 바로 뒤의 새 seq를 받는다.
+        정규화하지 않는 candidate 메타데이터만 남긴다.
+        URL 조회와 안전 평가는 각각 그룹 4와 5의 동일 블록을 갱신한다.
         """
         out: list[ContentBlock] = []
         for key in ("urlContextMetadata",):
@@ -377,7 +377,9 @@ class _ToHub:
             if isinstance(value, dict):
                 # 서버가 검색을 돌린 결과다. 다른 벤더의 서버 도구와 같은 자리다.
                 out.append(
-                    ServerToolBlock(name=key, raw=value, vendor=SOURCE, seq=self._seqs.after())
+                    ServerToolBlock(
+                        name=key, raw=value, vendor=SOURCE, seq=normalize_seq((4,), _SEQ_WIDTH)
+                    )
                 )
         ratings = candidate.get("safetyRatings")
         if isinstance(ratings, list) and ratings:
@@ -386,7 +388,7 @@ class _ToHub:
                     type="safetyRatings",
                     raw={"ratings": ratings},
                     vendor=SOURCE,
-                    seq=self._seqs.after(),
+                    seq=normalize_seq((5,), _SEQ_WIDTH),
                 )
             )
         return out
@@ -795,9 +797,9 @@ class GenerateContentAdapter:
 
         default_role = "model" if role == "assistant" else "user"
         for block in blocks:
-            if isinstance(block, ToolUseBlock | ToolResultBlock) and not can_replay_client_tool(
-                block, self.name
-            ):
+            if isinstance(
+                block, ToolUseBlock | ToolResultBlock
+            ) and not ToolAdaptation.can_replay_client_tool(block, self.name):
                 continue
             if isinstance(block, ToolUseBlock):
                 block_role = "model"

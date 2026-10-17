@@ -632,11 +632,13 @@ Gemini의 `groundingMetadata`와 `citationMetadata`는 candidate 전용 응답 m
 ## 사용자 정의 content type
 
 `CiteVocabulary`는 스트림에 걸쳐 잘린 `<cite id="...">...</cite>`를 파싱하고, 구조화된
-`TextBlock.citations`를 다음 요청의 텍스트로 되돌린다. 이 어휘가 아래 첫 번째 방식의 내장
-예시다.
+`TextBlock.citations`를 다음 요청의 텍스트로 되돌리는 실행 예제입니다.
+구현은 [examples/cite_vocabulary.py](examples/cite_vocabulary.py)에만 있으며 설치 패키지에서
+공개하지 않습니다. 아래 예는 해당 파일을 애플리케이션 모듈로 복사한 경우입니다.
 
 ```python
-from completion_bridge import CiteVocabulary, Bridge
+from completion_bridge import Bridge
+from cite_vocabulary import CiteVocabulary  # 애플리케이션에 복사한 예제 구현
 from completion_bridge.vendors import chat_completions
 
 cite = CiteVocabulary()
@@ -654,7 +656,7 @@ result = await bridge.complete([prompt])
 커스텀 필드는 두 수준으로 확장한다.
 
 1. 모든 API의 text content에 XML-like 토큰으로 실으면 충분한 타입: `ContentBlock`을 상속해
-   고정 `type: Literal[...]`을 선언하고, `Vocabulary.blocks`, `lower()`, 필요하면 상태를 갖는
+   고정 `type: Literal[...]`을 선언하고, `Vocabulary.blocks()`, `lower()`, 필요하면 상태를 갖는
    `lift_mapper()`를 구현한다. `ContentSchema`와 `TagParser`가 SSE chunk 사이에서 잘린 태그를
    처리한다. `Bridge(vocabularies=[...])`가 타입 등록, 요청 lowering, 응답 stream lifting을
    모두 연결한다.
@@ -664,6 +666,8 @@ result = await bridge.complete([prompt])
    명시적으로 생략한다. native 채널이 없는 대상에도 보존해야 한다면 같은 Hub block용
    `Vocabulary`를 text fallback으로 함께 등록한다.
 
+필수 메서드·파서 이벤트·병합 선언·seq·직렬화 계약은
+[Vocabulary 구현 안내](docs/Vocabulary-Guide.md)에 정리되어 있습니다.
 첫 번째 방식의 완전한 비인용 구현은 [custom vocabulary 실행 예제](examples/custom_vocabulary.py),
 두 번째 방식의 내장 사례는 `DocumentBlock`, `TextBlock.citations`, `AnnotationBlock`,
 `GroundingBlock`과 네 vendor adapter다. 실제 request/response JSON은
@@ -680,7 +684,9 @@ Bridge가 시스템 프롬프트에 자동 삽입하지 않는다. 등록되지 
 
 ### Chat Completions 블록 인덱스
 
-Chat Completions 응답은 블록 최초 등장 순서대로 번호 n을 0부터 부여하고 `seq=(n, 0)`을 쓴다.
+Chat Completions 응답은 출현 그룹 번호 n을 0부터 부여한다. 일반 채널은 `seq=(n, -1)`, 도구 호출은 같은 그룹에서 `seq=(n, tool_index)`를 사용한다.
+
+seq 좌표의 발급·정규화·커스텀 확장 규칙은 [seq 정책](docs/Sequence-Policy.md)을 따른다.
 같은 채널의 연속 delta는 누적하지만, `content → reasoning → content`는 서로 다른 세 블록으로
 유지한다. 도구 호출은 원본 호출 index별로 조립하며 타입별 특수값을 쓰지 않는다.
 
