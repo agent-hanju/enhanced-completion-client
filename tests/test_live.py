@@ -71,7 +71,7 @@ def _relift(vocabulary: CiteVocabulary, text: str) -> list[TextBlock]:
     merger: StreamMerger = StreamMerger(HubResponse)
     for delta in deltas:
         merger.apply(delta)
-    return [b for b in merger.build().content if isinstance(b, TextBlock) and b.citations]
+    return [b for b in merger.result.content if isinstance(b, TextBlock) and b.citations]
 
 
 def _bridge(client: httpx.AsyncClient) -> Bridge:

@@ -1710,7 +1710,7 @@ class TestDenseLowering:
         merger: StreamMerger = StreamMerger(HubResponse)
         for delta in deltas:
             merger.apply(delta)
-        merged = merger.build()
+        merged = merger.result
         cited = [b for b in merged.content if isinstance(b, TextBlock) and b.citations]
         assert [(b.citations[0].id, b.text) for b in cited] == [("d1", CITED)]
 

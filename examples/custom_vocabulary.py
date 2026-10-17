@@ -214,7 +214,7 @@ def _lift(vocabulary: BadgeVocabulary) -> HubResponse:
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return finalize_response(merger.build())
+    return finalize_response(merger.result)
 
 
 def _pretty(value: Any) -> str:

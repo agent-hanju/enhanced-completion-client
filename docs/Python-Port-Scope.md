@@ -43,7 +43,7 @@ WebClient POST {baseUrl}/v1/chat/completions  (Accept: text/event-stream)
        -> mapper.map(chunk)                1:N 델타 변환 (cite 파싱)
        -> StreamMerger.applyDelta(delta)   누적
        -> FluxListener.onNext(delta)       사용자 콜백
-  -> onComplete: mapper.flush() -> 잔여 델타 -> merger.build()
+  -> onComplete: mapper.flush() -> 잔여 델타 -> merger.result
 handle.get()  최종 병합 결과 (블로킹)
 ```
 
@@ -301,8 +301,7 @@ class ToolCall(BaseModel):
 ```
 
 Java의 어노테이션 세 개가 그대로 대응된다. `@StreamOverwrite`는 overwrite 표시로,
-`@StreamIndex`는 index 표시로, `@StreamList(index=...)`는 필드 레벨 설정으로 옮긴다. 누적은
-딕셔너리에 하고 마지막에 `model_validate`로 세운다. Java가 예약 키에 런타임 타입을 심어두던 트릭은
+`@StreamIndex`는 index 표시로, `@StreamList(index=...)`는 필드 레벨 설정으로 옮긴다. 현재 누적은 모델 후보에서 수행하며 delta마다 `model_validate` 성공 후 모델을 교체한다. Java가 예약 키에 런타임 타입을 심어두던 트릭은
 Pydantic의 discriminated union으로 대체되므로 오히려 단순해진다.
 
 **규모.** Java 1,362줄에서 Map, 배열, record, TypeVariable 처리를 덜어내면 Python 300~400줄

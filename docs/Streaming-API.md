@@ -27,9 +27,8 @@ Bridge / SyncBridge 생성
 | `stream(messages, ...)` | `AsyncStream` 반환, `await` 없이 호출 | `SyncStream` 반환 |
 | 스트림 순회 | `async for delta in stream` | `for delta in stream` |
 | 순회 값 | `HubResponse` delta | 동일 |
-| `stream.partial` | 현재 병합 상태 `HubResponse` | 동일 |
-| `stream.result` | 정상 순회 완료 후 최종 `HubResponse` | 동일 |
-| `complete(messages, ...)` | `await`하여 최종 `HubResponse` 수신 | 최종 `HubResponse` 반환 |
+| `stream.result` | 마지막 확정 `HubResponse` 또는 첫 성공 전 `None` | 동일 |
+| `complete(messages, ...)` | `await`하여 `HubResponse | None` 수신 | `HubResponse | None` 반환 |
 | `count_tokens(messages, ...)` | `await`하여 `TokenCount` 수신 | `TokenCount` 반환 |
 | 스트림 닫기 | `await stream.aclose()` | `stream.close()` |
 | 브리지 닫기 | `await bridge.aclose()` | `bridge.close()` |
@@ -382,25 +381,28 @@ reasoning 필드="B"로 내려간다. 멀티모달 content 배열의 기존 변�
 ## 6. 종료·부분 결과·취소·오류
 
 벤더 어댑터의 종료 판정 또는 SSE 입력의 정상 소진 뒤 mapper를 flush하고,
-그 delta까지 모두 순회한 다음 최종 결과가 열리며 전송 리소스를 해제한다.
-종료 프레임에 담긴 usage나 종료 사유도 먼저 처리한다.
+전송 리소스를 해제한다. 종료 프레임에 담긴 usage나 종료 사유도 먼저 처리한다.
+각 delta는 후보 병합과 모델 검증에 성공하면 확정한 직후 소비자에게 전달한다.
+같은 원본 이벤트에서 나온 delta들도 개별적으로 확정·전달한다.
 
-| 상황 | `result` / `partial` |
+| 상황 | `result` |
 |---|---|
-| 순회 전 또는 순회 중 | `result`는 `StreamNotFinished`; `partial` 조회 가능 |
-| 종료 프레임 후 끝까지 순회 | `result` 조회 가능 |
-| 종료 프레임 없이 정상 EOF | 현재 구현은 완료로 처리, `result` 조회 가능 |
-| 조기 중단·오류·취소로 끝까지 순회하지 않음 | `result` 대신 `partial` 사용 |
+| 첫 delta 성공 전 | `None` |
+| 순회 중 | 마지막 검증·확정 모델 |
+| 정상 종료 | flush 출력까지 확정한 모델 또는 `None` |
+| 병합·검증 오류 | 실패한 delta 직전의 확정 모델 또는 `None` |
+| 전송·매핑 오류, 취소 | 그때까지 확정한 모델 또는 `None` |
 
-정상 EOF만으로 모델의 정상 생성까지 확인되지는 않는다. 최종 `stop_reason`,
-`block_reason`, content를 별도로 확인한다. `stop_reason` delta를 받았더라도 루프를
-즉시 중단하면 뒤의 usage나 flush 결과를 놓치고 `result`가 열리지 않을 수 있다.
+`result`는 별도 검증 없이 마지막 확정 모델의 독립된 복사본을 반환한다.
+정상 완료·오류·취소 상태는 데이터와 별개다. 정상 EOF만으로 모델의 정상 생성까지
+확인되지는 않으므로 `stop_reason`, `block_reason`, content를 별도로 확인한다.
+`stop_reason` delta를 받자마자 중단하면 뒤의 usage나 flush 결과를 놓칠 수 있다.
 최종 응답을 별도의 마지막 delta로 한 번 더 내보내지는 않는다.
 
 `aclose()` / `close()`는 아직 닫히지 않았다면 mapper를 flush해 부분 결과에 반영하고
 전송을 닫는다. 이 flush 결과는 소비자에게 yield하지 않는다. 이미 닫힌 스트림은 다시
 flush하지 않는다. 예외 경로의 `finally`는 리소스를 해제하지만 정상 flush를 보장하지
-않으므로 오류 후 `partial`은 이미 병합된 내용까지만 보존한다고 보아야 한다.
+않으므로 오류 후 `result`은 이미 병합된 내용까지만 보존한다고 보아야 한다.
 닫기 자체가 중단된 스트림을 정상 완료 상태로 바꾸지는 않는다.
 
 | 오류 | 현재 동작 |
@@ -409,7 +411,7 @@ flush하지 않는다. 예외 경로의 `finally`는 리소스를 해제하지�
 | 연결·읽기 timeout 등 | 전송 계층 예외가 그대로 전파될 수 있음 |
 | 응답 디코딩·매핑 실패 | 어댑터의 `MappingError` 등 전파 |
 | 입력 모델 검증 실패 | 모델 검증 예외 등 전파 |
-| 완료 전 `result` 조회 | `StreamNotFinished` |
+| 후보 병합·검증 실패 | 원래 예외 전파, 마지막 확정 결과 유지 |
 
 벤더 오류가 응답의 `stop_reason="error"` 등으로 표현되는 경우도 있으므로 모든 실패가
 예외로만 전달되는 것은 아니다. 오류를 공통 SSE error 이벤트로 바꾸거나 자동 재시도하지 않는다.
@@ -474,7 +476,7 @@ iterator = stream.__aiter__()
 try:
     async for delta in iterator:
         print(delta.text, end="")
-        if len(stream.partial.text) >= 100:
+        if stream.result is not None and len(stream.result.text) >= 100:
             break
 finally:
     try:
@@ -482,8 +484,8 @@ finally:
     finally:
         await iterator.aclose()
 
-partial = stream.partial
-# 조기 중단했으므로 stream.result를 최종 응답으로 조회하지 않는다.
+result = stream.result
+# 종료 상태와 무관하게 마지막 확정 결과를 조회한다. 응답이 없으면 None이다.
 ```
 
 ## 8. 구현 및 검증 근거
@@ -569,21 +571,40 @@ JSON이 필요하면 `response.model_dump(mode="json", by_alias=True, exclude_un
 `StreamMerger(HubResponse)`를 사용하며, 입력 델타를 변경하지 않고 소비자에게 전달한다.
 벤더 원본 응답은 벤더별 `NativeAccumulator`가 별도로 처리한다.
 
-문자열은 조각으로 보관하고 build에서 결합하며, 숫자는 합산한다. overwrite·index·Literal
-필드는 교체한다. 모델과 목록은 반복형 DFS로 처리한다. 식별 목록은 검색 사전을 사용하며,
-목록별 식별 필드는 최초 설정 후 고정되며 검색은 평균 O(1)이다. 다른 식별 필드로 변경을
-요청하면 ValueError가 발생한다. 커스텀 블록과 중첩 모델도 같은 선언 규칙을 사용한다.
+### 스키마와 오류 처리 주의사항
 
-마지막에 한 번 build할 때 일반 경로의 전체 비용은 처리한 필드·원소·문자 수에 비례한다.
-해시 충돌과 최초 식별 필드 설정 시 기존 원소 검색, 최종 모델 검증 비용은 별도다. 반복 build는
-매번 전체 결과를 생성한다. seq 순서와 최종 index는 `finalize_response()`가 확정한다.
+델타와 최종 결과는 같은 모델 타입을 사용한다. 모델은 실제 스트림에서 도착하는 부분
+데이터를 표현할 수 있어야 한다. 델타에서 생략될 수 있는 필드는 기본값 등으로 생략을
+허용해야 하며, `T | None` 선언만으로 생략이 허용되지는 않는다. `None` 값은 병합에서
+무시하므로 기본값 없는 필수 nullable 필드의 명시적 `None`도 후보 모델의 필드로 저장되지 않는다.
+스키마 제약은 자동 검사하지 않는다. 개별 델타가 유효하더라도 문자열 연결·수치 합산·목록
+추가 결과가 필드 제약을 위반하면 `apply()`의 후보 검증이 실패할 수 있다.
+
+`apply()`는 현재 확정 모델과 분리된 후보에 delta를 병합하고, 중첩 모델부터 전체
+모델을 검증한 후 인스턴스 참조를 교체한다. 병합·검증이 실패하면 후보를 버리고 기존
+결과를 유지한다. `result`는 첫 성공 전에는 `None`, 이후에는 마지막 확정 모델의 복사본이다.
+`build()`와 스트림의 `partial`은 제거했다. 종료 시에만 뒤늦게 모델을 검증하지 않는다.
+
+### 병합 규칙과 실행 순서
+
+문자열 연결·숫자 합산·사전의 얕은 갱신·식별 목록 병합 규칙을 적용한다.
+overwrite·index·Literal 필드는 교체하고 extra 필드는 새 값으로 교체한다.
+같은 목록의 식별 필드는 고정하며 다른 필드로 변경하면 ValueError가 발생한다.
+일반 목록과 모델을 직접 사용하고, 기존 전용 누적 컨테이너와 실행 클래스는 사용하지 않는다.
+이름 있는 내부 메서드와 인수를 작업 스택에 등록하며, 자식 작업은 다음 형제보다 먼저
+완료한다. 식별값 검색도 작업 실행 시점에 수행해 같은 delta의 중복 원소를 순서대로 병합한다.
+
+후보 복사·검증은 매 delta마다 누적 데이터 크기에 비례하는 비용이 필요하다.
+`result` 조회도 독립된 결과를 복사하므로 누적 크기에 비례한다. 서로 다른 원소가 계속
+추가되는 스트림은 전체 처리 시간이 제곱으로 증가할 수 있다. 측정 조건과 실제 비교는
+[성능 측정 기록](StreamMerger-Benchmark.md)을 참고한다.
 
 ### 식별 목록 단순화 기록 (2026-10-17)
 
 한때 같은 Indexed List에서 식별 필드가 다른 경우를 상정한 디자인의 Indexed List를
 만들었지만, 해당하는 케이스가 없어 구현을 단순화하였다. 후에 필요한 케이스가 생긴다면
-원복한다. 현재는 목록별 식별 필드를 고정하고, 일반 딕셔너리 추가 시 검색 사전에 즉시
-등록한다. 식별 정보가 없는 원소 추가로 기존 검색 사전을 초기화하지 않는다.
+원복한다. 식별 필드 고정 정책은 유지한다. 이후 모델 인스턴스에 직접 병합하도록 변경하면서
+Indexed List 전용 클래스는 제거했으며, 검색 사전은 delta 처리 중에만 사용한다.
 
 
 `Vocabulary`는 추상 기반 클래스다. 하위 클래스는 `blocks()`를 구현하여 등록할

@@ -374,4 +374,4 @@ if __name__ == "__main__":
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    print(merger.build().model_dump_json(indent=2))
+    print(merger.result.model_dump_json(indent=2))

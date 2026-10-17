@@ -36,7 +36,7 @@ def test_default_and_response_contract():
     for delta in mapper.map({"choices": [{"delta": {"content": "hello"}}]}):
         assert "synthetic" not in delta.model_dump()
         merger.apply(delta)
-    result = merger.build()
+    result = merger.result
     assert "synthetic" not in result.model_dump()
     message = HubMessage.of_response(result)
     assert message.synthetic is False

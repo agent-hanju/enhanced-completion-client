@@ -29,7 +29,7 @@ def collect(adapter: Any, events: list[dict[str, Any]], *, cite: bool = False):
         for output in lift.flush():
             blocks.extend(output.content)
             merger.apply(output)
-    return blocks, finalize_response(merger.build())
+    return blocks, finalize_response(merger.result)
 
 
 def test_messages_uses_received_index_without_allocating_a_suffix():

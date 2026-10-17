@@ -208,7 +208,7 @@ class TestMessages:
         for event in events:
             for delta in mapper.map(event):
                 merger.apply(delta)
-        text = finalize_response(merger.build()).content[0]
+        text = finalize_response(merger.result).content[0]
         assert isinstance(text, TextBlock)
         citation = text.citations[0]
         assert (citation.type, citation.source, citation.id, citation.uri) == (

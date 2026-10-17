@@ -52,7 +52,7 @@ def merge(*deltas: HubResponse) -> HubResponse:
     merger: StreamMerger = StreamMerger(HubResponse)
     for delta in deltas:
         merger.apply(delta)
-    return merger.build()
+    return merger.result
 
 
 def cited_blocks(response: HubResponse) -> list[TextBlock]:

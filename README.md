@@ -17,7 +17,7 @@
 
 - `HubMessage`는 Anthropic Messages API의 Message 객체에 호환용 필드, 타입을 추가한 확장 형식이다.
 - `build_request()`, `stream()`, `complete()`의 입력은 `(HubMessage | string) []`다. 문자열은 단일 텍스트 content만 있는 user `HubMessage`의 편의 입력이다.
-- `stream()`은 변환이 끝난 `HubResponse` delta를 즉시 내보내며, 스트림 종료 후 `stream.result`에서 같은 delta들을 병합한 `HubResponse`를 얻는다.
+- `stream()`은 각 `HubResponse` delta를 병합·검증한 직후 내보낸다. `stream.result`는 종료 상태와 무관하게 마지막 확정 응답을 반환하며 첫 성공 전에는 `None`이다.
 - `complete()`는 스트림을 내부 소비하고 병합된 `HubResponse` 하나를 반환한다.
 - `HubMessage.of_response(result)`로 HubResponse에서 HubMessage만 확인할 수 있다.
 

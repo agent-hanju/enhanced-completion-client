@@ -45,7 +45,7 @@ def merge(adapter: VendorAdapter, events: list[dict[str, Any]]) -> HubResponse:
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return finalize_response(merger.build())
+    return finalize_response(merger.result)
 
 
 def build(adapter: VendorAdapter, messages: list[HubMessage]) -> dict[str, Any]:
@@ -85,7 +85,7 @@ def test_same_type_blocks_with_distinct_seqs_never_merge() -> None:
         merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(HubResponse(content=[first]))
         merger.apply(HubResponse(content=[second]))
-        result = merger.build()
+        result = merger.result
         assert len(result.content) == 2
         assert [block.seq for block in result.content] == [(0, 0), (1, 0)]
 
@@ -95,7 +95,7 @@ def test_same_type_complete_blocks_without_indexes_are_appended() -> None:
     merger.apply(HubResponse(content=[TextBlock(text="first")]))
     merger.apply(HubResponse(content=[TextBlock(text="second")]))
 
-    result = merger.build()
+    result = merger.result
     texts = []
     for block in result.content:
         assert isinstance(block, TextBlock)

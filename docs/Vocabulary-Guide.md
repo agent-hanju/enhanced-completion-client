@@ -93,7 +93,7 @@ AnnotationBlock.target_seq도 동일한 규칙으로 변환한다. seq는 최종
 
 정상 종료 시 매퍼의 flush가 호출된다. 미완성 태그·종료 태그가 없는 구간을 어떻게
 처리할지는 구현에서 결정하고 테스트한다. 앞 단계의 flush 출력도 다음 변환기의 map을
-통과한다. StreamMerger.build는 seq를 유지하며, 최종 정렬·index 변환은 finalize_response가 한다.
+통과한다. StreamMerger.result는 seq를 유지하며, 최종 정렬·index 변환은 finalize_response가 한다.
 
 ## 실행과 검증
 

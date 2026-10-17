@@ -6,7 +6,7 @@ import copy
 import html
 import logging
 import sys
-from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from dataclasses import asdict
 from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
@@ -17,7 +17,6 @@ from pydantic import BaseModel
 from completion_bridge.errors import (
     ExecutionStateError,
     MappingError,
-    StreamNotFinished,
 )
 from completion_bridge.http.client import AsyncHttpClient, HttpClient
 from completion_bridge.http.sse import SseEvent
@@ -262,7 +261,6 @@ class _StreamBase:
         self._vendor = vendor
         self._pipeline = _Pipeline(vendor, vocabularies)
         self._merger: StreamMerger[HubResponse] = StreamMerger(HubResponse)
-        self._finished = False
         self._closed = False
         self._wire: WireLog | None = None
         self._native: NativeAccumulator[BaseModel] | None = None
@@ -271,22 +269,10 @@ class _StreamBase:
         self._claimed = False
 
     @property
-    def result(self) -> HubResponse:
-        """병합된 최종 결과. 스트림이 끝나기 전에 읽으면 예외.
-
-        블록은 ``seq`` 순서로 놓이고 ``index``가 0부터 채워진다. ``seq``는 비워진다.
-        """
-        if not self._finished:
-            raise StreamNotFinished("stream is still running; iterate it to completion first")
-        return finalize_response(self._merger.build())
-
-    @property
-    def partial(self) -> HubResponse:
-        """지금까지 받은 delta의 병합 결과. 취소 후 남은 것을 읽는 통로.
-
-        :attr:`result`와 같은 방식으로 블록 순서와 ``index``를 확정한다.
-        """
-        return finalize_response(self._merger.build())
+    def result(self) -> HubResponse | None:
+        """마지막 확정 응답. 첫 델타 성공 전에는 None이며 종료 상태와 무관하게 조회한다."""
+        response = self._merger.result
+        return finalize_response(response) if response is not None else None
 
     def _process(self, frame: SseEvent) -> tuple[list[HubResponse], bool]:
         """프레임 하나를 델타 리스트와 종료 여부로 바꾼다.
@@ -307,7 +293,7 @@ class _StreamBase:
         if chunk is None:
             return [], terminal
         self._accumulate(chunk)
-        return self._emit(self._pipeline.map(chunk)), terminal
+        return self._pipeline.map(chunk), terminal
 
     def _accumulate(self, chunk: Any) -> None:
         """원본 응답 누적기에 chunk의 깊은 복사본을 넘긴다.
@@ -388,17 +374,16 @@ class _StreamBase:
                 ),
             )
 
-    def _finish(self) -> list[HubResponse]:
-        """변환기에 남은 델타를 배출하고 병합기에 적용한 목록을 반환한다."""
-        return self._emit(self._pipeline.flush())
+    def _accept(self, delta: HubResponse) -> None:
+        """결과 정렬에 필요한 좌표를 확인한 뒤 델타를 검증·확정한다."""
+        for block in delta.content:
+            if block.seq is None:
+                raise MappingError(f"content block {block.type!r} has no seq")
+        self._merger.apply(delta)
 
-    def _emit(self, deltas: Iterable[HubResponse]) -> list[HubResponse]:
-        """각 델타를 병합기에 적용하고 입력 순서대로 반환한다."""
-        out: list[HubResponse] = []
-        for delta in deltas:
-            self._merger.apply(delta)
-            out.append(delta)
-        return out
+    def _finish(self) -> list[HubResponse]:
+        """변환기에 남은 델타를 반환한다. 호출자가 각 델타를 확정한 직후 전달한다."""
+        return self._pipeline.flush()
 
 
 class AsyncStream(_StreamBase):
@@ -426,12 +411,13 @@ class AsyncStream(_StreamBase):
             async for frame in self._frames:
                 deltas, terminal = self._process(frame)
                 for delta in deltas:
+                    self._accept(delta)
                     yield delta
                 if terminal:
                     break
             for delta in self._finish():
+                self._accept(delta)
                 yield delta
-            self._finished = True
             self._log_end("response")
         except BaseException as exc:
             self._log_end("error" if isinstance(exc, Exception) else "cancelled", exc)
@@ -440,11 +426,12 @@ class AsyncStream(_StreamBase):
             await self._release(sys.exception())
 
     async def aclose(self) -> None:
-        """스트림을 끊는다. 매퍼를 flush해 부분 결과를 :attr:`partial`에 남긴다."""
+        """스트림을 끊는다. 매퍼를 flush해 부분 결과를 :attr:`result`에 남긴다."""
         if self._closed:
             return
         try:
-            self._finish()
+            for delta in self._finish():
+                self._accept(delta)
         except Exception as exc:
             self._log_end("error", exc)
             raise
@@ -492,11 +479,14 @@ class SyncStream(_StreamBase):
         try:
             for frame in self._frames:
                 deltas, terminal = self._process(frame)
-                yield from deltas
+                for delta in deltas:
+                    self._accept(delta)
+                    yield delta
                 if terminal:
                     break
-            yield from self._finish()
-            self._finished = True
+            for delta in self._finish():
+                self._accept(delta)
+                yield delta
             self._log_end("response")
         except BaseException as exc:
             self._log_end("error" if isinstance(exc, Exception) else "cancelled", exc)
@@ -509,7 +499,8 @@ class SyncStream(_StreamBase):
         if self._closed:
             return
         try:
-            self._finish()
+            for delta in self._finish():
+                self._accept(delta)
         except Exception as exc:
             self._log_end("error", exc)
             raise
@@ -746,7 +737,7 @@ class Bridge(_BridgeBase):
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         request_id: str | None = None,
         **params: Any,
-    ) -> HubResponse:
+    ) -> HubResponse | None:
         """스트림을 끝까지 돌려 병합 결과만 돌려준다."""
         stream = self.stream(
             messages,
@@ -896,7 +887,7 @@ class SyncBridge(_BridgeBase):
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
         request_id: str | None = None,
         **params: Any,
-    ) -> HubResponse:
+    ) -> HubResponse | None:
         """동기 스트림을 끝까지 소비하고 병합된 최종 허브 응답을 반환한다."""
         stream = self.stream(
             messages,

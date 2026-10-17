@@ -251,7 +251,7 @@ def merge_response(scenario: Scenario) -> HubResponse:
             merger.apply(delta)
     for delta in mapper.flush():
         merger.apply(delta)
-    return finalize_response(merger.build())
+    return finalize_response(merger.result)
 
 
 def bridge(adapter: VendorAdapter) -> SyncBridge:

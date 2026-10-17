@@ -27,10 +27,7 @@ class _ResponseStream(Protocol):
     """반복 실행에서 사용하는 모델 스트림의 결과와 수명 관리 계약."""
 
     @property
-    def partial(self) -> HubResponse: ...
-
-    @property
-    def result(self) -> HubResponse: ...
+    def result(self) -> HubResponse | None: ...
 
     def __aiter__(self) -> AsyncIterator[HubResponse]: ...
 
@@ -193,15 +190,18 @@ class RuntimeExecution:
                     current_operation_id.reset(token)
                 try:
                     async for delta in stream:
-                        self.partial.active_response = stream.partial.model_copy(deep=True)
+                        self.partial.active_response = stream.result
                         yield delta
-                    response = stream.result.model_copy(deep=True)
+                    response = stream.result
                 except CompletionBridgeError:
                     failure_reported = True
                     raise
                 finally:
                     await stream.aclose()
-                    self.partial.active_response = stream.partial.model_copy(deep=True)
+                    self.partial.active_response = stream.result
+                if response is None:
+                    self.partial.status = "completed"
+                    break
                 self.partial.responses.append(response)
                 self.partial.active_response = None
                 self.partial.generated_messages.append(HubMessage.of_response(response))

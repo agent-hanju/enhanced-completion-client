@@ -1,0 +1,135 @@
+{
+  "python": "3.14.6 (main, Jul 18 2026, 17:08:46) [MSC v.1944 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "baseline": "ca14949",
+  "repeat": 5,
+  "number": 10,
+  "results": {
+    "text_100_deltas_8_items": {
+      "yield": {
+        "number": 10,
+        "apply_ms": 1.0316,
+        "apply_result_ms": 1.0765,
+        "apply_peak_kib": 8.3,
+        "apply_result_peak_kib": 21.8,
+        "result_ms": 0.03
+      },
+      "model": {
+        "number": 10,
+        "apply_ms": 12.0115,
+        "apply_result_ms": 12.1474,
+        "apply_peak_kib": 47.2,
+        "apply_result_peak_kib": 47.2,
+        "result_ms": 0.0635
+      }
+    },
+    "nested_depth20_30_deltas": {
+      "yield": {
+        "number": 10,
+        "apply_ms": 5.8322,
+        "apply_result_ms": 6.0366,
+        "apply_peak_kib": 33.6,
+        "apply_result_peak_kib": 62.8,
+        "result_ms": 0.092
+      },
+      "model": {
+        "number": 10,
+        "apply_ms": 17.4391,
+        "apply_result_ms": 17.787,
+        "apply_peak_kib": 119.2,
+        "apply_result_peak_kib": 119.2,
+        "result_ms": 0.1393
+      }
+    },
+    "wide_1000_items": {
+      "yield": {
+        "number": 10,
+        "apply_ms": 6.4547,
+        "apply_result_ms": 10.4049,
+        "apply_peak_kib": 461.6,
+        "apply_result_peak_kib": 2079.3,
+        "result_ms": 3.7642
+      },
+      "model": {
+        "number": 10,
+        "apply_ms": 15.8444,
+        "apply_result_ms": 21.322,
+        "apply_peak_kib": 2188.1,
+        "apply_result_peak_kib": 2483.7,
+        "result_ms": 5.3069
+      }
+    },
+    "primitive_10000_items": {
+      "yield": {
+        "number": 10,
+        "apply_ms": 0.9781,
+        "apply_result_ms": 2.9079,
+        "apply_peak_kib": 85.3,
+        "apply_result_peak_kib": 246.5,
+        "result_ms": 1.8417
+      },
+      "model": {
+        "number": 10,
+        "apply_ms": 10.7186,
+        "apply_result_ms": 12.6118,
+        "apply_peak_kib": 3053.9,
+        "apply_result_peak_kib": 3053.9,
+        "result_ms": 2.5767
+      }
+    },
+    "growing_100_deltas": {
+      "yield": {
+        "number": 1,
+        "apply_ms": 1.0994,
+        "apply_result_ms": 1.5945,
+        "apply_peak_kib": 49.8,
+        "apply_result_peak_kib": 211.2,
+        "result_ms": 0.3765
+      },
+      "model": {
+        "number": 1,
+        "apply_ms": 63.1974,
+        "apply_result_ms": 75.4875,
+        "apply_peak_kib": 426.9,
+        "apply_result_peak_kib": 426.9,
+        "result_ms": 0.5294
+      }
+    },
+    "growing_300_deltas": {
+      "yield": {
+        "number": 1,
+        "apply_ms": 3.2701,
+        "apply_result_ms": 5.6048,
+        "apply_peak_kib": 138.6,
+        "apply_result_peak_kib": 623.6,
+        "result_ms": 1.0661
+      },
+      "model": {
+        "number": 1,
+        "apply_ms": 586.8898,
+        "apply_result_ms": 588.8249,
+        "apply_peak_kib": 1231.1,
+        "apply_result_peak_kib": 1231.1,
+        "result_ms": 2.2935
+      }
+    },
+    "growing_1000_deltas": {
+      "yield": {
+        "number": 1,
+        "apply_ms": 11.9086,
+        "apply_result_ms": 16.5373,
+        "apply_peak_kib": 461.7,
+        "apply_result_peak_kib": 2079.4,
+        "result_ms": 5.8107
+      },
+      "model": {
+        "number": 1,
+        "apply_ms": 6582.0165,
+        "apply_result_ms": 6672.7067,
+        "apply_peak_kib": 4084.1,
+        "apply_result_peak_kib": 4084.1,
+        "result_ms": 8.0563
+      }
+    }
+  }
+}

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+import pytest
+from pydantic import BaseModel, Field, ValidationError
 
 from completion_bridge import (
     AnnotationBlock,
@@ -22,55 +23,7 @@ from completion_bridge import (
     Usage,
     register_block,
 )
-from completion_bridge.streaming.merge import _IndexedList
 from completion_bridge.streaming.metadata import STREAM_INDEX, STREAM_OVERWRITE
-
-
-class TestFixedIndexedList:
-    def test_append_registers_dictionary_without_rebuilding(self) -> None:
-        acc = _IndexedList()
-        first = acc.get_or_create("index", 0)
-        first["index"] = 0
-        second = {"index": 1, "text": "Hello"}
-        acc.append(second)
-        assert acc._key_name == "index"
-        assert acc._lookup[0] is first
-        assert acc._lookup[1] is second
-        assert acc.get_or_create("index", 1) is second
-        duplicate = {"index": 1, "text": "other"}
-        acc.append(duplicate)
-        assert acc.get_or_create("index", 1) is second
-
-    def test_initial_dictionaries_are_indexed_once(self) -> None:
-        first = {"index": 0}
-        acc = _IndexedList()
-        acc.append("plain")
-        acc.append(first)
-        assert acc.get_or_create("index", 0) is first
-        assert acc.items == ["plain", first]
-
-    def test_missing_identity_does_not_reset_existing_lookup(self) -> None:
-        acc = _IndexedList()
-        first = acc.get_or_create("index", 0)
-        unkeyed = acc.get_or_create("index", None)
-        anonymous = acc.get_or_create(None, None)
-        acc.append(42)
-        assert acc._key_name == "index"
-        assert acc._lookup[0] is first
-        assert acc.get_or_create("index", 0) is first
-        assert unkeyed is not anonymous
-        assert len(acc.items) == 4
-
-    def test_changed_identity_field_is_rejected_without_mutation(self) -> None:
-        import pytest
-
-        acc = _IndexedList()
-        first = acc.get_or_create("index", 0)
-        with pytest.raises(ValueError, match="식별 필드"):
-            acc.get_or_create("id", 1)
-        assert acc._key_name == "index"
-        assert acc.items == [first]
-        assert acc._lookup == {0: first}
 
 
 class TestNested:
@@ -78,7 +31,7 @@ class TestNested:
         merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(HubResponse(usage=Usage(input_tokens=10)))
         merger.apply(HubResponse(usage=Usage(output_tokens=4)))
-        usage = merger.build().usage
+        usage = merger.result.usage
         assert usage is not None
         assert (usage.input_tokens, usage.output_tokens) == (10, 4)
 
@@ -87,7 +40,7 @@ class TestNested:
         merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(first)
         merger.apply(HubResponse(usage=Usage(native={"output_tokens": 4, "cache": {"read": 2}})))
-        usage = merger.build().usage
+        usage = merger.result.usage
         assert usage is not None
         assert usage.native == {"input_tokens": 10, "output_tokens": 4, "cache": {"read": 2}}
         assert first.usage is not None
@@ -99,7 +52,7 @@ class TestHubResponse:
         merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(HubResponse(role="assistant", content=[TextBlock(text="Hel", seq=(0, 0))]))
         merger.apply(HubResponse(content=[TextBlock(text="lo", seq=(0, 0))]))
-        built = merger.build()
+        built = merger.result
         assert built.role == "assistant"
         assert built.text == "Hello"
         assert len(built.content) == 1
@@ -109,13 +62,13 @@ class TestHubResponse:
         merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(HubResponse(content=[TextBlock(text="a", seq=(0, 0))]))
         merger.apply(HubResponse(content=[TextBlock(text="b", seq=(0, 0))]))
-        assert merger.build().content[0].type == "text"
+        assert merger.result.content[0].type == "text"
 
     def test_thinking_and_text_stay_separate(self) -> None:
         merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(HubResponse(content=[ThinkingBlock(thinking="why", seq=(-1, 0))]))
         merger.apply(HubResponse(content=[TextBlock(text="because", seq=(0, 0))]))
-        built = merger.build()
+        built = merger.result
         assert [b.type for b in built.content] == ["thinking", "text"]
         assert built.text == "because"
 
@@ -125,7 +78,7 @@ class TestHubResponse:
             HubResponse(content=[ToolUseBlock(id="c1", name="get", input_json='{"q', seq=(1, 0))])
         )
         merger.apply(HubResponse(content=[ToolUseBlock(input_json='":2}', seq=(1, 0))]))
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         assert isinstance(block, ToolUseBlock)
         assert block.id == "c1"
         assert block.name == "get"
@@ -140,7 +93,7 @@ class TestHubResponse:
         merger: StreamMerger = StreamMerger(HubResponse)
         for fragment in ('{"term', '":"', '하이비"}'):
             merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, seq=(0, 0))]))
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         assert isinstance(block, ToolUseBlock)
         assert block.input_json == '{"term":"하이비"}'
         assert block.input == {"term": "하이비"}
@@ -150,7 +103,7 @@ class TestHubResponse:
         merger: StreamMerger = StreamMerger(HubResponse)
         for fragment in ('{"term', '":"'):
             merger.apply(HubResponse(content=[ToolUseBlock(input_json=fragment, seq=(0, 0))]))
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         assert isinstance(block, ToolUseBlock)
         assert block.input_json == '{"term":"'
         assert block.input is None
@@ -158,7 +111,7 @@ class TestHubResponse:
     def test_build_is_repeatable(self) -> None:
         merger: StreamMerger = StreamMerger(HubResponse)
         merger.apply(HubResponse(content=[TextBlock(text="x", seq=(0, 0))]))
-        assert merger.build().text == merger.build().text == "x"
+        assert merger.result.text == merger.result.text == "x"
 
 
 class TestLookupIndex:
@@ -168,7 +121,7 @@ class TestLookupIndex:
             merger.apply(HubResponse(content=[TextBlock(seq=(index,), text="a")]))
         for index in range(1000):
             merger.apply(HubResponse(content=[TextBlock(seq=(index,), text="b")]))
-        built = merger.build()
+        built = merger.result
         assert [block.seq for block in built.content] == [(i,) for i in reversed(range(1000))]
         assert all(isinstance(block, TextBlock) and block.text == "ab" for block in built.content)
 
@@ -178,19 +131,19 @@ class TestStringFragments:
         merger = StreamMerger(HubResponse)
         merger.apply(HubResponse(content=[TextBlock(seq=(0,), text="a")]))
         merger.apply(HubResponse(content=[TextBlock(seq=(0,), text="b")]))
-        first = merger.build()
+        first = merger.result
         assert first.text == "ab"
         assert isinstance(first.content[0], TextBlock)
         first.content[0].text = "changed"
         merger.apply(HubResponse(content=[TextBlock(seq=(0,), text="c")]))
-        assert merger.build().text == "abc"
-        assert merger.build().text == "abc"
+        assert merger.result.text == "abc"
+        assert merger.result.text == "abc"
 
     def test_arguments_parse_only_the_combined_value(self) -> None:
         merger = StreamMerger(HubResponse)
         for fragment in ('{"query":', '"검색어"', "}"):
             merger.apply(HubResponse(content=[ToolUseBlock(seq=(0,), input_json=fragment)]))
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         assert isinstance(block, ToolUseBlock)
         assert block.input_json == '{"query":"검색어"}'
         assert block.input == {"query": "검색어"}
@@ -202,7 +155,7 @@ class TestResponseRules:
         merger.apply(HubResponse(id="a", model="first", role="assistant"))
         merger.apply(HubResponse(id="b", model="second", stop_reason="done"))
         merger.apply(None)
-        built = merger.build()
+        built = merger.result
         assert (built.id, built.model, built.role, built.stop_reason) == (
             "b",
             "second",
@@ -214,7 +167,7 @@ class TestResponseRules:
         merger = StreamMerger(HubResponse)
         merger.apply(HubResponse(usage=Usage(input_tokens=10, output_tokens=2)))
         merger.apply(HubResponse(usage=Usage(output_tokens=5)))
-        assert merger.build().usage == Usage(input_tokens=10, output_tokens=5)
+        assert merger.result.usage == Usage(input_tokens=10, output_tokens=5)
 
     def test_grounding_indexes_are_independent_per_block_and_field(self) -> None:
         merger = StreamMerger(HubResponse)
@@ -231,7 +184,7 @@ class TestResponseRules:
                     ]
                 )
             )
-        first, second = merger.build().content
+        first, second = merger.result.content
         assert isinstance(first, GroundingBlock) and isinstance(second, GroundingBlock)
         assert len(first.sources) == len(first.supports) == 1
         assert first.sources[0].title == first.supports[0].text == "b"
@@ -245,7 +198,7 @@ class TestResponseRules:
         merger.apply(
             HubResponse(content=[AudioBlock(seq=(0,), data="b", transcript="y", native={"new": 2})])
         )
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         assert isinstance(block, AudioBlock)
         assert (block.data, block.transcript, block.native) == ("ab", "xy", {"new": 2})
 
@@ -260,7 +213,7 @@ class TestResponseRules:
         merger = StreamMerger(HubResponse)
         for value in ("a", "b"):
             merger.apply(HubResponse(content=[Custom(seq=(0,), text=value, count=1, label=value)]))
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         assert isinstance(block, Custom)
         assert (block.text, block.count, block.label) == ("ab", 2, "b")
 
@@ -272,7 +225,7 @@ class TestResponseRules:
         merger = StreamMerger(HubResponse)
         merger.apply(first)
         merger.apply(second)
-        assert merger.build().text == "ab"
+        assert merger.result.text == "ab"
         assert first.model_dump() == before_first
         assert second.model_dump() == before_second
 
@@ -283,7 +236,7 @@ class TestResponseRules:
             for depth in range(20):
                 child = ToolResultBlock(seq=(0,), tool_use_id=str(depth), blocks=[child])
             merger.apply(HubResponse(content=[child]))
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         for _ in range(20):
             assert isinstance(block, ToolResultBlock)
             assert len(block.blocks) == 1
@@ -295,7 +248,7 @@ class TestResponseRules:
         merger = StreamMerger(HubResponse)
         for text in ("first", "second"):
             merger.apply(HubResponse(content=[AnnotationBlock(seq=(0,), text=text)]))
-        block = merger.build().content[0]
+        block = merger.result.content[0]
         assert isinstance(block, AnnotationBlock)
         assert block.text == "second"
 
@@ -320,37 +273,37 @@ class TestScalarRules:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(text="Hello"))
         merger.apply(Envelope(text=" world"))
-        assert merger.build().text == "Hello world"
+        assert merger.result.text == "Hello world"
 
     def test_numbers_add(self) -> None:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(count=3))
         merger.apply(Envelope(count=4))
-        assert merger.build().count == 7
+        assert merger.result.count == 7
 
     def test_overwrite_marker_replaces(self) -> None:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(ident="a"))
         merger.apply(Envelope(ident="b"))
-        assert merger.build().ident == "b"
+        assert merger.result.ident == "b"
 
     def test_literal_field_overwrites_without_marker(self) -> None:
         """Literal은 합법적인 값이 하나뿐이라 이어붙이기가 맞을 수 없다."""
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(kind="a"))
         merger.apply(Envelope(kind="a"))
-        assert merger.build().kind == "a"
+        assert merger.result.kind == "a"
 
     def test_none_delta_leaves_value_alone(self) -> None:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(text="kept"))
         merger.apply(Envelope(count=1))
-        assert merger.build().text == "kept"
+        assert merger.result.text == "kept"
 
     def test_apply_none_is_a_noop(self) -> None:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(None)
-        assert merger.build().text is None
+        assert merger.result is None
 
 
 class TestListRules:
@@ -358,13 +311,13 @@ class TestListRules:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(tags=["a"]))
         merger.apply(Envelope(tags=["b"]))
-        assert merger.build().tags == ["a", "b"]
+        assert merger.result.tags == ["a", "b"]
 
     def test_model_list_merges_by_index(self) -> None:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(items=[Item(index=0, name="get", args='{"a')]))
         merger.apply(Envelope(items=[Item(index=0, args='":1}')]))
-        built = merger.build()
+        built = merger.result
         assert len(built.items) == 1
         assert built.items[0].name == "get"
         assert built.items[0].args == '{"a":1}'
@@ -374,7 +327,7 @@ class TestListRules:
         merger.apply(Envelope(items=[Item(index=0, args="x")]))
         merger.apply(Envelope(items=[Item(index=1, args="y")]))
         merger.apply(Envelope(items=[Item(index=0, args="z")]))
-        built = merger.build()
+        built = merger.result
         assert [i.args for i in built.items] == ["xz", "y"]
 
     def test_arrival_order_is_preserved(self) -> None:
@@ -382,7 +335,7 @@ class TestListRules:
         merger: StreamMerger[Envelope] = StreamMerger(Envelope)
         merger.apply(Envelope(items=[Item(index=5, args="first")]))
         merger.apply(Envelope(items=[Item(index=2, args="second")]))
-        assert [i.args for i in merger.build().items] == ["first", "second"]
+        assert [i.args for i in merger.result.items] == ["first", "second"]
 
 
 class TestDiscussion:
@@ -403,7 +356,7 @@ class TestDiscussion:
         merger.apply(Discussion(conversation=[Turn(index=2, name="a", text="재답변")]))
         merger.apply(Discussion(conclusion="최종 "))
         merger.apply(Discussion(conclusion="결론"))
-        result = merger.build()
+        result = merger.result
         assert result.conversation == [
             Turn(index=0, name="a", text="첫 발언"),
             Turn(index=1, name="b", text="반론"),
@@ -424,7 +377,113 @@ class TestDiscussion:
         merger = StreamMerger(Node)
         merger.apply(first)
         merger.apply(second)
-        current = merger.build().child
+        current = merger.result.child
         for _ in range(1499):
-            current = current["child"]
-        assert current["text"] == "ab"
+            current = current.child
+        assert current.text == "ab"
+
+
+class TestExplicitDfsTasks:
+    def test_duplicate_items_finish_nested_merge_in_arrival_order(self) -> None:
+        class Child(BaseModel):
+            text: str = "default"
+
+        class Entry(BaseModel):
+            index: int
+            child: Child
+
+        class Root(BaseModel):
+            items: list[Entry]
+
+        merger = StreamMerger(Root)
+        merger.apply(Root(items=[
+            Entry(index=0, child=Child(text="first")),
+            Entry(index=0, child=Child()),
+            Entry(index=0, child=Child(text="last")),
+        ]))
+        assert merger.result.items[0].child.text == "firstlast"
+
+    def test_extra_model_replaces_previous_value_after_child_completion(self) -> None:
+        class Extra(BaseModel):
+            text: str
+            items: list[Item]
+
+        class Root(BaseModel):
+            model_config = {"extra": "allow"}
+
+        merger = StreamMerger(Root)
+        for text in ("old", "new"):
+            merger.apply(Root(detail=Extra(text=text, items=[
+                Item(index=0, args="a"), Item(index=0, args="b"),
+            ])))
+        assert merger.result.model_dump() == {
+            "detail": {"text": "new", "items": [{"index": 0, "name": "", "args": "ab"}]}
+        }
+
+
+class TestAtomicModelCommit:
+    def test_first_validation_failure_keeps_none(self) -> None:
+        class RequiredNullable(BaseModel):
+            value: str | None
+
+        merger = StreamMerger(RequiredNullable)
+        with pytest.raises(ValidationError):
+            merger.apply(RequiredNullable(value=None))
+        assert merger.result is None
+
+    def test_validation_failure_keeps_previous_model_and_can_continue(self) -> None:
+        class Limited(BaseModel):
+            text: str = Field(default="", max_length=3)
+            count: int = 0
+
+        merger = StreamMerger(Limited)
+        merger.apply(Limited(text="a", count=1))
+        with pytest.raises(ValidationError):
+            merger.apply(Limited(text="xyz", count=9))
+        assert merger.result == Limited(text="a", count=1)
+        merger.apply(Limited(text="b", count=2))
+        assert merger.result == Limited(text="ab", count=3)
+
+    def test_identity_failure_discards_other_field_changes(self) -> None:
+        class ByIndex(BaseModel):
+            index: int
+            text: str = ""
+
+        class ById(BaseModel):
+            id: int = Field(json_schema_extra=STREAM_INDEX)
+            text: str = ""
+
+        class Root(BaseModel):
+            text: str = ""
+            items: list[ByIndex | ById] = Field(default_factory=list)
+
+        merger = StreamMerger(Root)
+        first = Root(text="first", items=[ByIndex(index=0, text="a")])
+        merger.apply(first)
+        with pytest.raises(ValueError, match="식별 필드"):
+            merger.apply(Root(text="bad", items=[ById(id=1)]))
+        assert merger.result == first
+
+    def test_result_and_inputs_do_not_share_mutable_data(self) -> None:
+        first = HubResponse(content=[TextBlock(seq=(0,), text="a", native={"nested": [1]})])
+        merger = StreamMerger(HubResponse)
+        merger.apply(first)
+        first.content[0].native["nested"].append(2)
+        result = merger.result
+        assert result is not None
+        result.content[0].native["nested"].append(3)
+        assert merger.result.content[0].native == {"nested": [1]}
+
+
+def test_dictionary_identity_can_be_completed_by_a_later_model() -> None:
+    class RequiredItem(BaseModel):
+        index: int
+        text: str
+
+    class Root(BaseModel):
+        items: list[Any]
+
+    merger = StreamMerger(Root)
+    merger.apply(Root(items=[{"index": 0}]))
+    merger.apply(Root(items=[RequiredItem(index=0, text="completed")]))
+    assert merger.result.items == [RequiredItem(index=0, text="completed")]

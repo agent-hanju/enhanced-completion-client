@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import httpx
 import pytest
 import respx
+from pydantic import Field, ValidationError
 
 from completion_bridge import (
     Bridge,
     HubMessage,
-    StreamNotFinished,
+    HubResponse,
+    MappingError,
     SyncBridge,
     TextBlock,
     ToolDefinition,
     ToolResultBlock,
     ToolUseBlock,
     TransportError,
+    register_block,
 )
 from completion_bridge.vendors import chat_completions
 
@@ -233,17 +237,16 @@ class TestAsyncStreaming:
         await bridge.aclose()
 
     @respx.mock
-    async def test_result_before_completion_raises(self) -> None:
+    async def test_result_is_none_before_first_delta(self) -> None:
         respx.post(URL).mock(return_value=httpx.Response(200, content=sse(delta(content="x"))))
         bridge = make_bridge()
         stream = bridge.stream(["hi"])
-        with pytest.raises(StreamNotFinished):
-            _ = stream.result
+        assert stream.result is None
         await stream.aclose()
         await bridge.aclose()
 
     @respx.mock
-    async def test_partial_is_available_after_close(self) -> None:
+    async def test_result_is_available_after_close(self) -> None:
         respx.post(URL).mock(
             return_value=httpx.Response(200, content=sse(delta(content="a"), delta(content="b")))
         )
@@ -252,7 +255,7 @@ class TestAsyncStreaming:
         async for _ in stream:
             break
         await stream.aclose()
-        assert stream.partial.text == "a"
+        assert stream.result.text == "a"
         await bridge.aclose()
 
     @respx.mock
@@ -318,3 +321,74 @@ class TestRoundTrip:
             {"role": "user", "content": "추가 질문"},
         ]
         await bridge.aclose()
+
+
+class LimitedStreamText(TextBlock):
+    type: Literal["limited_stream_test"] = "limited_stream_test"
+    text: str = Field(default="", max_length=2)
+
+
+register_block(LimitedStreamText)
+
+
+def limited_deltas():
+    return [HubResponse(content=[LimitedStreamText(seq=(0,), text=t)]) for t in "abc"]
+
+
+@pytest.mark.parametrize("flush", [False, True])
+@respx.mock
+async def test_async_commits_and_delivers_each_delta_before_later_failure(monkeypatch, flush):
+    respx.post(URL).mock(return_value=httpx.Response(200, content=sse(delta(content="ignored"))))
+    bridge = make_bridge()
+    stream = bridge.stream(["hi"])
+    monkeypatch.setattr(stream._pipeline, "map", lambda chunk: [] if flush else limited_deltas())
+    monkeypatch.setattr(stream._pipeline, "flush", lambda: limited_deltas() if flush else [])
+    assert stream.result is None
+    iterator = stream.__aiter__()
+    assert (await anext(iterator)).text == "a"
+    assert stream.result.text == "a"
+    assert (await anext(iterator)).text == "b"
+    assert stream.result.text == "ab"
+    with pytest.raises(ValidationError):
+        await anext(iterator)
+    assert stream.result.text == "ab"
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("flush", [False, True])
+@respx.mock
+def test_sync_commits_and_delivers_each_delta_before_later_failure(monkeypatch, flush):
+    respx.post(URL).mock(return_value=httpx.Response(200, content=sse(delta(content="ignored"))))
+    with SyncBridge(
+        vendor=chat_completions, base_url=BASE, model="luxia", http_client=httpx.Client()
+    ) as bridge:
+        stream = bridge.stream(["hi"])
+        monkeypatch.setattr(
+            stream._pipeline, "map", lambda chunk: [] if flush else limited_deltas()
+        )
+        monkeypatch.setattr(stream._pipeline, "flush", lambda: limited_deltas() if flush else [])
+        assert stream.result is None
+        iterator = iter(stream)
+        assert next(iterator).text == "a"
+        assert stream.result.text == "a"
+        assert next(iterator).text == "b"
+        assert stream.result.text == "ab"
+        with pytest.raises(ValidationError):
+            next(iterator)
+        assert stream.result.text == "ab"
+
+
+@respx.mock
+async def test_missing_seq_is_rejected_before_commit(monkeypatch):
+    respx.post(URL).mock(return_value=httpx.Response(200, content=sse(delta(content="ignored"))))
+    bridge = make_bridge()
+    stream = bridge.stream(["hi"])
+    monkeypatch.setattr(stream._pipeline, "map", lambda chunk: [HubResponse(
+        content=[TextBlock(seq=(0,), text="safe")]
+    ), HubResponse(content=[TextBlock(text="missing seq")])])
+    iterator = stream.__aiter__()
+    assert (await anext(iterator)).text == "safe"
+    with pytest.raises(MappingError, match="no seq"):
+        await anext(iterator)
+    assert stream.result.text == "safe"
+    await bridge.aclose()

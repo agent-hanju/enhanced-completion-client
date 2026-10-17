@@ -40,19 +40,19 @@ class Stream:
 
     def __init__(self, response: HubResponse, failure: Exception | None = None):
         self.response = response
-        self.partial = HubResponse()
+        self._result: HubResponse | None = None
         self.failure = failure
         self.closed = False
 
     async def __aiter__(self):
-        self.partial = self.response
+        self._result = self.response
         yield self.response
         if self.failure:
             raise self.failure
 
     @property
     def result(self):
-        return self.response
+        return self._result
 
     async def aclose(self):
         self.closed = True
