@@ -124,7 +124,7 @@ def _summary_slot(event: dict[str, Any]) -> Seq:
     return normalize_seq(coordinates, _SEQ_WIDTH)
 
 
-class _ToHub:
+class _ToHub(StreamMapper[dict[str, Any], HubResponse]):
     """Responses 이벤트를 허브 델타로 바꾼다."""
 
     def __init__(self) -> None:

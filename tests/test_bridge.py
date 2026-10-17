@@ -8,13 +8,13 @@ from typing import Literal
 import httpx
 import pytest
 import respx
-from pydantic import Field, ValidationError
 
 from completion_bridge import (
     Bridge,
     HubMessage,
     HubResponse,
     MappingError,
+    StreamMergeError,
     SyncBridge,
     TextBlock,
     ToolDefinition,
@@ -325,7 +325,12 @@ class TestRoundTrip:
 
 class LimitedStreamText(TextBlock):
     type: Literal["limited_stream_test"] = "limited_stream_test"
-    text: str = Field(default="", max_length=2)
+    text: str = ""
+
+    def __setattr__(self, name, value):
+        if name == "text" and value == "abc":
+            raise RuntimeError("text merge failed")
+        super().__setattr__(name, value)
 
 
 register_block(LimitedStreamText)
@@ -337,7 +342,7 @@ def limited_deltas():
 
 @pytest.mark.parametrize("flush", [False, True])
 @respx.mock
-async def test_async_commits_and_delivers_each_delta_before_later_failure(monkeypatch, flush):
+async def test_async_delivers_each_delta_and_reports_failure_state(monkeypatch, flush):
     respx.post(URL).mock(return_value=httpx.Response(200, content=sse(delta(content="ignored"))))
     bridge = make_bridge()
     stream = bridge.stream(["hi"])
@@ -349,15 +354,18 @@ async def test_async_commits_and_delivers_each_delta_before_later_failure(monkey
     assert stream.result.text == "a"
     assert (await anext(iterator)).text == "b"
     assert stream.result.text == "ab"
-    with pytest.raises(ValidationError):
+    with pytest.raises(StreamMergeError) as caught:
         await anext(iterator)
     assert stream.result.text == "ab"
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert caught.value.delta.text == "c"
+    assert caught.value.result.text == "ab"
     await bridge.aclose()
 
 
 @pytest.mark.parametrize("flush", [False, True])
 @respx.mock
-def test_sync_commits_and_delivers_each_delta_before_later_failure(monkeypatch, flush):
+def test_sync_delivers_each_delta_and_reports_failure_state(monkeypatch, flush):
     respx.post(URL).mock(return_value=httpx.Response(200, content=sse(delta(content="ignored"))))
     with SyncBridge(
         vendor=chat_completions, base_url=BASE, model="luxia", http_client=httpx.Client()
@@ -373,13 +381,16 @@ def test_sync_commits_and_delivers_each_delta_before_later_failure(monkeypatch, 
         assert stream.result.text == "a"
         assert next(iterator).text == "b"
         assert stream.result.text == "ab"
-        with pytest.raises(ValidationError):
+        with pytest.raises(StreamMergeError) as caught:
             next(iterator)
         assert stream.result.text == "ab"
+        assert isinstance(caught.value.__cause__, RuntimeError)
+        assert caught.value.delta.text == "c"
+        assert caught.value.result.text == "ab"
 
 
 @respx.mock
-async def test_missing_seq_is_rejected_before_commit(monkeypatch):
+async def test_missing_seq_is_reported_with_previous_response(monkeypatch):
     respx.post(URL).mock(return_value=httpx.Response(200, content=sse(delta(content="ignored"))))
     bridge = make_bridge()
     stream = bridge.stream(["hi"])
@@ -388,7 +399,9 @@ async def test_missing_seq_is_rejected_before_commit(monkeypatch):
     ), HubResponse(content=[TextBlock(text="missing seq")])])
     iterator = stream.__aiter__()
     assert (await anext(iterator)).text == "safe"
-    with pytest.raises(MappingError, match="no seq"):
+    with pytest.raises(StreamMergeError) as caught:
         await anext(iterator)
     assert stream.result.text == "safe"
+    assert isinstance(caught.value.__cause__, MappingError)
+    assert caught.value.result.text == "safe"
     await bridge.aclose()

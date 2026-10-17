@@ -59,7 +59,7 @@ run = execution.result
 | `run.messages` | 입력과 생성 메시지를 합친 대화 이력 |
 | `run.generated_messages` | 이번 실행에서 생성한 assistant·tool 메시지 |
 | `run.responses` | 완료한 요청별 `HubResponse`와 사용량 |
-| `run.active_response` | 완료 전의 부분 모델 응답 |
+| `run.active_response` | 조회 시에만 복사하는 현재 모델 응답. 종료 후에는 마지막 스냅샷 |
 | `run.tasks` | 호출 순서의 `list[HitlDraft]`; 실제 작업은 각 `draft.task` |
 | `run.status` | `completed`, `hitl_required`, `limit_reached`, `error`, `cancelled`; 진행 중에는 `pending`/`running` |
 | `run.final_result` | 콜백이 명시적으로 최종 답변으로 지정한 도구 결과 |

@@ -1745,3 +1745,23 @@ class TestDenseLowering:
         function_response = responses_parts[0]["functionResponse"]
         assert function_response["name"] == "lookup"
         assert function_response["id"] == "c1"
+
+
+def test_messages_server_tool_json_delta_keeps_server_model_type() -> None:
+    mapper = messages.to_hub()
+    seed = mapper.map({
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "server_tool_use", "id": "server", "name": "web_search"},
+    })
+    update = mapper.map({
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "input_json_delta", "partial_json": '{"query":"search"}'},
+    })
+    assert isinstance(update[0].content[0], ServerToolBlock)
+    merger = StreamMerger(HubResponse)
+    for delta in [*seed, *update]:
+        merger.apply(delta)
+    block = merger.result.content[0]
+    assert isinstance(block, ServerToolBlock)
+    assert block.input_json == '{"query":"search"}'
+    assert block.model_extra == {}

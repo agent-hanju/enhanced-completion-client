@@ -42,7 +42,7 @@ class BadgeBlock(ContentBlock):
 BADGE_PATH = "/badge"
 
 
-class _BadgeMapper:
+class _BadgeMapper(StreamMapper[HubResponse, HubResponse]):
     """임의의 chunk 경계로 잘린 ``<badge>`` 태그를 ``BadgeBlock``으로 바꾼다.
 
     wire text 블록 하나에서 나온 text 조각과 badge는 그 블록의 ``seq`` 끝에 조각 번호 0, 1,

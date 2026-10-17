@@ -65,7 +65,7 @@ _REPLACED_FIELDS = frozenset({"index", "type", "role", "finish_reason", "stop_re
 _SEQ_WIDTH = 2
 
 
-class _ToHub:
+class _ToHub(StreamMapper[dict[str, Any], HubResponse]):
     """Chat Completions chunk를 허브 델타로 바꾼다.
 
     블록 그룹 최초 등장 순서로 0부터 번호 n을 부여하고 ``seq=(n, -1)``을 쓴다. 연속 채널은 같은

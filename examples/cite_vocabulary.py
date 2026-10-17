@@ -44,7 +44,7 @@ _Key = tuple[str | None, Seq]
 """원래 text 블록의 식별자. ``(vendor, seq)``다."""
 
 
-class _CiteMapper:
+class _CiteMapper(StreamMapper[HubResponse, HubResponse]):
     """허브 델타의 본문에서 인용을 인용 text block으로 바꾼다.
 
     본문이 아닌 블록은 내용을 바꾸지 않는다. 추론과 도구 호출이 그렇다.

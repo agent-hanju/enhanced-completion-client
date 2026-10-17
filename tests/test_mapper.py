@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from completion_bridge import compose, identity_mapper
+import inspect
+
+import pytest
+
+from completion_bridge import StreamMapper, compose, identity_mapper
 
 
-class Doubler:
+class Doubler(StreamMapper[int, int]):
     """1:N 변환. 상태 없음."""
 
     def map(self, delta: int) -> list[int]:
@@ -15,7 +19,7 @@ class Doubler:
         return []
 
 
-class Buffering:
+class Buffering(StreamMapper[str, str]):
     """개행이 올 때까지 모으는 상태 매퍼. 남은 것은 flush로 낸다."""
 
     def __init__(self) -> None:
@@ -36,7 +40,7 @@ class Buffering:
         return [rest]
 
 
-class Upper:
+class Upper(StreamMapper[str, str]):
     def map(self, delta: str) -> list[str]:
         return [delta.upper()]
 
@@ -44,7 +48,7 @@ class Upper:
         return []
 
 
-class TailMarker:
+class TailMarker(StreamMapper[str, str]):
     """자신도 flush에서 값을 내는 매퍼. 순서 검증용."""
 
     def map(self, delta: str) -> list[str]:
@@ -96,3 +100,32 @@ class TestFlushOrder:
         pipeline = compose(Buffering(), Upper())
         assert pipeline.map("a\n") == ["A"]
         assert pipeline.flush() == []
+
+
+def test_stream_mapper_requires_both_methods() -> None:
+    """입력 변환과 잔여 출력 처리를 모두 구현해야 생성할 수 있다."""
+
+    class MapOnly(StreamMapper[int, int]):
+        """잔여 출력 처리를 구현하지 않은 매퍼."""
+
+        def map(self, delta: int) -> list[int]:
+            """입력 값을 그대로 반환한다."""
+            return [delta]
+
+    class FlushOnly(StreamMapper[int, int]):
+        """입력 변환을 구현하지 않은 매퍼."""
+
+        def flush(self) -> list[int]:
+            """빈 잔여 출력을 반환한다."""
+            return []
+
+    for mapper_type in (StreamMapper, MapOnly, FlushOnly):
+        assert inspect.isabstract(mapper_type)
+        with pytest.raises(TypeError, match="abstract"):
+            mapper_type()  # type: ignore[abstract]
+
+
+def test_builtin_mappers_explicitly_inherit_stream_mapper() -> None:
+    """통과 매퍼와 합성 매퍼는 명시적 상속 관계를 가진다."""
+    assert isinstance(identity_mapper(), StreamMapper)
+    assert isinstance(compose(Buffering(), Upper()), StreamMapper)

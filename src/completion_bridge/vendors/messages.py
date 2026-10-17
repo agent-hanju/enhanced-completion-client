@@ -81,7 +81,7 @@ DEFAULT_VERSION = "2023-06-01"
 _SEQ_WIDTH = 1
 
 
-class _ToHub:
+class _ToHub(StreamMapper[dict[str, Any], HubResponse]):
     """Anthropic 이벤트를 허브 델타로 바꾼다.
 
     서버가 준 ``index``를 좌표로 ``seq=(index,)``을 만든다. 병합기가 그 키로 조각을 짝짓는다.
@@ -227,6 +227,8 @@ class _ToHub:
             return self._one(ThinkingBlock(signature=delta.get("signature") or "", **common))
         if kind == "input_json_delta":
             fragment = delta.get("partial_json") or ""
+            if self._kinds.get(seq[0]) in _SERVER_TOOL_USE:
+                return self._one(ServerToolBlock(input_json=fragment, **common))
             return self._one(ToolUseBlock(input_json=fragment, **common))
         if kind == "citations_delta":
             return self._citation(delta.get("citation") or {}, seq)

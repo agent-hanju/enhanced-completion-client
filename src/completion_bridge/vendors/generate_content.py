@@ -157,7 +157,7 @@ def _gemini_media_block(part: dict[str, Any], seq: Seq) -> ContentBlock | None:
 _SEQ_WIDTH = 2
 
 
-class _ToHub:
+class _ToHub(StreamMapper[dict[str, Any], HubResponse]):
     """GenerateContent 응답을 허브 델타로 바꾼다.
 
     이 API는 part 인덱스를 주지 않으므로 어댑터가 0부터 part 번호 n을 만들고 ``seq=(1, n)``을 쓴다.

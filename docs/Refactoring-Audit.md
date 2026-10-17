@@ -17,7 +17,7 @@ AGENTS에서 참조한 전체 guides. 프로젝트 리팩토링과 콜백 기반
 | errors-and-validation | ExecutionStateError와 VendorStreamError를 추가했다. 네트워크 오류는 원인을 유지한 TransportError다. 태그·속성·좌표·호출 상한·중복 호출 ID·콜백 반환 타입 등을 명시적으로 검증한다. |
 | parameters-and-immutability | 선택적 값은 `None` 타입을 명시한다. HubRequest 전체와 콜백 인자·반환 기록을 복사한다. 외부 Task 핸들은 복사하지 않는다. 누적 응답·Run은 실행 상태를 갱신하는 객체이므로 전체를 frozen으로 만들지 않았다. |
 | algorithms | seq 사전식 순서와 기준별 증가 카운터의 불변식·복잡도를 문서화했다. 새로운 수학 알고리즘은 도입하지 않았다. 순서·인용 대상·빈 상태·중복·잘못된 입력은 seq 테스트로 확인한다. |
-| data-structures | 좌표 정규화·StreamMerger·ContentSchema·파서의 순차 호출 조건과 공간·시간 특성을 문서화했다. 스키마 등록과 도구 배치 등록은 검증 후 적용한다. StreamMerger.apply는 후보 검증 후 모델 참조를 교체해 delta별 원자성을 제공한다. |
+| data-structures | 좌표 정규화·StreamMerger·ContentSchema·파서의 순차 호출 조건과 공간·시간 특성을 문서화했다. 스키마 등록과 도구 배치 등록은 검증 후 적용한다. StreamMerger.apply는 best effort로 직접 반영하고 실패 delta·결과·원인을 함께 제공한다. |
 | rest-resource-workflows | REST 서버·DB·트랜잭션은 이 패키지에 없다. 소비 앱에 대한 REST 리소스·DB 변경을 추가하지 않았다. |
 | context7 | 일반 리팩토링·코드 검토는 해당 규칙의 제외 대상이다. 외부 API 계약을 추정으로 변경하지 않았다. |
 | general-interaction | 설명과 새 문서는 한국어로 작성하고 실제 실행 결과와 제한을 구분한다. |

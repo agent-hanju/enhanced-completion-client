@@ -75,18 +75,25 @@ def run(merger_type: Any, deltas: list[BaseModel], build: bool) -> Any:
 
 
 def main() -> None:
-    """기존 yield 구현과 모델 확정 구현의 결과 일치·시간·메모리를 측정한다."""
+    """기존 yield·원자적 모델·best effort 구현의 결과 일치·시간·메모리를 측정한다."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", default="ca14949")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--repeat", type=int, default=5)
-    parser.add_argument("--number", type=int, default=20)
+    parser.add_argument("--number", type=int, default=10)
+    parser.add_argument("--skip-atomic", action="store_true")
     args = parser.parse_args()
     source = subprocess.check_output([
         "git", "show", f"{args.baseline}:src/completion_bridge/streaming/merge.py",
     ]).decode("utf-8")
     variants = {"yield": load_merger("_merge_baseline", source)}
-    variants["model"] = StreamMerger
+    atomic_source = subprocess.check_output([
+        "git", "show", "c841584:src/completion_bridge/streaming/merge.py",
+    ]).decode("utf-8")
+    variants["atomic"] = load_merger("_merge_atomic", atomic_source)
+    variants["best_effort"] = StreamMerger
+    if args.skip_atomic:
+        del variants["atomic"]
     report: dict[str, Any] = {
         "python": sys.version,
         "platform": platform.platform(),

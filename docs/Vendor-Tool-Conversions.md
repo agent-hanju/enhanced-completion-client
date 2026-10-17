@@ -379,10 +379,6 @@ turn 마다 벤더가 보낸 원본 이벤트다. 이것을 정규화한 결과�
           "id": "srvtoolu-1",
           "name": "web_search",
           "input": {}
-        },
-        "kind": "function",
-        "input": {
-          "query": "USD KRW 환율"
         }
       },
       {

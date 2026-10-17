@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Generic, TypeVar
 
 from completion_bridge.models.blocks import ContentBlock, register_block
 
@@ -19,26 +19,21 @@ T = TypeVar("T", contravariant=True)
 R = TypeVar("R")
 
 
-@runtime_checkable
-class StreamMapper(Protocol[T, R]):
-    """입력 델타 하나를 0개 이상의 출력 델타로 바꾼다.
+class StreamMapper(ABC, Generic[T, R]):  # noqa: UP046 - 입력 반공변을 명시적으로 유지한다.
+    """입력 델타 하나를 0개 이상의 출력 델타로 바꾼다."""
 
-    반환이 리스트인 이유는 세 경우를 모두 담기 위해서다. 0개는 버퍼링, 1개는 단순 변환,
-    N개는 분할이다. ``<cite>`` 태그 하나가 본문 조각과 인용 블록 둘로 갈라지는 경우가 N개다.
-
-    상태를 가져도 된다. 그런 매퍼는 파이프라인마다 새 인스턴스여야 한다.
-    """
-
+    @abstractmethod
     def map(self, delta: T) -> list[R]:
         """델타 하나를 변환한다."""
         ...
 
+    @abstractmethod
     def flush(self) -> list[R]:
         """스트림이 끝났을 때 남은 버퍼를 내보낸다."""
         ...
 
 
-class _Identity:
+class _Identity(StreamMapper[Any, Any]):
     """변환 없이 통과시킨다."""
 
     def map(self, delta: Any) -> list[Any]:
@@ -55,7 +50,7 @@ def identity_mapper() -> StreamMapper[Any, Any]:
     return _Identity()
 
 
-class _Composed:
+class _Composed(StreamMapper[Any, Any]):
     """두 매퍼를 하나로 잇는다.
 
     ``flush``의 순서가 계약이다. ``f``의 잔여 버퍼가 ``g``를 거친 다음에 ``g`` 자신의

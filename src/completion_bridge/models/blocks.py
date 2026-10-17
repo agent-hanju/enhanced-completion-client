@@ -17,7 +17,7 @@ import json
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SerializeAsAny, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SerializeAsAny
 
 from completion_bridge.streaming.metadata import STREAM_INDEX, STREAM_OVERWRITE
 
@@ -146,7 +146,8 @@ class ThinkingBlock(ContentBlock):
 class ToolUseBlock(ContentBlock):
     """모델이 요청한 도구 호출.
 
-    ``input_json``은 조각으로 도착하므로 이어붙인다. 파싱은 조립이 끝난 뒤에 한다.
+    ``input_json``은 조각으로 도착하므로 이어붙인다. 생성과 속성 대입 시 JSON 객체이면
+    ``input``을 갱신하며, 조립 중인 JSON은 그대로 보관한다.
     """
 
     # Pydantic 판별 필드의 Literal 재선언으로 기본값과 검증을 유지한다.
@@ -158,11 +159,20 @@ class ToolUseBlock(ContentBlock):
     input: Any | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
     signature: str | None = Field(default=None, json_schema_extra=STREAM_OVERWRITE)
 
-    @model_validator(mode="after")
-    def parse_complete_input(self) -> ToolUseBlock:
+    def __setattr__(self, name: str, value: Any) -> None:
+        """input_json의 일반 속성 대입 후 파싱 가능한 도구 인수를 갱신한다."""
+        super().__setattr__(name, value)
+        if name == "input_json":
+            self._parse_input_json()
+
+    def model_post_init(self, context: Any) -> None:
+        """생성 직후 도구 인수의 파생값을 계산한다. 스키마 검증을 추가로 호출하지 않는다."""
+        self._parse_input_json()
+
+    def _parse_input_json(self) -> None:
         """``input_json``을 파싱해 ``input``에 싣는다.
 
-        블록이 만들어질 때마다 실행되므로 조립 중인 델타에도 적용된다.
+        블록 생성과 input_json 속성 대입 시 실행되므로 조립 중인 값에도 적용된다.
 
         동작:
             ``input_json``이 비어 있거나, JSON으로 파싱되지 않거나, 파싱 결과가 객체가 아니면
@@ -175,19 +185,18 @@ class ToolUseBlock(ContentBlock):
             ``input``은 명시된 필드로 취급되지 않는다.
 
         호출 조건:
-            Pydantic이 호출한다. 직접 부르지 않는다.
+            생성 후 초기화와 input_json 속성 대입에서 호출한다.
         """
         if not self.input_json:
-            return self
+            return
         try:
             parsed = json.loads(self.input_json)
         except json.JSONDecodeError:
-            return self
+            return
         if not isinstance(parsed, dict):
-            return self
+            return
         self.input = parsed
         self.model_fields_set.discard("input")
-        return self
 
 
 class ToolResultBlock(ContentBlock):

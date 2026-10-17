@@ -499,3 +499,31 @@ async def test_final_without_result_is_rejected():
     with pytest.raises(RuntimeErrorWithPartial) as caught:
         await run(Model(call_response()), callback)
     assert isinstance(caught.value.__cause__, ValueError)
+
+
+async def test_active_response_is_copied_only_when_read(monkeypatch):
+    reads = 0
+    original = Stream.result.fget
+
+    def tracked(stream):
+        nonlocal reads
+        reads += 1
+        return original(stream)
+
+    async def burst(stream):
+        for _ in range(100):
+            stream._result = stream.response
+            yield stream.response
+
+    monkeypatch.setattr(Stream, "result", property(tracked))
+    monkeypatch.setattr(Stream, "__aiter__", burst)
+    execution = run(Model(HubResponse(content=[TextBlock(text="final")])), successful)
+    seen = 0
+    async for _ in execution:
+        seen += 1
+        if seen == 1:
+            assert reads == 0
+            assert execution.partial.active_response.text == "final"
+        assert reads == 1
+    assert seen == 100
+    assert reads == 3  # 요청한 조회 1회, 종료 응답과 종료 스냅샷 각 1회

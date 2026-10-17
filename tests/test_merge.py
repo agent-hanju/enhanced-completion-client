@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import pytest
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from completion_bridge import (
     AnnotationBlock,
@@ -15,6 +15,7 @@ from completion_bridge import (
     GroundingSource,
     GroundingSupport,
     HubResponse,
+    StreamMergeError,
     StreamMerger,
     TextBlock,
     ThinkingBlock,
@@ -421,30 +422,20 @@ class TestExplicitDfsTasks:
         }
 
 
-class TestAtomicModelCommit:
-    def test_first_validation_failure_keeps_none(self) -> None:
-        class RequiredNullable(BaseModel):
-            value: str | None
-
-        merger = StreamMerger(RequiredNullable)
-        with pytest.raises(ValidationError):
-            merger.apply(RequiredNullable(value=None))
-        assert merger.result is None
-
-    def test_validation_failure_keeps_previous_model_and_can_continue(self) -> None:
+class TestBestEffortMerge:
+    def test_merging_does_not_revalidate_field_constraints(self) -> None:
         class Limited(BaseModel):
             text: str = Field(default="", max_length=3)
             count: int = 0
 
         merger = StreamMerger(Limited)
         merger.apply(Limited(text="a", count=1))
-        with pytest.raises(ValidationError):
-            merger.apply(Limited(text="xyz", count=9))
-        assert merger.result == Limited(text="a", count=1)
-        merger.apply(Limited(text="b", count=2))
-        assert merger.result == Limited(text="ab", count=3)
+        merger.apply(Limited(text="xyz", count=9))
+        assert merger.result.text == "axyz"
+        assert merger.result.count == 10
+        assert merger.result.model_dump(exclude_unset=True) == {"text": "axyz", "count": 10}
 
-    def test_identity_failure_discards_other_field_changes(self) -> None:
+    def test_identity_failure_keeps_prior_field_changes_and_reports_delta(self) -> None:
         class ByIndex(BaseModel):
             index: int
             text: str = ""
@@ -460,9 +451,16 @@ class TestAtomicModelCommit:
         merger = StreamMerger(Root)
         first = Root(text="first", items=[ByIndex(index=0, text="a")])
         merger.apply(first)
-        with pytest.raises(ValueError, match="식별 필드"):
-            merger.apply(Root(text="bad", items=[ById(id=1)]))
-        assert merger.result == first
+        delta = Root(text="bad", items=[ById(id=1)])
+        with pytest.raises(StreamMergeError) as caught:
+            merger.apply(delta)
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert caught.value.delta is delta
+        assert merger.result.text == "firstbad"
+        assert merger.result.items == first.items
+        assert caught.value.result == merger.result
+        merger.apply(Root(text="later"))
+        assert caught.value.result.text == "firstbad"
 
     def test_result_and_inputs_do_not_share_mutable_data(self) -> None:
         first = HubResponse(content=[TextBlock(seq=(0,), text="a", native={"nested": [1]})])
@@ -487,3 +485,60 @@ def test_dictionary_identity_can_be_completed_by_a_later_model() -> None:
     merger.apply(Root(items=[{"index": 0}]))
     merger.apply(Root(items=[RequiredItem(index=0, text="completed")]))
     assert merger.result.items == [RequiredItem(index=0, text="completed")]
+
+
+def test_index_lookup_is_reused_across_deltas(monkeypatch) -> None:
+    merger = StreamMerger(Envelope)
+    original = merger._index_field
+    calls = 0
+
+    def counted(model):
+        nonlocal calls
+        calls += 1
+        return original(model)
+
+    monkeypatch.setattr(merger, "_index_field", counted)
+    for i in range(1000):
+        merger.apply(Envelope(items=[Item(index=i, args="x")]))
+    assert len(merger.result.items) == 1000
+    assert calls == 1000
+
+
+def test_replaced_lists_release_old_lookup_and_do_not_merge_old_items() -> None:
+    class Root(BaseModel):
+        items: list[Item] = Field(default_factory=list, json_schema_extra=STREAM_OVERWRITE)
+
+    merger = StreamMerger(Root)
+    for text in ("a", "b", "c"):
+        merger.apply(Root(items=[Item(index=0, args=text)]))
+    assert merger.result.items[0].args == "c"
+    assert len(merger._indexes) == 1
+
+
+def test_first_explicit_required_none_is_preserved_without_initialization_policy() -> None:
+    class Root(BaseModel):
+        value: str | None
+
+    merger = StreamMerger(Root)
+    merger.apply(Root(value=None))
+    assert merger.result.value is None
+    assert merger.result.model_dump() == {"value": None}
+
+
+def test_new_models_do_not_rerun_default_factories() -> None:
+    calls = 0
+
+    def factory(data):
+        nonlocal calls
+        calls += 1
+        return data["name"] + "-created"
+
+    class Root(BaseModel):
+        name: str
+        label: str = Field(default_factory=factory)
+
+    delta = Root(name="test")
+    merger = StreamMerger(Root)
+    merger.apply(delta)
+    assert calls == 1
+    assert merger.result == delta

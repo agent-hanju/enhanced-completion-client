@@ -301,7 +301,7 @@ class ToolCall(BaseModel):
 ```
 
 Java의 어노테이션 세 개가 그대로 대응된다. `@StreamOverwrite`는 overwrite 표시로,
-`@StreamIndex`는 index 표시로, `@StreamList(index=...)`는 필드 레벨 설정으로 옮긴다. 현재 누적은 모델 후보에서 수행하며 delta마다 `model_validate` 성공 후 모델을 교체한다. Java가 예약 키에 런타임 타입을 심어두던 트릭은
+`@StreamIndex`는 index 표시로, `@StreamList(index=...)`는 필드 레벨 설정으로 옮긴다. 현재는 모델에 delta를 직접 반영하며 별도 검증이나 롤백을 수행하지 않는다. Java가 예약 키에 런타임 타입을 심어두던 트릭은
 Pydantic의 discriminated union으로 대체되므로 오히려 단순해진다.
 
 **규모.** Java 1,362줄에서 Map, 배열, record, TypeVariable 처리를 덜어내면 Python 300~400줄

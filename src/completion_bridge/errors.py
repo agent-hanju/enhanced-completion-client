@@ -10,10 +10,13 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from pydantic import BaseModel
+
 __all__ = [
     "CompletionBridgeError",
     "ExecutionStateError",
     "MappingError",
+    "StreamMergeError",
     "StreamNotFinished",
     "TransportError",
     "VendorStreamError",
@@ -40,6 +43,16 @@ class TransportError(CompletionBridgeError):
 
 class MappingError(CompletionBridgeError):
     """벤더 프레임을 허브 델타로 바꾸는 데 실패했다."""
+
+
+class StreamMergeError(CompletionBridgeError):
+    """실패한 델타와 오류 직전까지 반영한 모델 스냅샷. 원래 예외는 __cause__에 있다."""
+
+    def __init__(self, delta: BaseModel, result: BaseModel | None) -> None:
+        """원본 델타와 독립된 결과 스냅샷을 보관하며 메시지에는 응답 내용을 넣지 않는다."""
+        super().__init__("stream delta merge failed")
+        self.delta = delta
+        self.result = result
 
 
 class VendorStreamError(MappingError):

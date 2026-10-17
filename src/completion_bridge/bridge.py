@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from completion_bridge.errors import (
     ExecutionStateError,
     MappingError,
+    StreamMergeError,
 )
 from completion_bridge.http.client import AsyncHttpClient, HttpClient
 from completion_bridge.http.sse import SseEvent
@@ -270,9 +271,11 @@ class _StreamBase:
 
     @property
     def result(self) -> HubResponse | None:
-        """마지막 확정 응답. 첫 델타 성공 전에는 None이며 종료 상태와 무관하게 조회한다."""
+        """현재 응답. 초기에는 None이며 실패 후에는 부분 반영 상태를 반환한다."""
         response = self._merger.result
-        return finalize_response(response) if response is not None else None
+        if response is None or any(block.seq is None for block in response.content):
+            return response
+        return finalize_response(response)
 
     def _process(self, frame: SseEvent) -> tuple[list[HubResponse], bool]:
         """프레임 하나를 델타 리스트와 종료 여부로 바꾼다.
@@ -375,11 +378,16 @@ class _StreamBase:
             )
 
     def _accept(self, delta: HubResponse) -> None:
-        """결과 정렬에 필요한 좌표를 확인한 뒤 델타를 검증·확정한다."""
-        for block in delta.content:
-            if block.seq is None:
-                raise MappingError(f"content block {block.type!r} has no seq")
-        self._merger.apply(delta)
+        """출력 좌표를 확인하고 직접 반영한다. 실패 델타와 현재 결과는 예외에 포함한다."""
+        try:
+            for block in delta.content:
+                if block.seq is None:
+                    raise MappingError(f"content block {block.type!r} has no seq")
+            self._merger.apply(delta)
+        except StreamMergeError:
+            raise
+        except Exception as error:
+            raise StreamMergeError(delta, self._merger.result) from error
 
     def _finish(self) -> list[HubResponse]:
         """변환기에 남은 델타를 반환한다. 호출자가 각 델타를 확정한 직후 전달한다."""

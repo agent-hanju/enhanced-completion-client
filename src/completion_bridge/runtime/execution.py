@@ -48,9 +48,23 @@ class Run:
     responses: list[HubResponse] = field(default_factory=list)
     tasks: list[HitlDraft] = field(default_factory=list)
     status: RunStatus = "pending"
-    active_response: HubResponse | None = None
+    _active_response: HubResponse | None = field(default=None, repr=False, init=False)
+    _read_response: Callable[[], HubResponse | None] | None = field(
+        default=None, repr=False, init=False
+    )
     final_result: ToolResultBlock | None = None
     request_id: str = field(default_factory=lambda: str(uuid4()))
+
+    @property
+    def active_response(self) -> HubResponse | None:
+        """실행 중에는 조회 시점에만 스냅샷을 만들고, 종료 후에는 보관한 응답을 반환한다."""
+        return self._read_response() if self._read_response is not None else self._active_response
+
+    @active_response.setter
+    def active_response(self, value: HubResponse | None) -> None:
+        """종료 시 스냅샷을 보관하고 진행 중 스트림에 대한 참조를 해제한다."""
+        self._read_response = None
+        self._active_response = value
 
     @property
     def messages(self) -> list[HubMessage]:
@@ -188,9 +202,9 @@ class RuntimeExecution:
                     )
                 finally:
                     current_operation_id.reset(token)
+                self.partial._read_response = lambda stream=stream: stream.result
                 try:
                     async for delta in stream:
-                        self.partial.active_response = stream.result
                         yield delta
                     response = stream.result
                 except CompletionBridgeError:
