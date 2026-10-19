@@ -46,8 +46,9 @@ uv run pytest
 사용자 작성 assistant 이력의 `synthetic=False` 기본값과 사용법은
 [외부 연동 계약](docs/Synthetic-Assistant-Messages.md)에 정리되어 있다.
 
-현재 버전은 **0.4.1**이다. Anthropic 도구 선택 옵션 수정은
-[0.4.1 변경 보고](docs/Release-0.4.1.md)를 참고한다.
+현재 버전은 **0.4.2**이다. 반복 실행 API 추가와 패키지 구성·스트림 병합 변경은
+[0.4.2 변경 보고](docs/Release-0.4.2.md)를 참고한다.
+Anthropic 도구 선택 옵션 수정은 [0.4.1 변경 보고](docs/Release-0.4.1.md)를 참고한다.
 원본 Response 타입·누적기와 로깅 변경 및 사용자 정의 어댑터의
 적용 사항은 [0.4.0 변경 보고](docs/Release-0.4.0.md)를 참고한다.
 0.3.0에서의 `source → vendor` 변경과 적용 사항은
