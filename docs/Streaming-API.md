@@ -564,10 +564,9 @@ JSON이 필요하면 `response.model_dump(mode="json", by_alias=True, exclude_un
 
 ## 요청 추적 로그
 
-`Bridge`와 `SyncBridge`의 `stream()` / `complete()`는 선택적 키워드 인자
-`request_id: str | None = None`을 받는다. 생략하면 UUID4를 생성하며 벤더 요청에는 전달하지 않는다.
-요청 JSON, SSE, 같은 벤더 API 형식으로 병합한 완료 응답과 실패·취소를 전용 DEBUG 로거로 기록한다.
-[로그 계약과 파일 저장 설정](Wire-Logging.md)을 참고한다.
+`Bridge`와 `SyncBridge`의 `stream()` / `complete()`는 호출마다 OpenTelemetry CLIENT span을 연다.
+부모는 `stream()`을 부른 시점의 context다. 요청 JSON, 같은 벤더 API 형식으로 병합한 완료 응답과
+실패·취소를 그 span 안에서 전용 DEBUG 로거로 기록한다. [로그와 span 계약](Wire-Logging.md)을 참고한다.
 
 
 ## 델타 누적

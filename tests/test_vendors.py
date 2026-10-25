@@ -149,7 +149,7 @@ class TestMessages:
     @respx.mock
     async def test_text_blocks_use_the_server_index(self, caplog: pytest.LogCaptureFixture) -> None:
         """다른 벤더는 어댑터가 인덱스를 만들지만 여기서는 그대로 옮긴다."""
-        caplog.set_level(logging.DEBUG, logger="completion_bridge.wire.calls")
+        caplog.set_level(logging.DEBUG, logger="completion_bridge.wire")
         respx.post(MSG_URL).mock(return_value=httpx.Response(200, content=anthropic_stream()))
         result = await make(messages).complete(["안녕"])
         assert result.text == "안녕하세요"
@@ -160,11 +160,11 @@ class TestMessages:
         assert result.content[0].index == 0
         calls = []
         for record in caplog.records:
-            if hasattr(record, "wire"):
-                calls.append(record.__dict__["wire"])
-        assert calls[-1]["event"] == "response"
-        assert calls[-1]["payload"]["content"] == [{"type": "text", "text": "안녕하세요"}]
-        assert calls[-1]["payload"]["usage"] == {"input_tokens": 12, "output_tokens": 5}
+            if record.name == "completion_bridge.wire":
+                calls.append(record)
+        assert calls[-1].event_name == "completion_bridge.response"
+        assert calls[-1].msg["content"] == [{"type": "text", "text": "안녕하세요"}]
+        assert calls[-1].msg["usage"] == {"input_tokens": 12, "output_tokens": 5}
 
     @respx.mock
     async def test_usage_merges_across_two_events(self) -> None:

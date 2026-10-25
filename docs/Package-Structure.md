@@ -60,7 +60,8 @@ completion_bridge/
 
 좌표 길이 정규화는 `completion_bridge.streaming.sequence.normalize_seq`를 사용한다.
 좌표 배정은 벤더 변환기가 담당하며 공통 `SeqAllocator`는 제공하지 않는다.
-logging 설정의 formatter 경로는 `completion_bridge.logging.JsonFormatter`를 사용한다.
+0.4.3부터 bridge는 logging formatter를 제공하지 않는다. 레코드 형식은 소비 앱이 정한다
+([로그와 span 계약](Wire-Logging.md)).
 이전 모듈 경로를 저장한 pickle 등은 자동 이전하지 않는다. 배포 시 직접 하위 모듈을
 참조하는 소비 코드와 설정의 이전이 필요하다.
 

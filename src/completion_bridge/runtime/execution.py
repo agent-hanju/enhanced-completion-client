@@ -9,7 +9,8 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
-from uuid import uuid4
+
+from opentelemetry import trace
 
 from completion_bridge.errors import (
     CompletionBridgeError,
@@ -17,7 +18,7 @@ from completion_bridge.errors import (
     MappingError,
     StreamNotFinished,
 )
-from completion_bridge.logging import OperationLog, current_operation_id
+from completion_bridge.logging import OperationLog
 from completion_bridge.models.blocks import ToolResultBlock, ToolUseBlock
 from completion_bridge.models.hub import HubMessage, HubRequest, HubResponse
 from completion_bridge.models.tools import Execution, HitlDraft, ToolCall, ToolCallback, ToolOutput
@@ -53,7 +54,6 @@ class Run:
         default=None, repr=False, init=False
     )
     final_result: ToolResultBlock | None = None
-    request_id: str = field(default_factory=lambda: str(uuid4()))
 
     @property
     def active_response(self) -> HubResponse | None:
@@ -119,7 +119,7 @@ class RuntimeExecution:
             raise TypeError("execute_tool must be callable")
         if type(max_tool_calls) is not int or max_tool_calls < 0:
             raise ValueError("max_tool_calls must be a nonnegative integer")
-        reserved = {"messages", "tools", "model", "hyperparameters", "request_id"}
+        reserved = {"messages", "tools", "model", "hyperparameters"}
         if reserved.intersection(request.params):
             raise ValueError("request.params contains a reserved request field")
         self.partial = Run(request=request.model_copy(deep=True))
@@ -131,7 +131,7 @@ class RuntimeExecution:
         self._finished = False
         self._closed = False
         self._advancing = False
-        self._operation = OperationLog("runtime", request_id=self.partial.request_id)
+        self._operation = OperationLog("runtime")
 
     @property
     def result(self) -> Run:
@@ -190,18 +190,20 @@ class RuntimeExecution:
             while True:
                 self.request_index += 1
                 request = self.partial.request
-                token = current_operation_id.set(self.partial.request_id)
-                try:
+                # 모델 호출 span의 부모가 런타임 span이 되도록 스트림을 그 context에서 만든다.
+                with trace.use_span(
+                    self._operation.span,
+                    end_on_exit=False,
+                    record_exception=False,
+                    set_status_on_exception=False,
+                ):
                     stream = self._stream(
                         self.partial.messages,
                         tools=request.tools,
                         model=request.model,
                         hyperparameters=request.hyperparameters,
-                        request_id=f"{self.partial.request_id}:model:{self.request_index}",
                         **request.params,
                     )
-                finally:
-                    current_operation_id.reset(token)
                 self.partial._read_response = lambda stream=stream: stream.result
                 try:
                     async for delta in stream:
@@ -280,18 +282,34 @@ class RuntimeExecution:
                     recovery="execution_stopped",
                 )
                 return
-            operation = OperationLog(
-                "tool",
-                request_id=f"{self.partial.request_id}:tool:{batch_start + index}",
-                parent_request_id=self.partial.request_id,
-            )
+            with trace.use_span(
+                self._operation.span,
+                end_on_exit=False,
+                record_exception=False,
+                set_status_on_exception=False,
+            ):
+                operation = OperationLog(
+                    "tool",
+                    name=f"execute_tool {draft.call.tool_name}",
+                    attributes={
+                        "gen_ai.operation.name": "execute_tool",
+                        "gen_ai.tool.name": draft.call.tool_name,
+                        "gen_ai.tool.call.id": draft.call.tool_call_id,
+                    },
+                )
             operation.start(ordinal=draft.call.ordinal)
             outcome = "error"
-            token = current_operation_id.set(operation.request_id)
             try:
-                output = await self._execute_tool(
-                    draft.call.tool_name, copy.deepcopy(draft.call.arguments)
-                )
+                # 콜백 안의 기록과 하위 span이 도구 span 아래에 들어가도록 그 context에서 부른다.
+                with trace.use_span(
+                    operation.span,
+                    end_on_exit=False,
+                    record_exception=False,
+                    set_status_on_exception=False,
+                ):
+                    output = await self._execute_tool(
+                        draft.call.tool_name, copy.deepcopy(draft.call.arguments)
+                    )
                 if not isinstance(output, ToolOutput):
                     raise TypeError("execute_tool must return ToolOutput")
                 if output.result is not None and not isinstance(output.result, ToolResultBlock):
@@ -341,4 +359,3 @@ class RuntimeExecution:
                 raise
             finally:
                 operation.finish(outcome)
-                current_operation_id.reset(token)

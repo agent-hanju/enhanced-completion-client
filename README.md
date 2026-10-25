@@ -724,9 +724,10 @@ uv run pytest -m "live and not slow" -s
 
 ### 요청·응답 로그
 
-`completion_bridge.wire.calls`와 `completion_bridge.wire.sse`의 DEBUG 로그로 실제 요청, SSE,
-같은 벤더 API 형식으로 병합한 최종 응답을 기록할 수 있다. `stream()` / `complete()`의 선택적 `request_id`를 생략하면
-UUID4를 생성한다. [common-hitl-chat 파일 저장 설정](docs/Wire-Logging.md)을 참고한다.
+`completion_bridge.wire`의 DEBUG 로그로 실제 요청과, 같은 벤더 API 형식으로 병합한 최종 응답을
+기록할 수 있다. 호출마다 OpenTelemetry CLIENT span(`chat {model}`)을 열고 그 span 안에서 레코드를
+만들므로, 소비 앱이 `TracerProvider`를 설정하면 레코드와 호출이 trace·span ID로 연결된다.
+[로그와 span 계약](docs/Wire-Logging.md)을 참고한다.
 
 원본 응답 누적기는 로그 없이도 사용할 수 있다. `adapter.to_native()`로 누적기를 만들고
 `apply(chunk)` 후 `build()`를 호출하면 API별 `ChatCompletionsResponse`, `ResponsesResponse`,

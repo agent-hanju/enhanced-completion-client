@@ -6,7 +6,8 @@
 ``override=False``라 이미 설정된 환경변수는 덮지 않는다. 명령줄로 준 값이 파일보다 우선이어야
 한다.
 
-``python-dotenv``는 dev 의존이다. 런타임 의존은 ``httpx``와 ``pydantic`` 둘로 유지한다.
+``python-dotenv``와 ``opentelemetry-sdk``는 dev 의존이다. 런타임 의존은 ``httpx``, ``pydantic``,
+``opentelemetry-api`` 셋으로 유지한다.
 """
 
 from __future__ import annotations
@@ -16,6 +17,10 @@ from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from completion_bridge import TransportError
 
@@ -60,3 +65,22 @@ def pytest_runtest_makereport(
             f"Skipped: upstream returned {error.status_code} ({error.detail[:100]})",
         )
     return report
+
+
+_SPANS = InMemorySpanExporter()
+
+
+@pytest.fixture
+def spans() -> Generator[InMemorySpanExporter]:
+    """이 시험이 끝낸 span을 모으는 exporter.
+
+    전역 ``TracerProvider``는 프로세스에서 한 번만 정할 수 있으므로 처음 쓸 때 설정하고, 시험마다
+    모은 span을 비운다.
+    """
+    if not isinstance(trace.get_tracer_provider(), TracerProvider):
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(_SPANS))
+        trace.set_tracer_provider(provider)
+    _SPANS.clear()
+    yield _SPANS
+    _SPANS.clear()

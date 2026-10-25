@@ -7,11 +7,12 @@ import html
 import logging
 import sys
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
-from dataclasses import asdict
 from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
+from opentelemetry.trace import SpanKind
+from opentelemetry.util.types import AttributeValue
 from pydantic import BaseModel
 
 from completion_bridge.errors import (
@@ -285,9 +286,6 @@ class _StreamBase:
         종료라고 바로 버리면 그 둘을 잃는다. ``[DONE]``처럼 알맹이가 없는 표지는 ``decode``가
         ``None``을 돌려주므로 그냥 지나간다.
         """
-        if self._wire is not None:
-            self._wire.sequence += 1
-            self._wire.emit("sse", lambda: asdict(frame))
         if frame.is_comment_only:
             # 하트비트다. 흘려보낸다.
             return [], False
@@ -313,10 +311,11 @@ class _StreamBase:
             self._native_failure = exc
 
     def _log_start(self) -> None:
-        """요청을 기록하고, 요청·응답 로그가 켜져 있으면 원본 응답 누적기를 만든다."""
+        """호출 span을 시작하고 요청을 기록한다. 요청·응답 로그가 켜져 있으면 원본 응답 누적기를
+        만든다."""
+        self._operation.start(api=self._vendor.name)
         if self._wire is not None:
             self._wire.start()
-        self._operation.start(vendor=self._vendor.name)
         if self._wire is not None:
             if self._native is None and self._wire.calls_enabled():
                 try:
@@ -325,25 +324,56 @@ class _StreamBase:
                     self._native_failure = exc
 
     def _log_end(self, event: str, error: BaseException | None = None) -> None:
-        """종료 기록을 남긴다. 호출당 첫 기록만 남는다.
+        """종료 기록을 남기고 호출 span을 끝낸다. 호출당 첫 기록만 남는다.
 
         정상 종료(``response``)의 payload는 원본 응답 누적기가 만든 객체다. 누적기가 없으면
         소비 시작 시점에 요청·응답 로그가 꺼져 있었으므로 ``None``이다. 누적이나 객체 완성이
         실패하면 ``response`` 대신 ``merge_error``를 예외 클래스 이름과 메시지로 기록한다.
-        ``error``와 ``cancelled``의 payload는 예외 클래스 이름 또는 빈 객체다.
+        ``error``와 ``cancelled``의 payload는 예외 클래스 이름 또는 빈 객체다. 응답 ID·모델·종료
+        사유·토큰 수는 span과 종료 레코드의 ``gen_ai.*`` 속성이 된다.
         """
         level = logging.ERROR if event == "error" else logging.INFO
-        self._operation.finish(
-            event,
-            level=level,
-            error_type=type(error).__name__ if error is not None else None,
-        )
+        attributes = self._response_attributes()
+        self._operation.set_attributes(attributes)
+        try:
+            self._log_wire_end(event, error, attributes)
+        finally:
+            self._operation.finish(
+                event,
+                level=level,
+                error_type=type(error).__name__ if error is not None else None,
+            )
+
+    def _response_attributes(self) -> dict[str, AttributeValue | None]:
+        """지금까지 병합한 허브 응답의 ID·모델·종료 사유·토큰 수."""
+        response = self._merger.result
+        if response is None:
+            return {}
+        usage = response.usage
+        return {
+            "gen_ai.response.id": response.id,
+            "gen_ai.response.model": response.model,
+            "gen_ai.response.finish_reasons": (
+                [response.stop_reason] if response.stop_reason is not None else None
+            ),
+            "gen_ai.usage.input_tokens": usage.input_tokens if usage is not None else None,
+            "gen_ai.usage.output_tokens": usage.output_tokens if usage is not None else None,
+        }
+
+    def _log_wire_end(
+        self,
+        event: str,
+        error: BaseException | None,
+        attributes: Mapping[str, AttributeValue | None],
+    ) -> None:
+        """원본 통신 종료 레코드를 남긴다. 정상 종료면 원본 응답 객체를 완성해 쓴다."""
         if self._wire is None:
             return
         if event != "response":
             self._wire.finish(
                 event,
                 lambda: {"error_type": type(error).__name__} if error is not None else {},
+                attributes,
             )
             return
 
@@ -366,6 +396,7 @@ class _StreamBase:
             self._wire.finish(
                 "merge_error",
                 lambda: {"error_type": type(failure).__name__, "message": str(failure)},
+                attributes,
             )
         else:
             self._wire.finish(
@@ -375,6 +406,7 @@ class _StreamBase:
                     if merged is not None
                     else None
                 ),
+                attributes,
             )
 
     def _accept(self, delta: HubResponse) -> None:
@@ -592,6 +624,37 @@ class _BridgeBase:
         """호출별 모델을 반영한 벤더 경로로 요청 URL을 만든다."""
         return f"{self._base_url}{self._request_vendor(model).path}"
 
+    def _call_logs(self, model: str | None, body: dict[str, Any]) -> tuple[OperationLog, WireLog]:
+        """생성 호출 하나의 CLIENT span 기록과 원본 통신 기록을 만든다.
+
+        span 이름과 속성은 OpenTelemetry GenAI 의미 규약을 따른다(``chat {model}``). 부모는 이
+        메서드를 부른 시점의 context다.
+        """
+        requested = model or self._model
+        url = self._request_url(model)
+        operation = OperationLog(
+            "completion",
+            name=f"chat {requested}" if requested else "chat",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": requested,
+                "completion_bridge.api": self._vendor.name,
+                "url.full": url,
+            },
+        )
+        return operation, WireLog(operation, self._vendor.name, requested, url, body)
+
+    def _count_operation(self, model: str | None) -> OperationLog:
+        """토큰 수 조회 하나의 CLIENT span 기록을 만든다."""
+        requested = model or self._model
+        return OperationLog(
+            "count_tokens",
+            name=f"count_tokens {requested}" if requested else "count_tokens",
+            kind=SpanKind.CLIENT,
+            attributes={"gen_ai.request.model": requested},
+        )
+
     def build_request(
         self,
         messages: Sequence[MessageInput],
@@ -696,7 +759,6 @@ class Bridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
-        request_id: str | None = None,
         **params: Any,
     ) -> AsyncStream:
         """스트리밍 요청을 시작한다. 반환값을 ``async for``로 돌린다."""
@@ -711,14 +773,7 @@ class Bridge(_BridgeBase):
             self._request_url(model), json=body, headers=self._request_headers()
         )
         stream = AsyncStream(self._vendor, self._vocabularies, frames)
-        stream._wire = WireLog(
-            request_id,
-            self._vendor.name,
-            model or self._model,
-            self._request_url(model),
-            body,
-        )
-        stream._operation = OperationLog("completion", request_id=stream._wire.request_id)
+        stream._operation, stream._wire = self._call_logs(model, body)
         return stream
 
     def run(
@@ -743,13 +798,11 @@ class Bridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
-        request_id: str | None = None,
         **params: Any,
     ) -> HubResponse | None:
         """스트림을 끝까지 돌려 병합 결과만 돌려준다."""
         stream = self.stream(
             messages,
-            request_id=request_id,
             tools=tools,
             model=model,
             hyperparameters=hyperparameters,
@@ -778,8 +831,8 @@ class Bridge(_BridgeBase):
             TransportError: 토큰 수 엔드포인트가 2xx가 아닌 상태를 돌려줄 때.
             MappingError: 응답이 JSON 객체가 아니거나 어댑터가 기대한 필드가 없을 때.
         """
-        operation = OperationLog("count_tokens")
-        operation.start(vendor=self._vendor.name)
+        operation = self._count_operation(model)
+        operation.start(api=self._vendor.name)
         outcome = "completed"
         level = logging.INFO
         error_type = None
@@ -861,7 +914,6 @@ class SyncBridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
-        request_id: str | None = None,
         **params: Any,
     ) -> SyncStream:
         """입력으로 요청을 구성하고 소비 시 전송을 시작하는 동기 스트림을 반환한다."""
@@ -876,14 +928,7 @@ class SyncBridge(_BridgeBase):
             self._request_url(model), json=body, headers=self._request_headers()
         )
         stream = SyncStream(self._vendor, self._vocabularies, frames)
-        stream._wire = WireLog(
-            request_id,
-            self._vendor.name,
-            model or self._model,
-            self._request_url(model),
-            body,
-        )
-        stream._operation = OperationLog("completion", request_id=stream._wire.request_id)
+        stream._operation, stream._wire = self._call_logs(model, body)
         return stream
 
     def complete(
@@ -893,13 +938,11 @@ class SyncBridge(_BridgeBase):
         tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
         hyperparameters: Hyperparameters | Mapping[str, Any] | None = None,
-        request_id: str | None = None,
         **params: Any,
     ) -> HubResponse | None:
         """동기 스트림을 끝까지 소비하고 병합된 최종 허브 응답을 반환한다."""
         stream = self.stream(
             messages,
-            request_id=request_id,
             tools=tools,
             model=model,
             hyperparameters=hyperparameters,
@@ -919,8 +962,8 @@ class SyncBridge(_BridgeBase):
         **params: Any,
     ) -> TokenCount:
         """:meth:`Bridge.count_tokens`의 동기판."""
-        operation = OperationLog("count_tokens")
-        operation.start(vendor=self._vendor.name)
+        operation = self._count_operation(model)
+        operation.start(api=self._vendor.name)
         outcome = "completed"
         level = logging.INFO
         error_type = None

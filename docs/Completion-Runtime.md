@@ -46,7 +46,7 @@ run = execution.result
 첫 `await` 또는 비동기 소비에서 실행을 시작한다. `run()` 호출 시 요청을 중첩 필드까지
 복사하므로 이후 원본 요청을 수정해도 실행 입력은 바뀌지 않는다. 모델·도구 정의·생성 설정·
 `params`는 매 모델 요청에 적용한다. Bridge에 설정된 모델과 생성 설정도 기존 우선순위를 따른다.
-`params`에 `messages`, `tools`, `model`, `hyperparameters`, `request_id`를 중복 지정하면 거부한다.
+`params`에 `messages`, `tools`, `model`, `hyperparameters`를 중복 지정하면 거부한다.
 요청별 응답은 독립적으로 병합한다. 서로 다른 모델 요청의 델타를 한 응답으로 합치지 않는다.
 
 | API | 내용 |
@@ -135,7 +135,8 @@ output = ToolOutput(
 
 ## 실행 추적과 제거한 API
 
-`Run.request_id`로 모델 요청과 콜백 실행의 부모 추적 관계를 기록한다.
+실행 하나가 `runtime` span이고, 모델 요청(`chat {model}`)과 콜백 실행(`execute_tool {name}`)은 그
+하위 span이다. 콜백 안에서 만든 기록과 span은 도구 span 아래에 들어간다.
 운영 로그에는 본문·도구 인자·결과·예외 메시지를 기록하지 않는다.
 출력 설정과 보관 정책은 [로그 문서](Wire-Logging.md)를 따른다.
 

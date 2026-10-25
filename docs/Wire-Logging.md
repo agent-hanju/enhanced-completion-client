@@ -1,68 +1,68 @@
-# common-hitl-chat에서 completion-bridge 로그 저장
+# completion-bridge 로그와 span
 
-라이브러리는 파일을 생성하거나 루트 로거를 설정하지 않는다. 애플리케이션이
-[설정 예제](../examples/logging.common-hitl-chat.json)를 기존 logging 설정에 병합해서 사용한다.
-이 문서는 설정 예제를 제공하며 common-hitl-chat 저장소 자체는 변경하지 않는다.
+라이브러리는 `opentelemetry-api`로 작업 span을 만들고 표준 `logging`으로 레코드를 낸다.
+`TracerProvider`, 로그 핸들러, 파일·보관 정책, 레코드 형식은 소비 앱이 정한다. 라이브러리는 파일을
+만들거나 루트 로거·provider를 설정하지 않는다. provider를 설정하지 않은 앱에서는 span이 기록되지
+않고 레코드에 trace·span ID가 없다.
 
-## 설정 적용
+common-hitl-chat은 `hitl_chat.tracing`의 formatter·filter와 `config/logging.yml`로 이 레코드를
+OpenTelemetry Logs Data Model 필드의 JSON 한 줄로 쓴다.
 
-예제 JSON을 애플리케이션의 설정 디렉터리로 복사하고, 시작 시 한 번 적용한다.
-`filename`은 현재 작업 디렉터리 기준이므로 운영 환경에서는 절대 경로로 지정하는 편이 좋다.
-기존 logging 설정이 있다면 `formatters`, `handlers`, `loggers` 항목을 병합하고 한 번만 적용한다.
+## 레코드 규칙
 
-```python
-import json
-import logging.config
-from pathlib import Path
+레코드는 OpenTelemetry `LoggingHandler`와 같은 변환 규칙을 따른다.
 
-Path("logs").mkdir(parents=True, exist_ok=True)
-config = json.loads(Path("logging.common-hitl-chat.json").read_text(encoding="utf-8"))
-logging.config.dictConfig(config)
-```
+- `msg`가 본문(body)이다. 원본 통신 레코드의 본문은 JSON 객체 그대로이며 문자열로 직렬화하지 않는다.
+- `extra`의 key가 속성(attributes)이다. key는 의미 규약 이름(`gen_ai.*`, `url.full`,
+  `http.request.method`, `error.type`)이나 `completion_bridge.` 접두 이름이다.
+- `event_name` key는 이벤트 이름이다(`completion_bridge.request` 등).
+- 레코드는 그 작업의 span을 현재 span으로 둔 채 만든다. 소비 앱의 filter·formatter는
+  `opentelemetry.trace.get_current_span()`으로 trace·span ID를 레코드에 연결할 수 있다.
 
-- `logs/bridge-calls.jsonl`: 실제 전송 요청, 같은 API의 비스트리밍 응답 형식으로 병합한 완료 응답,
-  실패·취소 기록.
-- `logs/bridge-sse.jsonl`: 허브 변환 전 SSE 이벤트. 주석과 종료 이벤트도 포함한다.
-- 두 파일은 각각 크기 기준으로 회전하며 백업 5개를 유지한다.
-- 멀티프로세스 서버는 프로세스별 파일을 사용하거나 단일 로그 수집 프로세스로 전달한다.
-  예제의 회전 파일 핸들러는 여러 프로세스가 같은 파일에 쓰는 용도가 아니다.
+## span
 
-## 호출과 분류
+| 작업 | span 이름 | 종류 | 주요 속성 |
+|---|---|---|---|
+| 생성 호출(`stream()`/`complete()`) | `chat {model}` | CLIENT | `gen_ai.operation.name`(`chat`), `gen_ai.request.model`, `completion_bridge.api`, `url.full`, 종료 시 `gen_ai.response.id`·`gen_ai.response.model`·`gen_ai.response.finish_reasons`·`gen_ai.usage.input_tokens`·`gen_ai.usage.output_tokens`, `completion_bridge.outcome` |
+| 토큰 수 조회(`count_tokens()`) | `count_tokens {model}` | CLIENT | `gen_ai.request.model`, `completion_bridge.api`, `completion_bridge.outcome` |
+| 반복 실행(`run()`) | `runtime` | INTERNAL | `completion_bridge.outcome`(실행 상태), `completion_bridge.model_calls` |
+| 도구 콜백 | `execute_tool {name}` | INTERNAL | `gen_ai.operation.name`(`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.call.id`, `completion_bridge.outcome` |
 
-```python
-result = await bridge.complete(history, request_id="chat-run-123-call-1")
-# request_id 생략 시 호출마다 UUID4 문자열 생성
-```
+- 부모는 작업 객체를 만든 시점의 context다. 생성 호출은 `stream()`을 부른 시점, 반복 실행은 `run()`을
+  부른 시점이다. 반복 실행 안의 생성 호출과 도구 콜백은 `runtime` span의 하위 span이다. 도구 콜백은
+  도구 span을 현재 span으로 두고 부르므로 콜백 안의 기록과 span은 그 아래에 들어간다.
+- `completion_bridge.outcome`은 `response`, `merge_error`, `error`, `cancelled`(생성 호출),
+  `completed`, `error`, `cancelled`(토큰 수 조회), 실행 상태(반복 실행), `completed`,
+  `hitl_required`, `error`, `cancelled`(도구 콜백) 중 하나다.
+- `completion_bridge.outcome`이 `error`인 작업은 span 상태가 ERROR다. 예외 클래스 이름은 `error.type`
+  속성이나 이벤트에 쓴다. 상태 설명, 예외 이벤트, 예외 메시지·traceback은 기록하지 않는다.
+- span 속성에는 본문·도구 인자·결과를 넣지 않는다. span 속성은 기본형과 그 배열만 받으므로 JSON
+  본문을 넣으면 문자열로 한 번 더 직렬화된다. 본문은 아래 원본 통신 레코드의 body에 있다.
+- 스트림을 만들기만 하고 소비하지 않으면 span을 시작하지 않는다.
 
-`Bridge`와 `SyncBridge`의 `stream()` / `complete()`에서 지원한다.
-ID는 벤더 요청 본문이나 헤더로 전송하지 않는다. 여러 API 호출에 같은 ID를 재사용하면
-구분할 수 없으므로 호출마다 다른 값을 사용한다. 별도 ID 보관소는 없다.
-`build_request()`와 `count_tokens()`는 원본 wire 로그 대상에 포함하지 않는다.
-`count_tokens()`의 시작·완료·실패는 아래 운영 로그로 기록한다.
+## 원본 통신 기록
 
-| 로거 | event | payload |
+`completion_bridge.wire` 로거에 DEBUG로 낸다. 호출마다 요청 레코드 하나와 종료 레코드 하나다.
+
+| `event_name` | body | 추가 속성 |
 |---|---|---|
-| `completion_bridge.wire.calls` | `request` | `method`, `url`, 변환 후 요청 `body` |
-| `completion_bridge.wire.sse` | `sse` | `event`, `id`, `data`, `retry`, `comments` |
-| `completion_bridge.wire.calls` | `response` | 벤더 API의 비스트리밍 응답 형식으로 병합한 객체 |
-| `completion_bridge.wire.calls` | `merge_error` | 병합 실패 예외의 `error_type`, `message` |
-| `completion_bridge.wire.calls` | `error` | 예외 클래스 이름 `error_type` |
-| `completion_bridge.wire.calls` | `cancelled` | 예외 클래스 이름 또는 빈 객체 |
+| `completion_bridge.request` | 변환 후 요청 JSON 객체 | `http.request.method`, `url.full` |
+| `completion_bridge.response` | 벤더 API의 비스트리밍 응답 형식으로 병합한 객체 | `gen_ai.response.*`, `gen_ai.usage.*` |
+| `completion_bridge.merge_error` | 병합 실패 예외의 `error_type`, `message` | `gen_ai.response.*`, `gen_ai.usage.*` |
+| `completion_bridge.error` | 예외 클래스 이름 `error_type` | |
+| `completion_bridge.cancelled` | 예외 클래스 이름 또는 빈 객체 | |
 
-위 wire 이벤트는 모두 DEBUG다. Python LogRecord의 `wire` 필드에 `event`, `request_id`,
-`vendor`, `model`, `sequence`, `elapsed_ms`, `payload`가 들어간다.
-제공한 `JsonFormatter`는 여기에 UTC `timestamp`, `level`, `logger`를 추가해 JSONL로 출력한다.
-SSE 순번은 호출마다 1부터 증가한다. 다른 이벤트의 sequence는 마지막 수신 SSE 순번이다.
+모든 레코드에 `completion_bridge.api`, `gen_ai.request.model`(있을 때), `elapsed_ms`가 있다.
 `elapsed_ms`는 스트림 소비 시작 이후 경과 시간이며 소비자의 처리 시간도 포함한다.
-
-SSE의 `data`는 문자열 그대로 기록한다. 이것은 파싱된 SSE 이벤트이며 HTTP 바이트 덤프가 아니다.
-완료 응답은 요청과 같은 벤더 API 형식이다. 허브 형식인 `HubResponse`는 기록하지 않는다.
-각 JSONL 행의 request_id로 두 파일을 연결한다. 호출 기록 파일 안에서도 요청과 응답은
-각각 별도 행이며, 동시에 진행하는 호출 때문에 서로 인접하지 않을 수 있다.
+SSE 이벤트는 기록하지 않는다. 스트리밍 호출의 응답 레코드는 조립한 최종 응답이다.
+허브 형식인 `HubResponse`는 기록하지 않는다. 동시에 진행하는 호출의 요청·응답 레코드는 서로 인접하지
+않을 수 있으며, 같은 호출의 두 레코드는 span ID가 같다.
+벤더 형식이 문자열로 정한 필드(chat_completions의 `tool_calls[].function.arguments` 등)는 원문
+그대로 문자열로 남는다.
 
 ## 원본 응답 병합
 
-`response` payload는 각 어댑터의 `to_native()` 누적기가 SSE chunk를 받아 만든 Response 객체를
+`response` 레코드의 body는 각 어댑터의 `to_native()` 누적기가 SSE chunk를 받아 만든 Response 객체를
 `model_dump(mode="json", by_alias=True, exclude_unset=True)`로 직렬화한 JSON 객체다.
 허브 변환과 별개로 같은 chunk의 복사본을 누적하므로 `HubResponse` 결과에 영향을 주지 않는다.
 타입 객체의 계약과 로그 없이 사용하는 예제는 [스트리밍 API](Streaming-API.md#원본-response-객체)를
@@ -110,65 +110,48 @@ Response, Anthropic의 본문·thinking·서명·인용·도구 입력·usage, G
 
 ## 기록 시점과 범위
 
-스트림을 실제 소비할 때 request를 기록한다. stream()만 만들고 소비하지 않으면 기록하지 않는다.
-정상적으로 소비를 마치면 response 또는 merge_error를 한 번 기록한다. 실패는 error, 명시적 close/aclose 또는
-이터레이터 종료·태스크 취소는 cancelled로 기록하며 완료 응답으로 취급하지 않는다.
-단순 break 뒤에도 스트림을 보관한다면 즉시 close/aclose해야 종료 기록과 자원 해제가 보장된다.
-요청 조립 단계의 오류, 프로세스 강제 종료는 종료 로그를 보장하지 않는다.
+스트림을 실제 소비할 때 span을 시작하고 request를 기록한다. stream()만 만들고 소비하지 않으면 기록하지
+않는다. 정상적으로 소비를 마치면 response 또는 merge_error를 한 번 기록한다. 실패는 error, 명시적
+close/aclose 또는 이터레이터 종료·태스크 취소는 cancelled로 기록하며 완료 응답으로 취급하지 않는다.
+단순 break 뒤에도 스트림을 보관한다면 즉시 close/aclose해야 종료 기록, span 종료, 자원 해제가 보장된다.
+요청 조립 단계의 오류, 프로세스 강제 종료는 종료 기록을 보장하지 않는다.
 
 인증 헤더는 기록하지 않는다. URL과 요청·응답 본문은 기록하므로 URL에 인증정보를 넣지 않는다.
-본문 로그에는 대화와 도구 데이터가 포함된다. 이 예제는 로그 수집을 명시적으로 켜는 설정이다.
-로그가 꺼져 있으면 SSE/완료 응답의 로그용 직렬화를 수행하지 않는다.
-원본 응답 누적 여부는 스트림 소비를 시작할 때 `completion_bridge.wire.calls`의 DEBUG 활성 여부로
-정한다. 그때 꺼져 있었다가 종료 전에 켜지면 그 호출의 response payload는 null이다.
-로그 핸들러·직렬화 오류는 생성 요청으로 전파하지 않는다. 따라서 로그 저장 실패를 API 성공과
+본문 기록에는 대화와 도구 데이터가 포함된다. 로그가 꺼져 있으면 완료 응답의 로그용 직렬화를 하지 않는다.
+원본 응답 누적 여부는 스트림 소비를 시작할 때 `completion_bridge.wire`의 DEBUG 활성 여부로
+정한다. 그때 꺼져 있었다가 종료 전에 켜지면 그 호출의 response 본문은 null이다.
+로그 핸들러·직렬화·provider 오류는 생성 요청으로 전파하지 않는다. 따라서 로그 저장 실패를 API 성공과
 동일시할 수 없으며, 이 기능은 내구성을 보장하는 감사 저장소가 아니다.
 
-## 본문을 제외한 운영 로그
+## 운영 기록
 
-`completion_bridge.operations`는 모델 호출, 토큰 수 조회, 런타임 실행, 도구 실행의
-시작·완료·실패를 기록한다. 원본 wire 로그와 별도로 설정하며, 요청·응답 본문,
-도구 인자·결과, 예외 메시지·traceback은 포함하지 않는다.
-`JsonFormatter`는 LogRecord의 `operation` 정보를 JSONL로 출력한다.
+작업의 시작·종료와 소요 시간은 span이 갖는다. `completion_bridge.operations` 로거에는 주의가 필요한
+처리 결과만 낸다. 요청·응답 본문, 도구 인자·결과, 예외 메시지·traceback은 넣지 않는다.
 
-- `INFO`: `started`, `finished`. `operation`, `request_id`, `parent_request_id`,
-  `elapsed_ms`, 종료 `outcome`으로 호출 관계와 결과를 확인한다.
-- `DEBUG`: 원본 응답 누적 실패처럼 진단에 필요한 처리 결과를 기록한다.
-  도구 승인·검토 정책은 콜백의 책임이며 라이브러리가 판정 로그를 만들지 않는다.
-- `WARNING`: 호출 횟수 제한, 원본 응답 병합 실패 등에 실제 적용한
-  `recovery`를 함께 기록한다.
-- `ERROR`: 실패를 처리하는 계층에서 예외 종류를 기록한다. 상위 런타임은 이미 기록된
-  모델 실패를 다시 ERROR로 기록하지 않는다. 콜백 예외는 런타임에서 기록한다.
+| `event_name` | 수준 | 속성 |
+|---|---|---|
+| `completion_bridge.native_merge_failed` | WARNING | `error.type`, `completion_bridge.recovery` |
+| `completion_bridge.tool_limit_reached` | WARNING | `completion_bridge.limit`, `completion_bridge.recovery` |
+| `completion_bridge.cleanup_failed` | 원래 오류가 있으면 WARNING, 없으면 ERROR | `error.type`, `completion_bridge.recovery` |
+| `completion_bridge.finished` | 생성 호출·토큰 수 조회가 실패로 끝날 때 ERROR | `completion_bridge.outcome`, `error.type` |
+| `completion_bridge.failed` | 반복 실행이 처리 중 예외로 끝날 때 ERROR. 이미 기록된 모델 실패는 제외 | `error.type` |
 
-`Run.request_id`는 실행마다 생성된다. 모델 호출은 이 ID와 호출 순번으로 식별하며,
-`parent_request_id`로 런타임과 연결한다. 도구 콜백에도 부모 ID가
-전달된다. 미해결 HITL은 `hitl_required`, 취소는 `cancelled`로 종료된다.
-로그 핸들러의 실패는 원래 실행 결과를 변경하지 않는다.
+모든 운영 레코드에 `completion_bridge.operation`과 `elapsed_ms`가 있다. 열린 span이 있으면 같은
+이름의 span 이벤트도 더한다. 상위 런타임은 이미 기록된 모델 실패를 다시 ERROR로 기록하지 않는다.
+콜백 예외는 런타임에서 기록한다. 도구 승인·검토 정책은 콜백의 책임이며 라이브러리가 판정 기록을
+만들지 않는다.
 
-### 환경별 출력과 보관
+## 환경별 출력과 보관
 
-라이브러리는 핸들러나 파일 회전을 자동 설정하지 않는다. 위 JSON 예제는 소비 앱이
-명시적으로 적용하는 파일 출력 예제이며 콘솔 출력은 사용하지 않는다.
-운영 로그는 UTF-8 `logs/bridge-operations.jsonl`, 파일당 10 MiB, 백업 5개로
-현재 파일 포함 약 60 MiB를 사용한다. 원본 calls는 20 MiB씩 약 120 MiB,
-SSE는 50 MiB씩 약 300 MiB로, 세 파일 종류의 합계는 약 480 MiB다.
-단일 레코드가 파일 제한보다 크면 이 크기를 초과할 수 있으므로 원본 로그를 켜는 앱은
-요청 크기 제한과 디스크 사용량 감시도 적용해야 한다.
+라이브러리는 핸들러, 파일 회전, provider를 자동 설정하지 않는다. 소비 앱이 환경별로 정한다.
 
-| 환경 | 운영 로그 | 원본 wire 로그 | 출력 |
+| 환경 | 운영 기록 | 원본 통신 기록 | span |
 |---|---|---|---|
-| 개발 | DEBUG 또는 INFO | 원본 확인이 필요할 때만 DEBUG | 예제 파일 또는 앱의 콘솔 핸들러 |
-| 테스트 | 테스트가 캡처하는 DEBUG | 해당 wire 검증 테스트에서만 DEBUG | 기본 파일 생성 없음 |
-| 운영 | INFO | 기본 비활성화 | 운영 로그 파일 또는 중앙 수집기 |
+| 개발 | INFO 이상 | 원본 확인이 필요할 때 DEBUG | 앱의 provider와 exporter |
+| 시험 | 시험이 캡처하는 수준 | 해당 시험에서만 DEBUG | 시험용 메모리 exporter |
+| 운영 | WARNING 이상 | 요구사항에 따라 DEBUG, 아니면 끔 | 앱의 provider와 exporter |
 
-제공한 JSON은 원본 확인용이므로 wire 로거가 DEBUG로 활성화되어 있다.
-운영에 적용할 때는 `completion_bridge.wire.calls`와 `completion_bridge.wire.sse`의
-`level`을 WARNING으로 변경하여 원본 기록을 비활성화한다. 운영 로거는 INFO를 유지한다.
-원본 wire 로그에는 사용자가 요청한 원래 본문·인자·결과가 포함되므로 이 설정을 일반
-운영 로그처럼 취급하면 안 된다.
-
-예제는 크기와 개수 기준 보관이며 시간 기준 만료나 압축을 수행하지 않는다.
-백업 개수를 초과한 가장 오래된 파일은 회전 시 삭제한다. 기간 기준 삭제가 필요하면
-소비 앱의 로그 수집기에서 별도로 설정한다. 앱 실행 계정과 승인된 운영 계정만 로그
-디렉터리를 읽을 수 있도록 파일 권한을 설정하고, 백업에도 같은 권한을 적용한다.
+원본 통신 기록에는 사용자가 요청한 원래 본문·인자·결과가 포함되므로 일반 운영 로그처럼 취급하면
+안 된다. 앱 실행 계정과 승인된 운영 계정만 로그 디렉터리를 읽을 수 있도록 파일 권한을 설정한다.
 여러 프로세스가 같은 회전 파일을 공유하지 않도록 프로세스별 경로나 중앙 수집기를 사용한다.
+단일 레코드가 파일 크기 제한보다 클 수 있으므로 원본 기록을 켜는 앱은 디스크 사용량을 감시한다.
