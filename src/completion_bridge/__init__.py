@@ -96,7 +96,7 @@ from completion_bridge.streaming.mapping import StreamMapper, Vocabulary, compos
 from completion_bridge.streaming.merge import StreamMerger
 from completion_bridge.vendors.base import Lowerer, NativeAccumulator, VendorAdapter
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 __all__ = [
     "Run",
