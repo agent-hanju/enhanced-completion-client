@@ -76,7 +76,7 @@ def _relift(vocabulary: CiteVocabulary, text: str) -> list[TextBlock]:
     같은 블록이 나오는 것이 "제대로 직렬화됐다"의 가장 강한 형태다.
     """
     mapper = vocabulary.lift_mapper()
-    deltas = [*mapper.map(HubResponse(content=[TextBlock(text=text, index=0)])), *mapper.flush()]
+    deltas = [*mapper.map(HubResponse(content=[TextBlock(seq=(0,), text=text)])), *mapper.flush()]
     merger: StreamMerger = StreamMerger(HubResponse)
     for delta in deltas:
         merger.apply(delta)
