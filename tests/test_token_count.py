@@ -18,7 +18,7 @@ from completion_bridge import (
     SyncBridge,
     TokenCount,
     TokenizedPrompt,
-    ToolChoice,
+    ToolChoiceAuto,
     ToolDefinition,
     TransportError,
 )
@@ -122,7 +122,7 @@ class TestMessagesCalls:
                 context_management={"edits": []},
                 cache_control={"type": "ephemeral"},
                 speed="fast",
-                tool_choice=ToolChoice(mode="auto"),
+                tool_choice=ToolChoiceAuto(type="auto"),
             ),
         )
 
@@ -174,7 +174,7 @@ class TestResponsesCalls:
                 text={"format": {"type": "text"}},
                 truncation="auto",
                 parallel_tool_calls=True,
-                tool_choice=ToolChoice(mode="auto"),
+                tool_choice=ToolChoiceAuto(type="auto"),
             ),
         )
 

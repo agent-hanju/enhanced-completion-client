@@ -68,6 +68,10 @@ from completion_bridge.models.parameters import (
     Hyperparameters,
     ResponseFormat,
     ToolChoice,
+    ToolChoiceAny,
+    ToolChoiceAuto,
+    ToolChoiceNone,
+    ToolChoiceTool,
 )
 from completion_bridge.models.tools import (
     Execution,
@@ -96,7 +100,7 @@ from completion_bridge.streaming.mapping import StreamMapper, Vocabulary, compos
 from completion_bridge.streaming.merge import StreamMerger
 from completion_bridge.vendors.base import Lowerer, NativeAccumulator, VendorAdapter
 
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 
 __all__ = [
     "Run",
@@ -172,4 +176,8 @@ __all__ = [
     "Hyperparameters",
     "ResponseFormat",
     "ToolChoice",
+    "ToolChoiceAny",
+    "ToolChoiceAuto",
+    "ToolChoiceNone",
+    "ToolChoiceTool",
 ]

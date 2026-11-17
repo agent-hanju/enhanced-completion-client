@@ -46,7 +46,10 @@ uv run pytest
 사용자 작성 assistant 이력의 `synthetic=False` 기본값과 사용법은
 [외부 연동 계약](docs/Synthetic-Assistant-Messages.md)에 정리되어 있다.
 
-현재 버전은 **0.4.2**이다. 반복 실행 API 추가와 패키지 구성·스트림 병합 변경은
+현재 버전은 **0.4.4**이다. `tool_choice`를 Anthropic Messages 객체 형식으로 바꾼 변경과
+이전 방법은 [0.4.4 변경 보고](docs/Release-0.4.4.md)를 참고한다.
+OpenTelemetry span 도입과 원문 기록 형식 변경은 [0.4.3 변경 보고](docs/Release-0.4.3.md)를 참고한다.
+반복 실행 API 추가와 패키지 구성·스트림 병합 변경은
 [0.4.2 변경 보고](docs/Release-0.4.2.md)를 참고한다.
 Anthropic 도구 선택 옵션 수정은 [0.4.1 변경 보고](docs/Release-0.4.1.md)를 참고한다.
 원본 Response 타입·누적기와 로깅 변경 및 사용자 정의 어댑터의
@@ -174,7 +177,7 @@ from completion_bridge import (
     Hyperparameters,
     ResponseFormat,
     SyncBridge,
-    ToolChoice,
+    ToolChoiceAuto,
 )
 from completion_bridge.vendors import chat_completions
 
@@ -183,7 +186,7 @@ defaults = Hyperparameters(
     temperature=0.2,
     top_p=0.9,
     stop=["<END>"],
-    tool_choice=ToolChoice(mode="auto"),
+    tool_choice=ToolChoiceAuto(type="auto"),
     response_format=ResponseFormat(
         type="json_schema",
         name="answer",
@@ -338,12 +341,24 @@ vLLM `ChatCompletionRequest`가 OpenAI 표준에 더해 선언하는 필드다. 
 
 | 입력 | Chat Completions | Responses | Messages | Gemini |
 |---|---|---|---|---|
-| `ToolChoice(mode="auto")` | `"auto"` | `"auto"` | `{"type":"auto"}` | `{"functionCallingConfig":{"mode":"AUTO"}}` |
-| `ToolChoice(mode="required")` | `"required"` | `"required"` | `{"type":"any"}` | `mode: "ANY"` |
-| `ToolChoice(mode="named", name="f")` | `{"type":"function","function":{"name":"f"}}` | `{"type":"function","name":"f"}` | `{"type":"tool","name":"f"}` | `mode:"ANY"` + `allowedFunctionNames:["f"]` |
+| `{"type":"auto"}` | `"auto"` | `"auto"` | `{"type":"auto"}` | `{"functionCallingConfig":{"mode":"AUTO"}}` |
+| `{"type":"none"}` | `"none"` | `"none"` | `{"type":"none"}` | `mode: "NONE"` |
+| `{"type":"any"}` | `"required"` | `"required"` | `{"type":"any"}` | `mode: "ANY"` |
+| `{"type":"tool","name":"f"}` | `{"type":"function","function":{"name":"f"}}` | `{"type":"function","name":"f"}` | `{"type":"tool","name":"f"}` | `mode:"ANY"` + `allowedFunctionNames:["f"]` |
 | `ResponseFormat(type="text")` | `{"type":"text"}` | `text.format` | 생략 | 생략 |
 | `ResponseFormat(type="json_object")` | `{"type":"json_object"}` | `text.format` | 생략 | 생략 |
 | `ResponseFormat(type="json_schema", ...)` | `response_format.json_schema` (name·strict 포함) | `text.format` (name·strict 포함) | `output_config.format` (schema만) | `responseMimeType` + `responseJsonSchema` |
+
+`tool_choice`는 Anthropic Messages의 `tool_choice` 객체 형식을 받는다. Python에서는 `type`별
+모델 `ToolChoiceAuto`, `ToolChoiceNone`, `ToolChoiceAny`, `ToolChoiceTool`을 쓰거나 같은
+모양의 dict를 넘긴다. `ToolChoice`는 이 넷을 `type`으로 구분하는 타입 별칭이다. `type`은
+필수이고, `name`은 `tool`에서만 필수다. 문자열 축약형과 선언하지 않은 필드는 검증 오류다.
+`merged()`는 `tool_choice`를 필드 단위로 합치지 않고 호출별 값으로 통째로 바꾼다.
+
+`auto`, `any`, `tool`은 선택적 `disable_parallel_tool_use`(bool)를 받는다. Messages에는
+`tool_choice` 안에 그대로, Chat Completions와 Responses에는 반대 값을 `parallel_tool_calls`로
+보낸다. 최상위 `parallel_tool_calls`를 함께 쓰면 두 값이 반대여야 하며 같으면 검증 오류다.
+GenerateContent에는 대응하는 제어가 없어 이 필드를 지정하면 요청 생성 시 `ValueError`다.
 
 Messages와 Gemini에는 `text`/`json_object` 모드에 대응하는 개념이 없어 그 요청에서 빠진다.
 `name`과 `strict`도 받는 API에만 실린다.

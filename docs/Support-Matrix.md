@@ -109,8 +109,8 @@ block은 최종 결과에서 `MappingError`가 된다. 규칙은
 | stop sequence | `stop` | `stop_sequences` | 해당 없음 | `generationConfig.stopSequences` |
 | presence/frequency penalty | 최상위 | 해당 없음 | 해당 없음 | `generationConfig`의 camelCase 필드 |
 | reasoning effort | `reasoning_effort` | `output_config.effort` | `reasoning.effort` | 비동등하므로 전용 `thinkingConfig` 사용 |
-| named tool choice | function wrapper | `type=tool` | function item | `ANY + allowedFunctionNames` |
-| parallel tool 제어 | `parallel_tool_calls` | `disable_parallel_tool_use` 반전 | `parallel_tool_calls` | 공통 자동 투영 안 함 |
+| named tool choice (`{"type":"tool"}`) | function wrapper | `type=tool` | function item | `ANY + allowedFunctionNames` |
+| parallel tool 제어 | `parallel_tool_calls` (`tool_choice.disable_parallel_tool_use` 반전) | `tool_choice.disable_parallel_tool_use` (`parallel_tool_calls` 반전) | `parallel_tool_calls` (`tool_choice.disable_parallel_tool_use` 반전) | `parallel_tool_calls`는 생략, `disable_parallel_tool_use`는 `ValueError` |
 | JSON schema 출력 | `response_format.json_schema` | `output_config.format` | `text.format` | `responseJsonSchema` |
 | service tier | `service_tier` | `anthropic_service_tier` → `service_tier` | `service_tier` | `gemini_service_tier` → `serviceTier` |
 

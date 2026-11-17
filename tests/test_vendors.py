@@ -29,7 +29,7 @@ from completion_bridge import (
     StreamMerger,
     TextBlock,
     ThinkingBlock,
-    ToolChoice,
+    ToolChoiceAny,
     ToolDefinition,
     ToolUseBlock,
     VendorStreamError,
@@ -1030,7 +1030,7 @@ class TestGenerateContent:
         body = make(GEMINI).build_request(
             ["x"],
             tools=[GEMINI_FUNCTION, GEMINI_SEARCH],
-            hyperparameters=Hyperparameters(tool_choice=ToolChoice(mode="required")),
+            hyperparameters=Hyperparameters(tool_choice=ToolChoiceAny(type="any")),
         )
         assert body["toolConfig"] == {
             "functionCallingConfig": {"mode": "ANY"},

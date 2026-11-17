@@ -5,13 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from completion_bridge import (
     Hyperparameters,
     ResponseFormat,
     SyncBridge,
     ToolChoice,
+    ToolChoiceAny,
+    ToolChoiceAuto,
+    ToolChoiceNone,
+    ToolChoiceTool,
+    ToolDefinition,
 )
 from completion_bridge.vendors import (
     ChatCompletionsAdapter,
@@ -23,12 +28,16 @@ from completion_bridge.vendors import (
 BASE = "https://params.invalid"
 
 
-def body(adapter: object, parameters: Hyperparameters) -> dict[str, Any]:
+def body(
+    adapter: object,
+    parameters: Hyperparameters,
+    tools: list[ToolDefinition] | None = None,
+) -> dict[str, Any]:
     return SyncBridge(
         vendor=adapter,  # type: ignore[arg-type]
         base_url=BASE,
         model="m",
-    ).build_request(["질문"], hyperparameters=parameters)
+    ).build_request(["질문"], tools=tools or [], hyperparameters=parameters)
 
 
 VLLM = ChatCompletionsAdapter()
@@ -152,27 +161,6 @@ class TestOwnership:
 class TestTypedObjects:
     """``tool_choice``와 ``response_format``만 대상 모양으로 투영된다."""
 
-    def test_tool_choice_shapes_are_not_assumed_identical(self) -> None:
-        named = Hyperparameters(tool_choice=ToolChoice(mode="named", name="lookup"))
-        assert body(VLLM, named)["tool_choice"] == {
-            "type": "function",
-            "function": {"name": "lookup"},
-        }
-        assert body(responses, named)["tool_choice"] == {"type": "function", "name": "lookup"}
-        assert body(messages, named)["tool_choice"] == {"type": "tool", "name": "lookup"}
-        assert body(GEMINI, named)["toolConfig"] == {
-            "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["lookup"]}
-        }
-
-    def test_messages_none_choice_has_no_parallel_field(self) -> None:
-        params = Hyperparameters(tool_choice=ToolChoice(mode="none"), parallel_tool_calls=False)
-        assert body(messages, params)["tool_choice"] == {"type": "none"}
-        auto = Hyperparameters(tool_choice=ToolChoice(mode="auto"), parallel_tool_calls=False)
-        assert body(messages, auto)["tool_choice"] == {
-            "type": "auto",
-            "disable_parallel_tool_use": True,
-        }
-
     def test_json_schema_is_rendered_per_api(self) -> None:
         schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
         params = Hyperparameters(
@@ -200,6 +188,247 @@ class TestTypedObjects:
         assert body(VLLM, params)["response_format"] == {"type": "json_object"}
         assert "output_config" not in body(messages, params)
         assert "responseMimeType" not in body(GEMINI, params).get("generationConfig", {})
+
+
+class TestToolChoice:
+    """``tool_choice``는 Messages 객체 형식만 받고 네 API의 표현으로 변환된다."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"type": "auto"},
+            {"type": "none"},
+            {"type": "any"},
+            {"type": "tool", "name": "deep-research"},
+            {"type": "auto", "disable_parallel_tool_use": True},
+            {"type": "any", "disable_parallel_tool_use": False},
+            {"type": "tool", "name": "deep-research", "disable_parallel_tool_use": True},
+        ],
+    )
+    def test_messages_shaped_objects_are_accepted(self, value: dict[str, Any]) -> None:
+        params = Hyperparameters.model_validate({"tool_choice": value})
+        assert params.tool_choice is not None
+        assert params.tool_choice.model_dump(exclude_none=True) == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param({"type": "required"}, id="unknown-type"),
+            pytest.param({"name": "lookup"}, id="missing-type"),
+            pytest.param({"type": "tool"}, id="tool-without-name"),
+            pytest.param({"type": "tool", "name": ""}, id="empty-name"),
+            pytest.param({"type": "auto", "name": "lookup"}, id="name-on-auto"),
+            pytest.param({"type": "any", "name": "lookup"}, id="name-on-any"),
+            pytest.param({"type": "none", "name": "lookup"}, id="name-on-none"),
+            pytest.param(
+                {"type": "none", "disable_parallel_tool_use": True}, id="parallel-on-none"
+            ),
+            pytest.param(
+                {"type": "auto", "disable_parallel_tool_use": "true"}, id="parallel-not-bool"
+            ),
+            pytest.param({"type": "auto", "extra": 1}, id="undeclared-field"),
+            pytest.param("auto", id="string-shorthand"),
+            pytest.param({"mode": "auto"}, id="legacy-mode"),
+            pytest.param({"mode": "named", "name": "lookup"}, id="legacy-named"),
+        ],
+    )
+    def test_invalid_objects_are_rejected(self, value: object) -> None:
+        with pytest.raises(ValidationError):
+            Hyperparameters.model_validate({"tool_choice": value})
+
+    def test_json_schema_states_fields_per_type(self) -> None:
+        """공개 JSON Schema가 type별 필수·허용 필드를 런타임 검증과 같게 표현한다."""
+        schema = TypeAdapter(ToolChoice).json_schema()
+        assert schema["discriminator"]["propertyName"] == "type"
+        definitions = schema["$defs"]
+
+        auto = definitions["ToolChoiceAuto"]
+        assert auto["required"] == ["type"]
+        assert sorted(auto["properties"]) == ["disable_parallel_tool_use", "type"]
+        assert auto["additionalProperties"] is False
+
+        any_choice = definitions["ToolChoiceAny"]
+        assert any_choice["required"] == ["type"]
+        assert sorted(any_choice["properties"]) == ["disable_parallel_tool_use", "type"]
+        assert any_choice["additionalProperties"] is False
+
+        tool = definitions["ToolChoiceTool"]
+        assert tool["required"] == ["type", "name"]
+        assert sorted(tool["properties"]) == ["disable_parallel_tool_use", "name", "type"]
+        assert tool["properties"]["name"]["minLength"] == 1
+        assert tool["additionalProperties"] is False
+
+        none = definitions["ToolChoiceNone"]
+        assert none["required"] == ["type"]
+        assert sorted(none["properties"]) == ["type"]
+        assert none["additionalProperties"] is False
+
+        parallel = auto["properties"]["disable_parallel_tool_use"]
+        assert parallel["anyOf"] == [{"type": "boolean"}, {"type": "null"}]
+
+        field = Hyperparameters.model_json_schema()["properties"]["tool_choice"]
+        assert field["anyOf"][0]["discriminator"]["propertyName"] == "type"
+        assert field["anyOf"][1] == {"type": "null"}
+
+    def test_omitted_choice_and_parallel_option_are_not_sent(self) -> None:
+        omitted = Hyperparameters()
+        cleared = Hyperparameters(tool_choice=None)
+        for params in (omitted, cleared):
+            assert "tool_choice" not in body(VLLM, params)
+            assert "tool_choice" not in body(responses, params)
+            assert "tool_choice" not in body(messages, params)
+            assert "toolConfig" not in body(GEMINI, params)
+
+        auto = Hyperparameters(tool_choice=ToolChoiceAuto(type="auto"))
+        assert body(messages, auto)["tool_choice"] == {"type": "auto"}
+        assert "parallel_tool_calls" not in body(VLLM, auto)
+        assert "parallel_tool_calls" not in body(responses, auto)
+
+    def test_auto_is_converted_per_api(self) -> None:
+        params = Hyperparameters(tool_choice=ToolChoiceAuto(type="auto"))
+        assert body(VLLM, params)["tool_choice"] == "auto"
+        assert body(responses, params)["tool_choice"] == "auto"
+        assert body(messages, params)["tool_choice"] == {"type": "auto"}
+        assert body(GEMINI, params)["toolConfig"] == {"functionCallingConfig": {"mode": "AUTO"}}
+
+    def test_none_is_converted_per_api(self) -> None:
+        params = Hyperparameters(tool_choice=ToolChoiceNone(type="none"))
+        assert body(VLLM, params)["tool_choice"] == "none"
+        assert body(responses, params)["tool_choice"] == "none"
+        assert body(messages, params)["tool_choice"] == {"type": "none"}
+        assert body(GEMINI, params)["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
+
+    def test_any_is_converted_per_api(self) -> None:
+        params = Hyperparameters(tool_choice=ToolChoiceAny(type="any"))
+        assert body(VLLM, params)["tool_choice"] == "required"
+        assert body(responses, params)["tool_choice"] == "required"
+        assert body(messages, params)["tool_choice"] == {"type": "any"}
+        assert body(GEMINI, params)["toolConfig"] == {"functionCallingConfig": {"mode": "ANY"}}
+
+    def test_tool_is_converted_per_api(self) -> None:
+        params = Hyperparameters(tool_choice=ToolChoiceTool(type="tool", name="lookup"))
+        assert body(VLLM, params)["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "lookup"},
+        }
+        assert body(responses, params)["tool_choice"] == {"type": "function", "name": "lookup"}
+        assert body(messages, params)["tool_choice"] == {"type": "tool", "name": "lookup"}
+        assert body(GEMINI, params)["toolConfig"] == {
+            "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["lookup"]}
+        }
+
+    def test_named_tool_matches_the_sent_tool_definition(self) -> None:
+        """지정한 이름이 실제로 전송되는 도구 정의의 식별자와 같다."""
+        tool = ToolDefinition(
+            name="deep-research", description="d", input_schema={"type": "object"}
+        )
+        params = Hyperparameters(tool_choice=ToolChoiceTool(type="tool", name="deep-research"))
+
+        chat = body(VLLM, params, [tool])
+        assert chat["tool_choice"]["function"]["name"] == chat["tools"][0]["function"]["name"]
+        responses_body = body(responses, params, [tool])
+        assert responses_body["tool_choice"]["name"] == responses_body["tools"][0]["name"]
+        messages_body = body(messages, params, [tool])
+        assert messages_body["tool_choice"]["name"] == messages_body["tools"][0]["name"]
+        gemini = body(GEMINI, params, [tool])
+        declaration = gemini["tools"][0]["functionDeclarations"][0]
+        allowed = gemini["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"]
+        assert allowed == [declaration["name"]]
+
+    @pytest.mark.parametrize("disable", [True, False])
+    def test_parallel_option_is_sent_per_api(self, disable: bool) -> None:
+        params = Hyperparameters(
+            tool_choice=ToolChoiceAny(type="any", disable_parallel_tool_use=disable)
+        )
+        assert body(messages, params)["tool_choice"] == {
+            "type": "any",
+            "disable_parallel_tool_use": disable,
+        }
+        chat = body(VLLM, params)
+        assert chat["tool_choice"] == "required"
+        assert chat["parallel_tool_calls"] is (not disable)
+        responses_body = body(responses, params)
+        assert responses_body["tool_choice"] == "required"
+        assert responses_body["parallel_tool_calls"] is (not disable)
+
+    @pytest.mark.parametrize("disable", [True, False])
+    def test_top_level_option_with_same_meaning_is_accepted(self, disable: bool) -> None:
+        params = Hyperparameters(
+            tool_choice=ToolChoiceAuto(type="auto", disable_parallel_tool_use=disable),
+            parallel_tool_calls=not disable,
+        )
+        assert body(VLLM, params)["parallel_tool_calls"] is (not disable)
+        assert body(responses, params)["parallel_tool_calls"] is (not disable)
+        assert body(messages, params)["tool_choice"] == {
+            "type": "auto",
+            "disable_parallel_tool_use": disable,
+        }
+
+    @pytest.mark.parametrize("disable", [True, False])
+    def test_conflicting_top_level_option_is_rejected(self, disable: bool) -> None:
+        with pytest.raises(ValidationError, match="conflicts with parallel_tool_calls"):
+            Hyperparameters(
+                tool_choice=ToolChoiceTool(
+                    type="tool", name="lookup", disable_parallel_tool_use=disable
+                ),
+                parallel_tool_calls=disable,
+            )
+
+    def test_conflict_between_default_and_call_override_is_rejected(self) -> None:
+        bridge = SyncBridge(
+            vendor=VLLM,
+            base_url=BASE,
+            model="m",
+            hyperparameters=Hyperparameters(parallel_tool_calls=False),
+        )
+        override = Hyperparameters(
+            tool_choice=ToolChoiceAuto(type="auto", disable_parallel_tool_use=False)
+        )
+        with pytest.raises(ValidationError, match="conflicts with parallel_tool_calls"):
+            bridge.build_request(["질문"], hyperparameters=override)
+
+    @pytest.mark.parametrize("disable", [True, False])
+    def test_generate_content_rejects_parallel_option(self, disable: bool) -> None:
+        params = Hyperparameters(
+            tool_choice=ToolChoiceAuto(type="auto", disable_parallel_tool_use=disable)
+        )
+        with pytest.raises(ValueError, match="not supported by GenerateContent"):
+            body(GEMINI, params)
+
+    def test_top_level_parallel_option_reaches_messages_choice(self) -> None:
+        """``parallel_tool_calls``는 반전되어 Messages tool_choice 안에 들어가고 none에는 없다."""
+        auto = Hyperparameters(tool_choice=ToolChoiceAuto(type="auto"), parallel_tool_calls=False)
+        assert body(messages, auto)["tool_choice"] == {
+            "type": "auto",
+            "disable_parallel_tool_use": True,
+        }
+        none = Hyperparameters(tool_choice=ToolChoiceNone(type="none"), parallel_tool_calls=False)
+        assert body(messages, none)["tool_choice"] == {"type": "none"}
+
+    def test_call_override_replaces_the_whole_choice(self) -> None:
+        """기본값의 name이나 병렬 옵션이 호출별 선택에 남지 않는다."""
+        bridge = SyncBridge(
+            vendor=messages,  # type: ignore[arg-type]
+            base_url=BASE,
+            model="m",
+            hyperparameters=Hyperparameters(
+                tool_choice=ToolChoiceTool(
+                    type="tool", name="lookup", disable_parallel_tool_use=True
+                )
+            ),
+        )
+        none = bridge.build_request(
+            ["질문"], hyperparameters=Hyperparameters(tool_choice=ToolChoiceNone(type="none"))
+        )
+        assert none["tool_choice"] == {"type": "none"}
+        auto = bridge.build_request(["질문"], hyperparameters={"tool_choice": {"type": "auto"}})
+        assert auto["tool_choice"] == {"type": "auto"}
+        untouched = bridge.build_request(["질문"], hyperparameters=Hyperparameters(top_k=5))
+        assert untouched["tool_choice"] == {
+            "type": "tool",
+            "name": "lookup",
+            "disable_parallel_tool_use": True,
+        }
 
 
 class TestMergeAndValidation:

@@ -18,28 +18,73 @@ deprecated), Responses의 ``prompt_cache_retention``, vLLM의 ``max_tokens``가 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 __all__ = [
     "Hyperparameters",
     "ResponseFormat",
     "ToolChoice",
+    "ToolChoiceAny",
+    "ToolChoiceAuto",
+    "ToolChoiceNone",
+    "ToolChoiceTool",
 ]
 
 
-class ToolChoice(BaseModel):
-    """공통 함수 도구 선택 정책.
+class ToolChoiceAuto(BaseModel):
+    """모델이 도구 호출 여부를 고르는 Messages ``{"type": "auto"}`` 선택."""
 
-    네 API가 같은 의도를 서로 다른 wire 모양으로 받는다. 입력이 두 필드짜리라 벤더별 dict를
-    외우게 하는 대신 여기서 투영한다.
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["auto"]
+    disable_parallel_tool_use: StrictBool | None = None
+
+
+class ToolChoiceAny(BaseModel):
+    """제공된 도구 중 하나의 호출을 요구하는 Messages ``{"type": "any"}`` 선택."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["any"]
+    disable_parallel_tool_use: StrictBool | None = None
+
+
+class ToolChoiceTool(BaseModel):
+    """``name``으로 지정한 도구의 호출을 요구하는 Messages ``{"type": "tool"}`` 선택.
+
+    ``name``은 빈 문자열일 수 없다. 그 이름의 도구가 요청에 있는지는 검사하지 않는다.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["auto", "required", "none", "named"] = "auto"
-    name: str | None = None
+    type: Literal["tool"]
+    name: str = Field(min_length=1)
+    disable_parallel_tool_use: StrictBool | None = None
+
+
+class ToolChoiceNone(BaseModel):
+    """도구 호출을 금지하는 Messages ``{"type": "none"}`` 선택. 병렬 호출 필드를 받지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["none"]
+
+
+ToolChoice = Annotated[
+    ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolChoiceNone,
+    Field(discriminator="type"),
+]
+"""공통 함수 도구 선택. Anthropic Messages ``tool_choice`` 객체 형식을 받는다.
+
+``type`` 값으로 네 모델 중 하나를 고른다. 문자열 축약형, ``type`` 누락, 선언하지 않은 필드는
+검증 오류다. ``Hyperparameters``가 요청을 만들 때 대상 API 표현으로 변환한다.
+
+``disable_parallel_tool_use``는 ``None``이면 보내지 않는다. Messages에는 ``tool_choice`` 안에
+그대로, Chat Completions와 Responses에는 반대 값을 최상위 ``parallel_tool_calls``로 보낸다.
+GenerateContent 요청에서는 ``ValueError``다.
+"""
 
 
 class ResponseFormat(BaseModel):
@@ -323,10 +368,23 @@ class Hyperparameters(BaseModel):
         """같은 요청에 함께 실을 수 없는 조합을 거부한다.
 
         조용히 400을 받는 것보다 요청을 만들기 전에 실패하는 편이 낫다.
+        ``tool_choice.disable_parallel_tool_use``와 ``parallel_tool_calls``는 같은 설정을 반대
+        방향으로 표현한다. 둘 다 지정했다면 서로 반대 값이어야 하며, 같은 값이면 충돌로 거부한다.
         """
         if self.previous_response_id is not None and self.conversation is not None:
             raise ValueError(
                 "previous_response_id and conversation cannot be used together (Responses)"
+            )
+        disable = _disable_parallel(self.tool_choice)
+        if (
+            disable is not None
+            and self.parallel_tool_calls is not None
+            and disable == self.parallel_tool_calls
+        ):
+            raise ValueError(
+                f"tool_choice.disable_parallel_tool_use={disable} conflicts with "
+                f"parallel_tool_calls={self.parallel_tool_calls}; "
+                "they must be opposite values when both are set"
             )
         return self
 
@@ -346,6 +404,8 @@ class Hyperparameters(BaseModel):
         "쓰지 않은 것"을 ``model_fields_set``으로 구분하므로, 오른쪽에서 ``exclude_none``을
         걸지 않는다. 그것 없이는 생성자 기본값을 호출별로 해제할 방법이 없다.
 
+        ``tool_choice``는 필드 단위로 합치지 않는다. 호출별 값이 있으면 객체 전체를 바꾼다.
+
         >>> defaults = Hyperparameters(temperature=0.2)
         >>> defaults.merged(Hyperparameters(temperature=None)).temperature is None
         True
@@ -356,6 +416,9 @@ class Hyperparameters(BaseModel):
             return self
         right = self.coerce(override).model_dump(exclude_unset=True)
         left = self.model_dump(exclude_none=True, exclude_unset=True)
+        # type마다 허용 필드가 달라서, 합치면 이전 선택의 name 같은 필드가 남아 검증에 실패한다.
+        if "tool_choice" in right:
+            left.pop("tool_choice", None)
         return type(self).model_validate(_merge(left, right))
 
     def for_vendor(self, family: str, *, name: str | None = None) -> dict[str, Any]:
@@ -378,6 +441,10 @@ class Hyperparameters(BaseModel):
         out = self._owned("chat_completions")
         out.update(self._select(_VLLM_ONLY))
         _put(out, "tool_choice", _tool_choice(self.tool_choice, "chat_completions"))
+        disable = _disable_parallel(self.tool_choice)
+        # 검증에서 충돌을 거부했으므로 parallel_tool_calls를 함께 지정했어도 같은 값이다.
+        if disable is not None:
+            out["parallel_tool_calls"] = not disable
         _put(out, "response_format", _response_format(self.response_format, "chat_completions"))
         return out
 
@@ -386,6 +453,10 @@ class Hyperparameters(BaseModel):
         out = self._owned("responses")
         out.update(self._select(_RESPONSES_ONLY))
         _put(out, "tool_choice", _tool_choice(self.tool_choice, "responses"))
+        disable = _disable_parallel(self.tool_choice)
+        # 검증에서 충돌을 거부했으므로 parallel_tool_calls를 함께 지정했어도 같은 값이다.
+        if disable is not None:
+            out["parallel_tool_calls"] = not disable
         _nest(out, "text", "format", _response_format(self.response_format, "responses"))
         return out
 
@@ -395,6 +466,8 @@ class Hyperparameters(BaseModel):
         for field in _MESSAGES_ONLY:
             _put(out, _MESSAGES_WIRE.get(field, field), getattr(self, field))
         choice = _tool_choice(self.tool_choice, "messages")
+        # ``parallel_tool_calls``의 반대 값을 tool_choice의 필드로 보낸다. 입력에 이미
+        # ``disable_parallel_tool_use``가 있으면 검증상 같은 값이다.
         # ``{"type": "none"}``에는 병렬 호출 필드가 없다.
         if (
             isinstance(choice, dict)
@@ -426,6 +499,12 @@ class Hyperparameters(BaseModel):
         formatted = _response_format(self.response_format, "generate_content")
         if isinstance(formatted, dict) and self.gemini_response_format is None:
             generation.update(formatted)
+        # ``functionCallingConfig``에는 병렬 호출을 제어하는 필드가 없다. 명시값을 버리지 않는다.
+        if _disable_parallel(self.tool_choice) is not None:
+            raise ValueError(
+                "tool_choice.disable_parallel_tool_use is not supported by GenerateContent; "
+                "functionCallingConfig has no parallel function call control"
+            )
         choice = _tool_choice(self.tool_choice, "generate_content")
         if isinstance(choice, dict):
             _nest(out, "toolConfig", "functionCallingConfig", choice["functionCallingConfig"])
@@ -500,34 +579,40 @@ def _merge(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _tool_choice(choice: ToolChoice | None, family: str) -> str | dict[str, Any] | None:
-    """공통 도구 선택을 대상 API의 표현으로 변환하고 이름 없는 지정 호출은 거부한다."""
+    """공통 도구 선택을 대상 API의 ``tool_choice`` 표현으로 변환한다.
+
+    Messages에는 입력 객체에서 값이 있는 필드를 그대로 쓴다. 다른 API에는 ``type``과 ``name``만
+    변환한다. ``disable_parallel_tool_use``는 각 계열의 요청 조립 단계에서 처리한다.
+    """
     if choice is None:
         return None
-    if family in {"chat_completions", "responses"}:
-        if choice.mode != "named":
-            return choice.mode
-        if not choice.name:
-            raise ValueError("ToolChoice(mode='named') requires name")
-        if family == "chat_completions":
-            return {"type": "function", "function": {"name": choice.name}}
-        return {"type": "function", "name": choice.name}
     if family == "messages":
-        kinds = {"required": "any", "named": "tool"}
-        result: dict[str, Any] = {"type": kinds.get(choice.mode, choice.mode)}
-        if choice.mode == "named":
-            if not choice.name:
-                raise ValueError("ToolChoice(mode='named') requires name")
-            result["name"] = choice.name
-        return result
+        return choice.model_dump(exclude_none=True)
+    if family in {"chat_completions", "responses"}:
+        if isinstance(choice, ToolChoiceTool):
+            if family == "chat_completions":
+                return {"type": "function", "function": {"name": choice.name}}
+            return {"type": "function", "name": choice.name}
+        if isinstance(choice, ToolChoiceAny):
+            return "required"
+        return choice.type
     if family == "generate_content":
-        modes = {"auto": "AUTO", "required": "ANY", "none": "NONE", "named": "ANY"}
-        config: dict[str, Any] = {"mode": modes[choice.mode]}
-        if choice.mode == "named":
-            if not choice.name:
-                raise ValueError("ToolChoice(mode='named') requires name")
+        modes = {"auto": "AUTO", "any": "ANY", "tool": "ANY", "none": "NONE"}
+        config: dict[str, Any] = {"mode": modes[choice.type]}
+        if isinstance(choice, ToolChoiceTool):
             config["allowedFunctionNames"] = [choice.name]
         return {"functionCallingConfig": config}
     return None
+
+
+def _disable_parallel(choice: ToolChoice | None) -> bool | None:
+    """도구 선택에 지정한 ``disable_parallel_tool_use`` 값을 반환한다.
+
+    도구 선택이 없거나, ``none``이거나, 그 필드를 지정하지 않았으면 ``None``이다.
+    """
+    if choice is None or isinstance(choice, ToolChoiceNone):
+        return None
+    return choice.disable_parallel_tool_use
 
 
 def _response_format(fmt: ResponseFormat | None, family: str) -> dict[str, Any] | None:

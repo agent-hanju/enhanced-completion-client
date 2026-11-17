@@ -18,7 +18,7 @@ from completion_bridge import (
     SearchResultBlock,
     StreamMerger,
     TextBlock,
-    ToolChoice,
+    ToolChoiceTool,
     ToolDefinition,
     ToolResultBlock,
     ToolUseBlock,
@@ -146,7 +146,7 @@ PARAMETERS = Hyperparameters(
     stop=["<END>"],
     stop_sequences=["<END>"],
     # 대상 모양으로 투영되는 두 타입 객체
-    tool_choice=ToolChoice(mode="named", name="lookup"),
+    tool_choice=ToolChoiceTool(type="tool", name="lookup"),
     response_format=ResponseFormat(
         type="json_schema",
         name="answer",

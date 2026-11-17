@@ -27,10 +27,19 @@ from completion_bridge import (
     Bridge,
     HubMessage,
     HubResponse,
+    Hyperparameters,
     StreamMerger,
     SyncBridge,
     TextBlock,
     ThinkingBlock,
+    ToolChoice,
+    ToolChoiceAny,
+    ToolChoiceAuto,
+    ToolChoiceNone,
+    ToolChoiceTool,
+    ToolDefinition,
+    ToolUseBlock,
+    TransportError,
 )
 from completion_bridge.vendors import chat_completions
 
@@ -318,6 +327,101 @@ class TestLiveStreaming:
         assert result.text.strip()
         assert all(isinstance(b, TextBlock) for b in result.content if b.type == "text")
         print(f"\n[live] sync text={result.text!r}")
+
+
+WEATHER_TOOL = ToolDefinition(
+    name="get_weather",
+    description="한 도시의 현재 날씨를 조회한다. 도시마다 따로 호출한다.",
+    input_schema={
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+)
+TIME_TOOL = ToolDefinition(
+    name="get_time",
+    description="한 도시의 현재 시각을 조회한다",
+    input_schema={
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+)
+
+
+async def _call_with_choice(prompt: str, choice: ToolChoice) -> list[ToolUseBlock]:
+    """두 도구와 지정한 도구 선택으로 실제 엔드포인트를 호출하고 도구 호출 블록을 반환한다.
+
+    각 호출의 이름이 요청에 선언한 도구인지, 인자가 유효한 JSON인지 함께 확인한다.
+    """
+    parameters = Hyperparameters(
+        tool_choice=choice,
+        max_completion_tokens=400,
+        temperature=0.0,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        result = await _bridge(client).complete(
+            [prompt], tools=[WEATHER_TOOL, TIME_TOOL], hyperparameters=parameters
+        )
+    assert result is not None
+    calls: list[ToolUseBlock] = []
+    for block in result.content:
+        if isinstance(block, ToolUseBlock):
+            assert block.name in {WEATHER_TOOL.name, TIME_TOOL.name}
+            json.loads(block.input_json or "{}")
+            calls.append(block)
+    print(
+        f"\n[live] tool_choice={choice.model_dump(exclude_none=True)} "
+        f"stop_reason={result.stop_reason} calls={len(calls)} text={result.text[:60]!r}"
+    )
+    return calls
+
+
+class TestLiveToolChoice:
+    """Messages 형식 ``tool_choice``를 실제 vLLM 요청으로 변환해 서버가 수용하고 따르는지 본다.
+
+    ``any``와 ``tool``은 vLLM이 structured output으로 호출을 강제한다. ``auto``는 모델이 고르므로
+    호출 여부를 요구하지 않는다.
+    """
+
+    async def test_auto_is_accepted(self) -> None:
+        await _call_with_choice("서울 날씨 알려줘", ToolChoiceAuto(type="auto"))
+
+    async def test_none_returns_no_tool_call(self) -> None:
+        calls = await _call_with_choice("서울 날씨 알려줘", ToolChoiceNone(type="none"))
+        assert calls == []
+
+    async def test_any_forces_a_tool_call(self) -> None:
+        calls = await _call_with_choice("안녕?", ToolChoiceAny(type="any"))
+        assert calls
+
+    async def test_tool_forces_the_named_tool(self) -> None:
+        """날씨를 물어도 지정한 ``get_time``만 호출한다."""
+        choice = ToolChoiceTool(type="tool", name=TIME_TOOL.name)
+        calls = await _call_with_choice("서울 날씨 알려줘", choice)
+        assert calls
+        for call in calls:
+            assert call.name == TIME_TOOL.name
+
+    async def test_undeclared_tool_name_is_rejected_by_the_server(self) -> None:
+        """bridge는 이름을 검사하거나 auto로 바꾸지 않고 서버 오류를 그대로 전달한다."""
+        choice = ToolChoiceTool(type="tool", name="deep-research")
+        with pytest.raises(TransportError) as raised:
+            await _call_with_choice("서울 날씨 알려줘", choice)
+        assert raised.value.status_code == 400
+
+    async def test_disable_parallel_tool_use_keeps_one_call(self) -> None:
+        """``parallel_tool_calls=false``로 변환되어 서버가 첫 호출만 남긴다."""
+        prompt = "서울, 부산, 대구의 날씨를 각각 get_weather로 동시에 조회해줘."
+        allowed = await _call_with_choice(
+            prompt, ToolChoiceAuto(type="auto", disable_parallel_tool_use=False)
+        )
+        disabled = await _call_with_choice(
+            prompt, ToolChoiceAuto(type="auto", disable_parallel_tool_use=True)
+        )
+        assert len(disabled) <= 1
+        assert len(allowed) >= len(disabled)
 
 
 class TestLiveTokenCount:
